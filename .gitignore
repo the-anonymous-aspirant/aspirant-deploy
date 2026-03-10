@@ -1,0 +1,5 @@
+.env
+.env.local
+.env.*.local
+.DS_Store
+docker-compose.override.yml
