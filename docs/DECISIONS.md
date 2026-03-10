@@ -43,3 +43,24 @@
 - Explicit `name:` on each volume (rejected: harder to maintain, must update every volume definition)
 - Rename deploy directory to `aspirant-online` (rejected: confusing, directory name should match repo name)
 - External volumes (rejected: requires manual volume creation, more operational steps)
+
+### Bind mounts on RAID1 for bulk storage
+
+**Context:** The host has a 98 GB SSD (root `/`) and a 1.8 TB RAID1 array (`/data`). Docker volumes for file uploads, audio recordings, and translator models were stored on the SSD alongside the OS and database.
+
+**Decision:** Move filedata, audiodata, and translatordata from Docker named volumes to bind mounts on `/data/aspirant/`. Keep PostgreSQL (`pgdata`) on the SSD for I/O performance.
+
+**Layout:**
+- `/data/aspirant/files` → server `/data/files`
+- `/data/aspirant/audio` → transcriber `/data/audio`
+- `/data/aspirant/models` → translator `/data/models`
+
+**Alternatives considered:**
+- Move everything including PostgreSQL to RAID1 (rejected: database benefits from SSD random I/O)
+- Relocate Docker data directory to `/data/docker` (rejected: over-engineered, only bulk data needs the space)
+
+**Consequences:**
+- 1.8 TB available for uploads, recordings, and models (was 98 GB)
+- RAID1 provides disk redundancy for user data
+- PostgreSQL retains SSD performance
+- Old named volumes (`aspirant-online_filedata`, `aspirant-online_audiodata`, `aspirant-online_translatordata`) removed
