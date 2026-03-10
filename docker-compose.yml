@@ -27,6 +27,7 @@ services:
       COMMANDER_URL: http://commander:8000
       TRANSLATOR_URL: http://translator:8000
       MONITOR_URL: http://monitor:8000
+      KIWIX_URL: http://kiwix:8080
     env_file:
       - .env
     volumes:
@@ -87,6 +88,13 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /data:/host/data:ro
+
+  kiwix:
+    image: kiwix/kiwix-serve:latest
+    restart: unless-stopped
+    command: --port 8080 --urlRootLocation /api/wikipedia /data/wikipedia_en_all_maxi_2026-02.zim
+    volumes:
+      - /data/aspirant/kiwix:/data:ro
 
 volumes:
   pgdata:
