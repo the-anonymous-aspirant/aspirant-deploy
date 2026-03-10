@@ -32,3 +32,14 @@
 **Alternatives considered:**
 - Compose files in each service repo (rejected: no single place to manage the full stack)
 - Git submodules (rejected: adds complexity, painful merge workflows)
+
+### COMPOSE_PROJECT_NAME for volume compatibility
+
+**Context:** Docker Compose prefixes volume and network names with the project name (defaults to directory name). The old monorepo created volumes like `aspirant-online_pgdata`. The new deploy repo would create `aspirant-deploy_pgdata`, resulting in empty volumes and data loss on migration.
+
+**Decision:** Set `COMPOSE_PROJECT_NAME=aspirant-online` in `.env` so all volume, network, and container name prefixes remain identical to the old deployment.
+
+**Alternatives considered:**
+- Explicit `name:` on each volume (rejected: harder to maintain, must update every volume definition)
+- Rename deploy directory to `aspirant-online` (rejected: confusing, directory name should match repo name)
+- External volumes (rejected: requires manual volume creation, more operational steps)
