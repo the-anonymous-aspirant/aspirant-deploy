@@ -30,7 +30,7 @@ services:
     env_file:
       - .env
     volumes:
-      - filedata:/data/files
+      - /data/aspirant/files:/data/files
     depends_on:
       postgres:
         condition: service_healthy
@@ -53,7 +53,7 @@ services:
       AUDIO_STORAGE_PATH: /data/audio
       WHISPER_MODEL: base
     volumes:
-      - audiodata:/data/audio
+      - /data/aspirant/audio:/data/audio
     depends_on:
       postgres:
         condition: service_healthy
@@ -76,7 +76,7 @@ services:
     ports:
       - "8084:8000"
     volumes:
-      - translatordata:/data/models
+      - /data/aspirant/models:/data/models
     mem_limit: 2g
 
   monitor:
@@ -89,6 +89,3 @@ services:
 
 volumes:
   pgdata:
-  filedata:
-  audiodata:
-  translatordata:
