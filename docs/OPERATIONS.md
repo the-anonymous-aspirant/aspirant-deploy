@@ -66,7 +66,25 @@ docker compose -f docker-compose.dev.yml up -d translator
 
 ## Testing
 
-### Health checks
+### Integration test suite
+
+A comprehensive integration test script validates cross-service connectivity in three phases: direct health checks, proxy routes through the Go server, and data flow smoke tests.
+
+```bash
+# Run all integration tests (services must already be running)
+./tests/integration.sh
+
+# Show usage and available environment overrides
+./tests/integration.sh --help
+```
+
+The script uses configurable retries (default: 30 attempts, 2 s apart) so it can be run immediately after `docker compose up -d` while services are still starting. Override defaults with environment variables:
+
+```bash
+HEALTH_RETRIES=10 HEALTH_SLEEP=5 ./tests/integration.sh
+```
+
+### Quick health checks
 
 ```bash
 curl localhost:8081/health    # server
