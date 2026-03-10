@@ -104,8 +104,6 @@ services:
   kiwix:
     image: kiwix/kiwix-serve:latest
     command: --port 8080 --urlRootLocation /api/wikipedia /data/wikipedia_en_all_maxi_2026-02.zim
-    ports:
-      - "8086:8080"
     volumes:
       - kiwixdata-dev:/data:ro
 
