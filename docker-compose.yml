@@ -90,7 +90,7 @@ services:
       - /data:/host/data:ro
 
   kiwix:
-    image: kiwix/kiwix-serve:latest
+    image: ghcr.io/kiwix/kiwix-serve:latest
     restart: unless-stopped
     command: --port 8080 --urlRootLocation /api/wikipedia /data/wikipedia_en_all_maxi_2026-02.zim
     volumes:
