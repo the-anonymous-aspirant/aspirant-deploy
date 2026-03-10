@@ -26,6 +26,7 @@ services:
       TRANSCRIBER_URL: http://transcriber:8000
       COMMANDER_URL: http://commander:8000
       TRANSLATOR_URL: http://translator:8000
+      MONITOR_URL: http://monitor:8000
     env_file:
       - .env
     volumes:
@@ -77,6 +78,14 @@ services:
     volumes:
       - translatordata:/data/models
     mem_limit: 2g
+
+  monitor:
+    image: ghcr.io/the-anonymous-aspirant/aspirant-monitor:latest
+    restart: unless-stopped
+    ports:
+      - "8085:8000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
 
 volumes:
   pgdata:
