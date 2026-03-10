@@ -93,8 +93,6 @@ services:
     image: kiwix/kiwix-serve:latest
     restart: unless-stopped
     command: --port 8080 --urlRootLocation /api/wikipedia /data/wikipedia_en_all_maxi_2026-02.zim
-    ports:
-      - "8086:8080"
     volumes:
       - /data/aspirant/kiwix:/data:ro
 
