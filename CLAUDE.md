@@ -11,9 +11,14 @@ This is the deployment and orchestration repo for the Aspirant platform. It cont
 - **.env.example** — Environment variable template
 - **docs/** — Platform-wide architecture and connection documentation
 
-## Conventions
+## Standards
 
-Follow [aspirant-meta](https://github.com/the-anonymous-aspirant/aspirant-meta) for development philosophy, naming conventions, and documentation standards.
+All Aspirant platform repositories follow the conventions in [aspirant-meta](https://github.com/the-anonymous-aspirant/aspirant-meta):
+
+- **Development philosophy** — Iterative MVPs, spec-first design, test coverage expectations
+- **Documentation standards** — Every repo must have SPEC, ARCHITECTURE, OPERATIONS, CHANGELOG, DECISIONS in `docs/`
+- **Naming conventions** — Repository naming (`aspirant-{service}`), branch naming, commit message format
+- **Infrastructure patterns** — Dockerfile conventions, health endpoint requirements, environment variable naming
 
 ## Service Repos
 
