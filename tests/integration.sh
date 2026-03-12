@@ -21,6 +21,9 @@ SERVER_PORT="${SERVER_PORT:-8081}"
 TRANSCRIBER_PORT="${TRANSCRIBER_PORT:-8082}"
 COMMANDER_PORT="${COMMANDER_PORT:-8083}"
 TRANSLATOR_PORT="${TRANSLATOR_PORT:-8084}"
+MONITOR_PORT="${MONITOR_PORT:-8085}"
+REMARKABLE_PORT="${REMARKABLE_PORT:-8086}"
+NGINX_PORT="${NGINX_PORT:-80}"
 
 BASE_URL="http://localhost"
 
@@ -64,6 +67,9 @@ Environment variables (defaults in parentheses):
     TRANSCRIBER_PORT Transcriber port (8082)
     COMMANDER_PORT   Commander port (8083)
     TRANSLATOR_PORT  Translator port (8084)
+    MONITOR_PORT     Monitor port (8085)
+    REMARKABLE_PORT  Remarkable port (8086)
+    NGINX_PORT       Nginx port (80)
     BOOTSTRAP_USER   Username for test admin user (integration_admin)
     BOOTSTRAP_PASS   Password for test admin user (integration_pass_42)
 
@@ -71,6 +77,7 @@ Phases:
     1. Health checks     — Direct /health on every service (with retry)
     2. Service proxy     — Proxy health routes through the Go server (requires auth)
     3. Data flow smoke   — Write/read tasks via commander, query translator languages
+    4. Nginx proxy       — Verify nginx can reach the Go server (catches DNS caching)
 
 Exit codes:
     0   All critical tests passed
@@ -129,10 +136,12 @@ declare -A HEALTH_ENDPOINTS=(
     ["transcriber"]="${BASE_URL}:${TRANSCRIBER_PORT}/health"
     ["commander"]="${BASE_URL}:${COMMANDER_PORT}/health"
     ["translator"]="${BASE_URL}:${TRANSLATOR_PORT}/health"
+    ["monitor"]="${BASE_URL}:${MONITOR_PORT}/health"
+    ["remarkable"]="${BASE_URL}:${REMARKABLE_PORT}/health"
 )
 
 PHASE1_OK=true
-for svc in server transcriber commander translator; do
+for svc in server transcriber commander translator monitor remarkable; do
     url="${HEALTH_ENDPOINTS[$svc]}"
     if wait_for_health "$url" "$svc"; then
         pass "$svc health (${url})"
@@ -179,6 +188,7 @@ if [[ -z "$TOKEN" ]]; then
     skip "GET /transcriber/health (proxy)"
     skip "GET /commander/health (proxy)"
     skip "GET /translator/health (proxy)"
+    skip "GET /remarkable/health (proxy)"
 else
     AUTH_HEADER="Authorization: Bearer ${TOKEN}"
 
@@ -211,6 +221,16 @@ else
     else
         fail "GET /translator/health (proxy, HTTP ${http_code})"
     fi
+
+    # Remarkable health through proxy (Admin route)
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time "$REQUEST_TIMEOUT" \
+        -H "$AUTH_HEADER" \
+        "${BASE_URL}:${SERVER_PORT}/remarkable/health" 2>/dev/null || true)
+    if [[ "$http_code" =~ ^2 ]]; then
+        pass "GET /remarkable/health (proxy, HTTP ${http_code})"
+    else
+        fail "GET /remarkable/health (proxy, HTTP ${http_code})"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -229,10 +249,7 @@ else
     fail "GET /tasks from commander — unexpected response"
 fi
 
-# 3b. POST a test task to commander via its process endpoint is not suitable for
-#     creating individual tasks directly, but the tasks endpoint is read-only from
-#     the HTTP API (tasks are created by the poller). Instead, verify the vocabulary
-#     endpoint works (proves the service is fully operational).
+# 3b. Verify the vocabulary endpoint works (proves the service is fully operational).
 vocab_resp=$(curl -s --max-time "$REQUEST_TIMEOUT" \
     "${BASE_URL}:${COMMANDER_PORT}/vocabulary" 2>/dev/null || true)
 if echo "$vocab_resp" | grep -q '"grammar"'; then
@@ -242,8 +259,6 @@ else
 fi
 
 # 3c. GET languages from translator
-languages_resp=$(curl -s --max-time "$REQUEST_TIMEOUT" \
-    "${BASE_URL}:${TRANSLATOR_PORT}/languages" 2>/dev/null || true)
 http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time "$REQUEST_TIMEOUT" \
     "${BASE_URL}:${TRANSLATOR_PORT}/languages" 2>/dev/null || true)
 if [[ "$http_code" =~ ^2 ]]; then
@@ -252,7 +267,16 @@ else
     fail "GET /languages from translator (HTTP ${http_code})"
 fi
 
-# 3d. If we have a token, test proxy data routes through the server as well
+# 3d. GET remarkable sync status (proves service can read/write data volume)
+http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time "$REQUEST_TIMEOUT" \
+    "${BASE_URL}:${REMARKABLE_PORT}/sync/status" 2>/dev/null || true)
+if [[ "$http_code" =~ ^2 ]]; then
+    pass "GET /sync/status from remarkable (HTTP ${http_code})"
+else
+    fail "GET /sync/status from remarkable (HTTP ${http_code})"
+fi
+
+# 3e. If we have a token, test proxy data routes through the server as well
 if [[ -n "$TOKEN" ]]; then
     AUTH_HEADER="Authorization: Bearer ${TOKEN}"
 
@@ -275,9 +299,61 @@ if [[ -n "$TOKEN" ]]; then
     else
         fail "GET /translator/languages (proxy, HTTP ${proxy_lang_code})"
     fi
+
+    # Remarkable tree through proxy
+    proxy_tree_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time "$REQUEST_TIMEOUT" \
+        -H "$AUTH_HEADER" \
+        "${BASE_URL}:${SERVER_PORT}/remarkable/tree" 2>/dev/null || true)
+    if [[ "$proxy_tree_code" =~ ^2 ]]; then
+        pass "GET /remarkable/tree (proxy, HTTP ${proxy_tree_code})"
+    else
+        fail "GET /remarkable/tree (proxy, HTTP ${proxy_tree_code})"
+    fi
 else
     skip "GET /commander/tasks (proxy) — no token"
     skip "GET /translator/languages (proxy) — no token"
+    skip "GET /remarkable/tree (proxy) — no token"
+fi
+
+# ---------------------------------------------------------------------------
+# Phase 4: Nginx Reverse Proxy (catches DNS caching issues)
+# ---------------------------------------------------------------------------
+separator "Phase 4: Nginx Reverse Proxy"
+
+# This phase verifies that the nginx client container can reach the Go server.
+# If a backend service was restarted without also restarting the client,
+# nginx will have a stale DNS entry and return 502 Bad Gateway.
+
+nginx_health_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time "$REQUEST_TIMEOUT" \
+    "${BASE_URL}:${NGINX_PORT}/api/health" 2>/dev/null || true)
+if [[ "$nginx_health_code" =~ ^2 ]]; then
+    pass "GET /api/health (via nginx, HTTP ${nginx_health_code})"
+else
+    fail "GET /api/health (via nginx, HTTP ${nginx_health_code}) — nginx may have stale DNS; restart client container"
+fi
+
+# Test a static asset route through nginx (verifies nginx itself is serving)
+nginx_static_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time "$REQUEST_TIMEOUT" \
+    "${BASE_URL}:${NGINX_PORT}/" 2>/dev/null || true)
+if [[ "$nginx_static_code" =~ ^2 ]]; then
+    pass "GET / (nginx static, HTTP ${nginx_static_code})"
+else
+    fail "GET / (nginx static, HTTP ${nginx_static_code})"
+fi
+
+# If we have a token, also test an authenticated proxy route through nginx
+if [[ -n "$TOKEN" ]]; then
+    AUTH_HEADER="Authorization: Bearer ${TOKEN}"
+    nginx_proxy_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time "$REQUEST_TIMEOUT" \
+        -H "$AUTH_HEADER" \
+        "${BASE_URL}:${NGINX_PORT}/api/transcriber/health" 2>/dev/null || true)
+    if [[ "$nginx_proxy_code" =~ ^2 ]]; then
+        pass "GET /api/transcriber/health (nginx→server→transcriber, HTTP ${nginx_proxy_code})"
+    else
+        fail "GET /api/transcriber/health (nginx→server→transcriber, HTTP ${nginx_proxy_code})"
+    fi
+else
+    skip "GET /api/transcriber/health (nginx full chain) — no token"
 fi
 
 # ---------------------------------------------------------------------------
