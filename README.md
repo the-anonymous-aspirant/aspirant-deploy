@@ -55,7 +55,7 @@ Orchestration and deployment configuration for the Aspirant platform. This repo 
 | **commander** | [aspirant-commander](https://github.com/the-anonymous-aspirant/aspirant-commander) | 8083→8000 | Python, FastAPI | tasks, notes | - |
 | **translator** | [aspirant-translator](https://github.com/the-anonymous-aspirant/aspirant-translator) | 8084→8000 | Python, FastAPI, Argos Translate | - | translatordata |
 | **monitor** | [aspirant-monitor](https://github.com/the-anonymous-aspirant/aspirant-monitor) | 8085→8000 | Python, FastAPI | - | docker.sock (ro), /data (ro) |
-| **remarkable** | [aspirant-online](https://github.com/the-anonymous-aspirant/aspirant-online) (remarkable/) | 8086→8000 | Python, FastAPI, rmscene, rmc, cairosvg | - | remarkabledata |
+| **remarkable** | [aspirant-remarkable](https://github.com/the-anonymous-aspirant/aspirant-remarkable) | 8086→8000 | Python, FastAPI, rmscene, rmc, cairosvg | - | remarkabledata |
 | **kiwix** | [kiwix-serve](https://github.com/kiwix/kiwix-serve) (3rd party) | internal 8080 | C++, libzim | - | kiwixdata (ro) |
 | **postgres** | (standard image) | 5432 | PostgreSQL 16 | all tables | pgdata |
 
@@ -127,7 +127,7 @@ Requires all service repos cloned as siblings:
 ├── aspirant-commander/
 ├── aspirant-translator/
 ├── aspirant-monitor/
-└── aspirant-online/        ← remarkable service lives here
+└── aspirant-remarkable/     ← remarkable service
 ```
 
 ```bash
@@ -235,7 +235,7 @@ docker compose logs -f  # verify startup
    docker compose up -d --force-recreate
    ```
 
-3. **remarkable uses a different image naming convention.** Most services use `ghcr.io/.../aspirant-{service}:latest`, but remarkable is built from the aspirant-online monorepo and uses `ghcr.io/.../aspirant-online-remarkable:latest`.
+3. **Image naming follows the polyrepo.** Each service has its own repository and produces `ghcr.io/the-anonymous-aspirant/aspirant-{service}:latest`. For example, `aspirant-server`, `aspirant-client`, `aspirant-transcriber`, `aspirant-commander`, `aspirant-translator`, `aspirant-remarkable`, `aspirant-monitor`.
 
 4. **Monitor needs Docker socket access.** The monitor service mounts `/var/run/docker.sock` read-only to inspect container status and `/data` read-only for disk usage reporting.
 
@@ -244,9 +244,9 @@ docker compose logs -f  # verify startup
 ## Related Repositories
 
 - [aspirant-meta](https://github.com/the-anonymous-aspirant/aspirant-meta) — Development conventions, philosophy, infrastructure standards
-- [aspirant-online](https://github.com/the-anonymous-aspirant/aspirant-online) — Source for remarkable, client, server (monorepo with CI)
 - [aspirant-server](https://github.com/the-anonymous-aspirant/aspirant-server) — Go API gateway
 - [aspirant-client](https://github.com/the-anonymous-aspirant/aspirant-client) — Vue.js frontend
+- [aspirant-remarkable](https://github.com/the-anonymous-aspirant/aspirant-remarkable) — reMarkable rendering and sync service
 - [aspirant-transcriber](https://github.com/the-anonymous-aspirant/aspirant-transcriber) — Whisper transcription service
 - [aspirant-commander](https://github.com/the-anonymous-aspirant/aspirant-commander) — Voice command parser
 - [aspirant-translator](https://github.com/the-anonymous-aspirant/aspirant-translator) — Argos Translate service
