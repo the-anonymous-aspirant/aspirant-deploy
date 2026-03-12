@@ -100,7 +100,7 @@ services:
       - /data/aspirant/kiwix:/data:ro
 
   remarkable:
-    image: ghcr.io/the-anonymous-aspirant/aspirant-online-remarkable:latest
+    image: ghcr.io/the-anonymous-aspirant/aspirant-remarkable:latest
     restart: unless-stopped
     ports:
       - "8086:8000"
