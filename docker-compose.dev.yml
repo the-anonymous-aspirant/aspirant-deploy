@@ -110,8 +110,8 @@ services:
 
   remarkable:
     build:
-      context: ../aspirant-online/remarkable
-      dockerfile: Dockerfile-Remarkable
+      context: ../aspirant-remarkable
+      dockerfile: Dockerfile
     ports:
       - "8086:8000"
     volumes:
