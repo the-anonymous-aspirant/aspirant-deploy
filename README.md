@@ -16,55 +16,47 @@ Orchestration and deployment configuration for the Aspirant platform. This repo 
                                     ▼
                          ┌─────────────────────┐
          ┌──────────────▶│   aspirant-server    │◀──────────────┐
-         │               │   Go / Gin           │               │
-         │               │   Port 8081 → 8080   │               │
-         │               └──────────┬───────────┘               │
-         │                          │                           │
-     HTTP proxy               HTTP proxy                   HTTP proxy
-         │                          │                           │
-         ▼                          ▼                           ▼
-┌─────────────────┐    ┌────────────────────┐    ┌─────────────────────┐
-│ aspirant-       │    │ aspirant-          │    │ aspirant-           │
-│ transcriber     │    │ commander          │    │ translator          │
-│ FastAPI+Whisper │    │ FastAPI+Parser     │    │ FastAPI+Argos       │
-│ Port 8082→8000  │    │ Port 8083→8000     │    │ Port 8084→8000      │
-│                 │    │                    │    │                     │
-│ Volume:         │    │                    │    │ Volume:             │
-│ audiodata       │    │                    │    │ translatordata      │
-└────────┬────────┘    └────────┬───────────┘    └─────────────────────┘
-         │                      │
-         ▼                      ▼
-┌──────────────────────────────────────────┐
-│              PostgreSQL 16               │
-│              Port 5432                   │
-│              Volume: pgdata              │
-│                                          │
+         │       ┌──────▶│   Go / Gin           │◀──────┐       │
+         │       │       │   Port 8081 → 8080   │       │       │
+         │       │       └──────────┬───────────┘       │       │
+         │       │                  │                    │       │
+     HTTP proxy  │            HTTP proxy            HTTP proxy   │
+         │       │                  │                    │       │
+         ▼       ▼                  ▼                    ▼       ▼
+┌──────────┐ ┌──────────┐ ┌──────────────┐ ┌──────────┐ ┌──────────┐
+│transcriber│ │commander │ │  translator  │ │ monitor  │ │remarkable│
+│FastAPI    │ │FastAPI   │ │ FastAPI      │ │ FastAPI  │ │ FastAPI  │
+│+Whisper   │ │+Parser   │ │ +Argos      │ │ +Docker  │ │ +rmc     │
+│8082→8000  │ │8083→8000 │ │ 8084→8000   │ │8085→8000 │ │8086→8000 │
+└─────┬─────┘ └────┬─────┘ └─────────────┘ └──────────┘ └──────────┘
+      │            │
+      ▼            ▼
+┌──────────────────────────────────────────┐   ┌──────────────────┐
+│              PostgreSQL 16               │   │     Kiwix        │
+│              Port 5432                   │   │  Wikipedia serve  │
+│              Volume: pgdata              │   │  (no proxy)      │
+│                                          │   └──────────────────┘
 │  Tables:                                 │
-│  ├─ users, roles (server)                │
-│  ├─ messages, game_scores (server)       │
-│  ├─ ludde_feeding_times (server)         │
-│  ├─ voice_messages (transcriber)         │
+│  ├─ users, roles (server)                │   ┌──────────────────┐
+│  ├─ messages, game_scores (server)       │   │     AWS S3       │
+│  ├─ ludde_feeding_times (server)         │   │  (asset storage) │
+│  ├─ voice_messages (transcriber)         │   └──────────────────┘
 │  └─ tasks, notes (commander)             │
 └──────────────────────────────────────────┘
-
-          ┌──────────────────┐
-          │     AWS S3       │
-          │  (asset storage) │
-          └──────────────────┘
-              ▲
-              │ server reads/writes
-              │ assets via S3 SDK
 ```
 
 ## Service Map
 
 | Service | Repository | Port | Tech | Database | Volumes |
 |---------|-----------|------|------|----------|---------|
-| **client** | [aspirant-client](https://github.com/the-anonymous-aspirant/aspirant-client) | 80 | Vue.js 3, Nginx | - | - |
+| **client** | [aspirant-client](https://github.com/the-anonymous-aspirant/aspirant-client) | 80, 8999 | Vue.js 3, Nginx | - | - |
 | **server** | [aspirant-server](https://github.com/the-anonymous-aspirant/aspirant-server) | 8081→8080 | Go, Gin, GORM | users, roles, messages, game_scores, ludde_feeding_times | filedata |
 | **transcriber** | [aspirant-transcriber](https://github.com/the-anonymous-aspirant/aspirant-transcriber) | 8082→8000 | Python, FastAPI, Whisper | voice_messages | audiodata |
 | **commander** | [aspirant-commander](https://github.com/the-anonymous-aspirant/aspirant-commander) | 8083→8000 | Python, FastAPI | tasks, notes | - |
 | **translator** | [aspirant-translator](https://github.com/the-anonymous-aspirant/aspirant-translator) | 8084→8000 | Python, FastAPI, Argos Translate | - | translatordata |
+| **monitor** | [aspirant-monitor](https://github.com/the-anonymous-aspirant/aspirant-monitor) | 8085→8000 | Python, FastAPI | - | docker.sock (ro), /data (ro) |
+| **remarkable** | [aspirant-online](https://github.com/the-anonymous-aspirant/aspirant-online) (remarkable/) | 8086→8000 | Python, FastAPI, rmscene, rmc, cairosvg | - | remarkabledata |
+| **kiwix** | [kiwix-serve](https://github.com/kiwix/kiwix-serve) (3rd party) | internal 8080 | C++, libzim | - | kiwixdata (ro) |
 | **postgres** | (standard image) | 5432 | PostgreSQL 16 | all tables | pgdata |
 
 ## How Services Connect
@@ -78,6 +70,9 @@ The Go server acts as an API gateway. It proxies requests to microservices using
 | `TRANSCRIBER_URL` | `http://transcriber:8000` | Voice transcription |
 | `COMMANDER_URL` | `http://commander:8000` | Command parsing |
 | `TRANSLATOR_URL` | `http://translator:8000` | Text translation |
+| `MONITOR_URL` | `http://monitor:8000` | System monitoring |
+| `KIWIX_URL` | `http://kiwix:8080` | Wikipedia offline |
+| `REMARKABLE_URL` | `http://remarkable:8000` | reMarkable notebooks |
 
 Docker Compose networking resolves service names (e.g., `transcriber`) to container IPs automatically.
 
@@ -96,7 +91,7 @@ Each service owns its tables and manages its own schema (auto-migrate on startup
 - **Server (GORM):** users, roles, messages, game_scores, ludde_feeding_times
 - **Transcriber (SQLAlchemy):** voice_messages
 - **Commander (SQLAlchemy):** tasks, notes
-- **Translator:** no database (stateless)
+- **Translator, Monitor, Remarkable, Kiwix:** no database (stateless)
 
 ### Data Flow: Voice → Command
 
@@ -130,7 +125,9 @@ Requires all service repos cloned as siblings:
 ├── aspirant-client/
 ├── aspirant-transcriber/
 ├── aspirant-commander/
-└── aspirant-translator/
+├── aspirant-translator/
+├── aspirant-monitor/
+└── aspirant-online/        ← remarkable service lives here
 ```
 
 ```bash
@@ -144,17 +141,29 @@ docker compose -f docker-compose.dev.yml up -d
 ### Health Checks
 
 ```bash
-# All services
+# All services (direct access)
 curl http://localhost:8081/health          # server
 curl http://localhost:8082/health          # transcriber
 curl http://localhost:8083/health          # commander
 curl http://localhost:8084/health          # translator
+curl http://localhost:8085/health          # monitor
+curl http://localhost:8086/health          # remarkable
 
 # Via server proxy (requires auth token)
 curl -H "Authorization: Bearer $TOKEN" http://localhost:8081/transcriber/health
 curl -H "Authorization: Bearer $TOKEN" http://localhost:8081/commander/health
 curl -H "Authorization: Bearer $TOKEN" http://localhost:8081/translator/health
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8081/remarkable/health
 ```
+
+### Integration Tests
+
+```bash
+# Run after docker compose up -d
+./tests/integration.sh
+```
+
+Tests validate direct health endpoints, proxied routes through the Go server, data flow smoke tests, and nginx reverse proxy connectivity.
 
 ## Volumes
 
@@ -163,7 +172,9 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:8081/translator/health
 | `pgdata` | `/var/lib/postgresql/data` | Database storage | High |
 | `filedata` | `/data/files` | User-uploaded files (50 GB/user + 50 GB shared) | High |
 | `audiodata` | `/data/audio` | Voice message recordings | Medium |
+| `remarkabledata` | `/data/remarkable` | Synced reMarkable notebooks + to-device staging | Medium |
 | `translatordata` | `/data/models` | Argos Translate language models (re-downloadable) | Low |
+| `kiwixdata` | `/data` | Wikipedia ZIM files (re-downloadable) | Low |
 
 ## Port Allocation
 
@@ -176,6 +187,8 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:8081/translator/health
 | 8082 | transcriber | Both |
 | 8083 | commander | Both |
 | 8084 | translator | Both |
+| 8085 | monitor | Both |
+| 8086 | remarkable | Both |
 | 8999 | client (alt) | Both |
 
 ## Environment Variables
@@ -199,11 +212,42 @@ See `.env.example` for the full list. Key variables:
 ssh aspirant
 cd ~/aspirant-deploy
 docker compose pull
-docker compose up -d
+docker compose up -d --force-recreate
 docker compose logs -f  # verify startup
 ```
+
+## Gotchas
+
+1. **Nginx caches Docker DNS at startup.** The client container's Nginx resolves `server` to a container IP once, at process start. If you restart a backend service (e.g., `docker compose restart server`), it gets a new IP, but Nginx still points at the old one — resulting in `502 Bad Gateway` on all `/api/` requests. **Always restart the client container when restarting backend services:**
+
+   ```bash
+   # Correct: restart both together
+   docker compose restart server client
+
+   # Or use --force-recreate which handles it
+   docker compose up -d --force-recreate
+   ```
+
+2. **`docker compose up -d` does not recreate running containers.** If you pulled new images, running `docker compose up -d` will say "Running" for containers whose config hasn't changed — even if the image is newer. Use `--force-recreate` to ensure new images are picked up:
+
+   ```bash
+   docker compose pull
+   docker compose up -d --force-recreate
+   ```
+
+3. **remarkable uses a different image naming convention.** Most services use `ghcr.io/.../aspirant-{service}:latest`, but remarkable is built from the aspirant-online monorepo and uses `ghcr.io/.../aspirant-online-remarkable:latest`.
+
+4. **Monitor needs Docker socket access.** The monitor service mounts `/var/run/docker.sock` read-only to inspect container status and `/data` read-only for disk usage reporting.
+
+5. **Kiwix serves through the Go proxy, not directly.** Kiwix doesn't expose a host port. It's accessed via the Go server's proxy at `/api/wikipedia/...`.
 
 ## Related Repositories
 
 - [aspirant-meta](https://github.com/the-anonymous-aspirant/aspirant-meta) — Development conventions, philosophy, infrastructure standards
-- [aspirant-online](https://github.com/the-anonymous-aspirant/aspirant-online) — Original monorepo (archived)
+- [aspirant-online](https://github.com/the-anonymous-aspirant/aspirant-online) — Source for remarkable, client, server (monorepo with CI)
+- [aspirant-server](https://github.com/the-anonymous-aspirant/aspirant-server) — Go API gateway
+- [aspirant-client](https://github.com/the-anonymous-aspirant/aspirant-client) — Vue.js frontend
+- [aspirant-transcriber](https://github.com/the-anonymous-aspirant/aspirant-transcriber) — Whisper transcription service
+- [aspirant-commander](https://github.com/the-anonymous-aspirant/aspirant-commander) — Voice command parser
+- [aspirant-translator](https://github.com/the-anonymous-aspirant/aspirant-translator) — Argos Translate service
+- [aspirant-monitor](https://github.com/the-anonymous-aspirant/aspirant-monitor) — System metrics service

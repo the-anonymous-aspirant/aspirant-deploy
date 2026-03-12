@@ -30,6 +30,7 @@ services:
       TRANSLATOR_URL: http://translator:8000
       MONITOR_URL: http://monitor:8000
       KIWIX_URL: http://kiwix:8080
+      REMARKABLE_URL: http://remarkable:8000
     env_file:
       - .env
     volumes:
@@ -107,9 +108,20 @@ services:
     volumes:
       - kiwixdata-dev:/data:ro
 
+  remarkable:
+    build:
+      context: ../aspirant-online/remarkable
+      dockerfile: Dockerfile-Remarkable
+    ports:
+      - "8086:8000"
+    volumes:
+      - remarkabledata-dev:/data/remarkable
+    mem_limit: 2g
+
 volumes:
   pgdata-dev:
   filedata-dev:
   audiodata-dev:
   translatordata-dev:
   kiwixdata-dev:
+  remarkabledata-dev:
