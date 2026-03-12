@@ -28,6 +28,7 @@ services:
       TRANSLATOR_URL: http://translator:8000
       MONITOR_URL: http://monitor:8000
       KIWIX_URL: http://kiwix:8080
+      REMARKABLE_URL: http://remarkable:8000
     env_file:
       - .env
     volumes:
@@ -97,6 +98,15 @@ services:
     command: --urlRootLocation=/api/wikipedia /data/wikipedia_en_all_maxi_2026-02.zim
     volumes:
       - /data/aspirant/kiwix:/data:ro
+
+  remarkable:
+    image: ghcr.io/the-anonymous-aspirant/aspirant-online-remarkable:latest
+    restart: unless-stopped
+    ports:
+      - "8086:8000"
+    volumes:
+      - /data/aspirant/remarkable:/data/remarkable
+    mem_limit: 2g
 
 volumes:
   pgdata:
