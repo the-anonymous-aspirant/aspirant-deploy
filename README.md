@@ -252,8 +252,22 @@ Development standards, infrastructure inventory, and project templates live in t
 | [INFRASTRUCTURE.md](INFRASTRUCTURE.md) | Deployed services, ports, tables, volumes, DNS | When adding a service |
 | [_template/](_template/) | Skeleton files for new services | When creating a new microservice |
 
+## Adding a New Service
+
+1. **Scaffold** — Copy the template: `cp -r _template/ ../aspirant-{name}/`
+2. **Allocate** — Check [INFRASTRUCTURE.md](INFRASTRUCTURE.md) for the next available port (currently 8088). Reserve your tables and volumes
+3. **Spec first** — Fill in `docs/SPEC.md` and `docs/ARCHITECTURE.md` before writing code. Get them reviewed
+4. **Implement** — Follow [CONVENTIONS.md](CONVENTIONS.md): health endpoint, logging format, test categories (import, contract, command/output)
+5. **Compose** — Add the service to both `docker-compose.yml` and `docker-compose.dev.yml`
+6. **Validate** — Run the convention auditor: `python -m app.main scan ../aspirant-{name}` from [aspirant-auditor](https://github.com/the-anonymous-aspirant/aspirant-auditor)
+7. **Update docs** — Add service details to INFRASTRUCTURE.md, log decisions in `docs/DECISIONS.md`, update CHANGELOG.md
+8. **Ship** — Create GitHub repo, set up CI, push, PR compose changes into this repo, deploy
+
+See [`_template/README.md`](_template/README.md) for the full pre/post-implementation checklist.
+
 ## Related Repositories
 
+- [aspirant-auditor](https://github.com/the-anonymous-aspirant/aspirant-auditor) — Automated convention checker
 - [aspirant-server](https://github.com/the-anonymous-aspirant/aspirant-server) — Go API gateway
 - [aspirant-client](https://github.com/the-anonymous-aspirant/aspirant-client) — Vue.js frontend
 - [aspirant-remarkable](https://github.com/the-anonymous-aspirant/aspirant-remarkable) — reMarkable rendering and sync service
@@ -261,3 +275,4 @@ Development standards, infrastructure inventory, and project templates live in t
 - [aspirant-commander](https://github.com/the-anonymous-aspirant/aspirant-commander) — Voice command parser
 - [aspirant-translator](https://github.com/the-anonymous-aspirant/aspirant-translator) — Argos Translate service
 - [aspirant-monitor](https://github.com/the-anonymous-aspirant/aspirant-monitor) — System metrics service
+- [aspirant-finance](https://github.com/the-anonymous-aspirant/aspirant-finance) — Financial transaction management
