@@ -696,11 +696,28 @@ Templates for all of these are in the [_template/](_template/) directory.
 
 ### GitHub Actions
 
-- Workflow file: `.github/workflows/docker-build-push.yml`
+- Workflow file: `.github/workflows/ci.yml`
 - Triggers: push to `main`, pull requests to `main`
-- Steps per service: extract metadata → build → push → cleanup old images
-- Old images: keep 3 most recent, delete the rest
-- Secrets managed in GitHub repo settings
+- Jobs: `test` (run test suite) → `build` (build and push Docker image, only on main)
+- Build job permissions: `contents: read`, `packages: write`
+- Image tag: `ghcr.io/{owner}/{repo}:latest`
+- Cache: `cache-from: type=gha`, `cache-to: type=gha,mode=max`
+- Secrets managed in GitHub repo settings (`GITHUB_TOKEN` for ghcr.io auth)
+
+### New Service CI Setup
+
+Every service that has a Docker image in `docker-compose.yml` **must** have a CI workflow. Without it, the image will never be built and production will fail with a pull error.
+
+1. Create `.github/workflows/ci.yml` with test and build jobs
+2. Merge to main — this triggers the first image push to ghcr.io
+3. Set the ghcr.io package to **public** — new packages default to private. Go to `https://github.com/users/{owner}/packages/container/{package}/settings` → Danger Zone → Change visibility → Public
+4. Verify: `docker pull ghcr.io/{owner}/{repo}:latest` should work without authentication
+
+### Docker Image Safety
+
+- **Always create `.dockerignore`** — exclude `.git`, `.env`, `__pycache__/`, test data, and any sensitive files
+- **Never bake personal or sensitive data into images** — seed files, configuration with personal patterns, raw data must be mounted as volumes at runtime, not `COPY`'d in the Dockerfile
+- **ARM Mac compatibility** — CI runners build amd64 images; add `platform: linux/amd64` to the service in `docker-compose.yml` for local testing on ARM Macs
 
 ### Deployment
 
