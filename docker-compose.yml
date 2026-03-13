@@ -111,6 +111,7 @@ services:
 
   finance:
     image: ghcr.io/the-anonymous-aspirant/aspirant-finance:latest
+    platform: linux/amd64
     restart: unless-stopped
     ports:
       - "8087:8000"
