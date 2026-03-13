@@ -696,19 +696,172 @@ Templates for all of these are in the [_template/](_template/) directory.
 
 ### GitHub Actions
 
-- Workflow file: `.github/workflows/docker-build-push.yml`
+- Workflow file: `.github/workflows/ci.yml`
 - Triggers: push to `main`, pull requests to `main`
-- Steps per service: extract metadata → build → push → cleanup old images
-- Old images: keep 3 most recent, delete the rest
-- Secrets managed in GitHub repo settings
+- Two jobs: `test` (runs on every push/PR) and `build-and-push` (runs on `main` only, after tests pass)
+- Secrets managed in GitHub repo settings (GHCR auth uses the built-in `GITHUB_TOKEN`)
+- Reference template: `_template/.github/workflows/ci.yml`
+
+### Workflow Structure
+
+Every service follows the same two-job pattern:
+
+```
+test → build-and-push (main only)
+```
+
+1. **test** — runs on every push and pull request to `main`
+2. **build-and-push** — runs only on `main` after tests pass; builds the Docker image and pushes to GHCR
+
+### Test Job Variants
+
+The test job differs by service type. Pick the variant that matches your service.
+
+#### Python + Database (transcriber, commander, finance)
+
+Services that depend on PostgreSQL use a GitHub Actions service container:
+
+```yaml
+test:
+  runs-on: ubuntu-latest
+  services:
+    postgres:
+      image: postgres:16-alpine
+      env:
+        POSTGRES_USER: test_user
+        POSTGRES_PASSWORD: test_password
+        POSTGRES_DB: test_db
+      ports:
+        - 5432:5432
+      options: >-
+        --health-cmd pg_isready
+        --health-interval 10s
+        --health-timeout 5s
+        --health-retries 5
+  steps:
+  - uses: actions/checkout@v4
+  - name: Build test image
+    run: docker build -t test-image .
+  - name: Run tests
+    run: |
+      docker run --rm --network host \
+        -e DB_HOST=localhost \
+        -e DB_USER=test_user \
+        -e DB_PASSWORD=test_password \
+        -e DB_NAME=test_db \
+        -v "$(pwd)/tests:/app/tests" \
+        test-image pytest tests/ -v
+```
+
+#### Python Stateless (translator, remarkable, monitor)
+
+Services without a database dependency use `setup-python` directly:
+
+```yaml
+test:
+  runs-on: ubuntu-latest
+  steps:
+  - uses: actions/checkout@v4
+  - name: Set up Python
+    uses: actions/setup-python@v5
+    with:
+      python-version: '3.11'
+  - name: Install test dependencies
+    run: pip install -r requirements-test.txt
+  - name: Run tests
+    run: pytest tests/ -v
+```
+
+If no `requirements-test.txt` exists, install from `requirements.txt` instead.
+
+#### Go (server)
+
+```yaml
+test:
+  runs-on: ubuntu-latest
+  steps:
+  - uses: actions/checkout@v4
+  - uses: actions/setup-go@v5
+    with:
+      go-version: "1.23"
+  - run: go test ./...
+```
+
+#### Vue (client)
+
+The client has no test job — only a build-and-push job triggered on push to `main`.
+
+### Build-and-Push Job
+
+Identical across all services (except client, which skips the `needs: test` gate):
+
+```yaml
+build-and-push:
+  runs-on: ubuntu-latest
+  needs: test
+  if: github.ref == 'refs/heads/main'
+  permissions:
+    contents: read
+    packages: write
+  steps:
+  - uses: actions/checkout@v4
+  - uses: docker/setup-buildx-action@v3
+  - uses: docker/login-action@v3
+    with:
+      registry: ghcr.io
+      username: ${{ github.actor }}
+      password: ${{ secrets.GITHUB_TOKEN }}
+  - name: Extract metadata
+    id: meta
+    uses: docker/metadata-action@v5
+    with:
+      images: ghcr.io/${{ github.repository }}
+      tags: |
+        type=ref,event=branch
+        type=sha
+        type=raw,value=latest,enable={{is_default_branch}}
+  - name: Build and push
+    uses: docker/build-push-action@v5
+    with:
+      context: .
+      file: ./Dockerfile
+      push: true
+      tags: ${{ steps.meta.outputs.tags }}
+      labels: ${{ steps.meta.outputs.labels }}
+      cache-from: type=gha
+      cache-to: type=gha,mode=max
+```
+
+### Image Tagging
+
+Use `docker/metadata-action@v5` for consistent tags on every push to `main`:
+
+| Tag | Example | Purpose |
+|-----|---------|---------|
+| `main` | `ghcr.io/.../aspirant-transcriber:main` | Latest from main branch |
+| `sha-<7char>` | `ghcr.io/.../aspirant-transcriber:sha-a1b2c3d` | Immutable per commit |
+| `latest` | `ghcr.io/.../aspirant-transcriber:latest` | Default pull tag |
+
+All three tags are produced by the metadata-action `tags` config shown above. Deploy pulls `latest`.
+
+### Caching
+
+Use GitHub Actions cache with buildx to speed up builds:
+
+```yaml
+cache-from: type=gha
+cache-to: type=gha,mode=max
+```
+
+Requires `docker/setup-buildx-action@v3` in the build job.
 
 ### Deployment
 
 ```bash
 ssh aspirant
-cd ~/aspirant-online
+cd ~/aspirant-deploy
 docker compose pull
-docker compose up -d
+docker compose up -d --force-recreate
 ```
 
 No blue/green, no rolling updates — pull and restart. Acceptable for a single-user home server.

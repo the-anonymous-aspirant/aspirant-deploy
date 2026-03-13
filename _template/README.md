@@ -22,6 +22,7 @@ Skeleton files for starting a new service. Copy this directory, replace all `{pl
 | `docs/OPERATIONS.md` | Setup, run, test, validate, debug, gotchas | [Philosophy → Documentation Standards](../DEVELOPMENT_PHILOSOPHY.md#documentation-standards) |
 | `app/` | Python service source (FastAPI skeleton) | [Conventions → Python Services](../CONVENTIONS.md#python-services) |
 | `tests/` | Test suite (pytest skeleton) | [Conventions → Testing](../CONVENTIONS.md#testing) |
+| `.github/workflows/ci.yml` | CI: test + build-and-push to GHCR | [Conventions → CI/CD](../CONVENTIONS.md#cicd) |
 
 ## Checklist
 
@@ -39,6 +40,7 @@ Before starting implementation:
 After implementation:
 
 - [ ] Tests pass (`pytest tests/ -v`)
+- [ ] CI workflow adapted from template (pick correct test variant from CONVENTIONS.md → CI/CD)
 - [ ] INFRASTRUCTURE.md updated with new service details
 - [ ] CHANGELOG.md has an entry for today
 - [ ] DECISIONS.md has entries for non-obvious choices
