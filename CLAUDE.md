@@ -2,55 +2,93 @@
 
 ## About
 
-This is the deployment and orchestration repo for the Aspirant platform. It contains no application code — only Docker Compose configurations, environment templates, and architecture documentation.
+This is the central hub for the Aspirant platform — deployment configuration, development conventions, infrastructure inventory, and project templates. It contains no application code.
 
-## What This Repo Does
+## What's Here
 
-- **docker-compose.yml** — Production deployment using pre-built GHCR images
-- **docker-compose.dev.yml** — Local development building from sibling repo directories
-- **.env.example** — Environment variable template
-- **docs/** — Platform-wide architecture and connection documentation
+| File/Dir | Purpose |
+|----------|---------|
+| `docker-compose.yml` | Production deployment (pre-built GHCR images) |
+| `docker-compose.dev.yml` | Local development (builds from sibling repos) |
+| `CONVENTIONS.md` | Naming, API contracts, logging, testing, Docker, Git, database rules |
+| `DEVELOPMENT_PHILOSOPHY.md` | Values, principles, spec-driven lifecycle |
+| `INFRASTRUCTURE.md` | Deployed services, ports, tables, volumes, DNS |
+| `_template/` | Skeleton files for scaffolding a new service |
+| `.env.example` | Environment variable template |
+| `docs/` | Platform-wide architecture, operations, decisions, changelog |
+| `tests/integration.sh` | Cross-service integration tests |
 
-## Standards
+## Before You Start
 
-All Aspirant platform repositories follow the conventions in [aspirant-meta](https://github.com/the-anonymous-aspirant/aspirant-meta):
+Read these in order:
+1. **This file** — repo layout and commands
+2. **DEVELOPMENT_PHILOSOPHY.md** — values and the 6-phase lifecycle (spec → architecture → plan → implement → verify → ship)
+3. **CONVENTIONS.md** — the rulebook for API shape, logging, testing, naming, Docker patterns
+4. **INFRASTRUCTURE.md** — current state of all deployed services, ports, tables, volumes
 
-- **Development philosophy** — Iterative MVPs, spec-first design, test coverage expectations
-- **Documentation standards** — Every repo must have SPEC, ARCHITECTURE, OPERATIONS, CHANGELOG, DECISIONS in `docs/`
-- **Naming conventions** — Repository naming (`aspirant-{service}`), branch naming, commit message format
-- **Infrastructure patterns** — Dockerfile conventions, health endpoint requirements, environment variable naming
+**Conventions are the source of truth, not existing code.** Some services may predate current standards. Always follow CONVENTIONS.md.
 
-## Service Repos
+## Services
 
-| Service | Repo | Port |
-|---------|------|------|
-| Server (API gateway) | `../aspirant-server` | 8081→8080 |
-| Client (frontend) | `../aspirant-client` | 80 |
-| Transcriber | `../aspirant-transcriber` | 8082→8000 |
-| Commander | `../aspirant-commander` | 8083→8000 |
-| Translator | `../aspirant-translator` | 8084→8000 |
+| Service | Repo | Port | Type |
+|---------|------|------|------|
+| PostgreSQL | (standard image) | 5432 | Database |
+| Server | `../aspirant-server` | 8081→8080 | Go/Gin |
+| Client | `../aspirant-client` | 80 | Vue.js/Nginx |
+| Transcriber | `../aspirant-transcriber` | 8082→8000 | Python/FastAPI |
+| Commander | `../aspirant-commander` | 8083→8000 | Python/FastAPI |
+| Translator | `../aspirant-translator` | 8084→8000 | Python/FastAPI |
+| Monitor | `../aspirant-monitor` | 8085→8000 | Python/FastAPI |
+| Remarkable | `../aspirant-remarkable` | 8086→8000 | Python/FastAPI |
+| Finance | `../aspirant-finance` | 8087→8000 | Python/FastAPI |
+| Kiwix | (3rd party image) | internal 8080 | kiwix-serve |
+
+## Adding a New Service
+
+1. **Scaffold:** `cp -r _template/ ../aspirant-{name}/` — gives you app/, tests/, docs/ skeletons
+2. **Allocate:** Check INFRASTRUCTURE.md for next port (currently 8088), reserve tables/volumes
+3. **Spec first:** Fill in `docs/SPEC.md` and `docs/ARCHITECTURE.md` before writing code
+4. **Implement:** Follow CONVENTIONS.md (health endpoint, logging format, test categories)
+5. **Compose:** Add the service to both `docker-compose.yml` and `docker-compose.dev.yml`
+6. **Validate:** Run `python -m app.main scan ../aspirant-{name}` from aspirant-auditor
+7. **Update:** Add service details to INFRASTRUCTURE.md, log decisions in docs/DECISIONS.md
+8. **Ship:** Create GitHub repo, set up CI, push, PR compose changes, deploy
+
+See `_template/README.md` for the full pre/post-implementation checklist.
 
 ## Common Commands
 
 ```bash
 # Production
-docker compose pull && docker compose up -d
+docker compose pull && docker compose up -d --force-recreate
 
-# Development (requires sibling repos cloned)
+# Development (requires sibling repos)
 docker compose -f docker-compose.dev.yml up -d
 
 # Logs
 docker compose logs -f <service>
 
 # Health checks
-curl localhost:8081/health
-curl localhost:8082/health
-curl localhost:8083/health
-curl localhost:8084/health
+curl localhost:8081/health   # server
+curl localhost:8082/health   # transcriber
+curl localhost:8083/health   # commander
+curl localhost:8084/health   # translator
+curl localhost:8085/health   # monitor
+curl localhost:8086/health   # remarkable
+curl localhost:8087/health   # finance
+
+# Integration tests
+./tests/integration.sh
+
+# Convention auditor (from aspirant-auditor repo)
+python -m app.main scan-all ~/git/
 ```
 
 ## Important
 
 - Never commit `.env` — it contains credentials
-- The dev compose expects service repos as sibling directories
-- PostgreSQL runs on port 5433 in dev (5432 in prod) to avoid conflicts
+- Never commit directly to `main` — use feature branches
+- Dev compose runs PostgreSQL on port 5433 (not 5432) to avoid conflicts
+- Dev volumes are separate (`pgdata-dev`) so dev data never mixes with production
+- Always use `--force-recreate` when deploying new images
+- Always restart the client container when restarting backend services (Nginx caches DNS)
