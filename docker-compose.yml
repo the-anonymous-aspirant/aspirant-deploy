@@ -29,6 +29,7 @@ services:
       MONITOR_URL: http://monitor:8000
       KIWIX_URL: http://kiwix:8080
       REMARKABLE_URL: http://remarkable:8000
+      FINANCE_URL: http://finance:8000
     env_file:
       - .env
     volumes:
@@ -107,6 +108,19 @@ services:
     volumes:
       - /data/aspirant/remarkable:/data/remarkable
     mem_limit: 2g
+
+  finance:
+    image: ghcr.io/the-anonymous-aspirant/aspirant-finance:latest
+    restart: unless-stopped
+    ports:
+      - "8087:8000"
+    env_file:
+      - .env
+    environment:
+      DB_HOST: postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   pgdata:

@@ -31,6 +31,7 @@ services:
       MONITOR_URL: http://monitor:8000
       KIWIX_URL: http://kiwix:8080
       REMARKABLE_URL: http://remarkable:8000
+      FINANCE_URL: http://finance:8000
     env_file:
       - .env
     volumes:
@@ -117,6 +118,20 @@ services:
     volumes:
       - remarkabledata-dev:/data/remarkable
     mem_limit: 2g
+
+  finance:
+    build:
+      context: ../aspirant-finance
+      dockerfile: Dockerfile-Finance
+    ports:
+      - "8087:8000"
+    env_file:
+      - .env
+    environment:
+      DB_HOST: postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   pgdata-dev:
