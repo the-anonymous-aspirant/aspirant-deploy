@@ -118,6 +118,8 @@ services:
       - .env
     environment:
       DB_HOST: postgres
+    volumes:
+      - /data/aspirant/finance/seed_data:/app/seed_data:ro
     depends_on:
       postgres:
         condition: service_healthy
