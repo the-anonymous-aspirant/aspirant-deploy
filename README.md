@@ -1,6 +1,6 @@
 # Aspirant Deploy
 
-Orchestration and deployment configuration for the Aspirant platform. This repo contains Docker Compose files, environment configuration, and architecture documentation that ties all services together.
+Central hub for the Aspirant platform — deployment configuration, development conventions, infrastructure inventory, and project templates. This repo is the single source of truth for how services are deployed, built, and organized.
 
 ## Architecture
 
@@ -241,9 +241,19 @@ docker compose logs -f  # verify startup
 
 5. **Kiwix serves through the Go proxy, not directly.** Kiwix doesn't expose a host port. It's accessed via the Go server's proxy at `/api/wikipedia/...`.
 
+## Conventions & Standards
+
+Development standards, infrastructure inventory, and project templates live in this repo:
+
+| File | Purpose | When to read |
+|------|---------|--------------|
+| [CONVENTIONS.md](CONVENTIONS.md) | Naming, API contracts, logging, testing, Docker, Git, database | When implementing — the rulebook |
+| [DEVELOPMENT_PHILOSOPHY.md](DEVELOPMENT_PHILOSOPHY.md) | Values, principles, spec-driven workflow | Before starting a new project |
+| [INFRASTRUCTURE.md](INFRASTRUCTURE.md) | Deployed services, ports, tables, volumes, DNS | When adding a service |
+| [_template/](_template/) | Skeleton files for new services | When creating a new microservice |
+
 ## Related Repositories
 
-- [aspirant-meta](https://github.com/the-anonymous-aspirant/aspirant-meta) — Development conventions, philosophy, infrastructure standards
 - [aspirant-server](https://github.com/the-anonymous-aspirant/aspirant-server) — Go API gateway
 - [aspirant-client](https://github.com/the-anonymous-aspirant/aspirant-client) — Vue.js frontend
 - [aspirant-remarkable](https://github.com/the-anonymous-aspirant/aspirant-remarkable) — reMarkable rendering and sync service
