@@ -2,4 +2,8 @@
 .env.local
 .env.*.local
 .DS_Store
+__pycache__/
+node_modules/
+.vscode/
+.idea/
 docker-compose.override.yml
