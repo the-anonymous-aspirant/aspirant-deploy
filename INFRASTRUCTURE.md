@@ -220,6 +220,20 @@ Services communicate by container name. The Go server acts as API gateway, proxy
 - `remarkable` — reMarkable notebook rendering (proxied by server via `REMARKABLE_URL`, default `http://remarkable:8000`)
 - `finance` — financial transaction management (proxied by server via `FINANCE_URL`, default `http://finance:8000`)
 
+### Device Mesh
+
+Personal devices connect to aspirant-cell via SSH for shell access, file sync, or tunneling. Each device has its own Ed25519 key with per-device restrictions. Configuration and public keys are tracked in the `mesh/` directory.
+
+| Device | Key Name | Access Level | Connection |
+|--------|----------|-------------|------------|
+| Laptop | `laptop` | Full shell + tunnel | On-demand SSH, persistent reverse tunnel on :2200 |
+| Phone (Android) | `phone` | Full shell | On-demand SSH via Termux |
+| reMarkable Paper Pro | `remarkable` | rsync only | Daily systemd timer |
+
+**Reverse tunnel ports (reserved: 2200-2299):** 2200 = laptop.
+
+See [mesh/README.md](mesh/README.md) for setup instructions, adding devices, and extending with reverse tunnels.
+
 ---
 
 ## CI/CD

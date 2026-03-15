@@ -1,0 +1,28 @@
+# SSH config snippet for the aspirant device mesh.
+#
+# Install: append this to ~/.ssh/config on your client device.
+# Works on laptop (macOS/Linux) and phone (Termux).
+#
+# Usage:
+#   ssh cell              — connect to aspirant-cell
+#   ssh laptop            — connect to laptop through cell (reverse tunnel)
+#   scp file.txt cell:    — copy file to cell home directory
+#   rsync -az dir/ cell:/data/aspirant/dir/  — sync directory to cell
+
+# --- aspirant-cell (home server) ---
+Host cell
+  HostName home.the-aspirant.com
+  Port 41922
+  User aspirant
+  IdentityFile ~/.ssh/id_ed25519
+  ServerAliveInterval 30
+  ServerAliveCountMax 3
+
+# --- laptop (via reverse tunnel through cell) ---
+# Requires the laptop's autossh tunnel to be running.
+# Replace <laptop-user> with the actual username on the laptop.
+Host laptop
+  HostName localhost
+  Port 2200
+  User <laptop-user>
+  ProxyJump cell

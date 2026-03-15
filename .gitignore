@@ -7,3 +7,9 @@ node_modules/
 .vscode/
 .idea/
 docker-compose.override.yml
+
+# SSH private keys (public keys are safe to commit)
+id_ed25519
+id_rsa
+*.pem
+*_dropbear
