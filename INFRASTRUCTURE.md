@@ -4,7 +4,7 @@ Current state of everything deployed across projects following these standards. 
 
 When adding a new service, also follow the naming and contract standards in [CONVENTIONS.md](CONVENTIONS.md). For architectural rationale, see [DECISIONS.md](DECISIONS.md).
 
-*Last updated: 2026-03-12*
+*Last updated: 2026-03-22*
 
 ---
 
@@ -32,7 +32,7 @@ Full-stack web platform (Go + Vue.js + Python microservices) running on a single
                          │                    │
                          ▼                    ▼
   ┌──────────────────────────────────────────────────────────────────┐
-  │                        Home Server                               │
+  │                        Home Server (aspirant-cell)               │
   │                                                                  │
   │  ┌────────┐  ┌────────┐  ┌──────────┐  ┌─────────┐  ┌────────┐ │
   │  │ Client │  │ Server │  │Transcribe│  │Commander│  │Translat│ │
@@ -43,17 +43,16 @@ Full-stack web platform (Go + Vue.js + Python microservices) running on a single
   │  ┌────────┐  ┌───┴────┐  ┌───┴──────────────┴──┐  ┌──────────┐ │
   │  │Monitor │  │Remarkab│  │     PostgreSQL       │  │  Kiwix   │ │
   │  │ FastAPI│  │ FastAPI│  │       :5432          │  │ :8080    │ │
-  │  │ :8085  │  │ :8086  │  └──────────┬───────────┘  │ (intern) │ │
-  │  └────────┘  └────────┘            │              └──────────┘ │
-  │                                     │                           │
-  │  ┌────────┐                         │                           │
-  │  │Finance │  ───depends on──────────┘                           │
-  │  │ FastAPI│                                                     │
-  │  │ :8087  │                                                     │
-  │  └────────┘                                                     │
+  │  │ :8085  │  │ :8086  │  └──┬───────────┬───────┘  │ (intern) │ │
+  │  └────────┘  └────────┘     │           │          └──────────┘ │
+  │                              │           │                       │
+  │  ┌────────┐  ┌────────┐     │    ┌──────┴───┐                   │
+  │  │Finance │  │Advisor │─────┘    │  Ollama  │                   │
+  │  │ FastAPI│  │ FastAPI│──────────│  :11434  │                   │
+  │  │ :8087  │  │ :8088  │          │ (intern) │                   │
+  │  └────────┘  └────────┘          └──────────┘                   │
   │                                                                  │
-  │  Volumes: pgdata filedata audiodata remarkabledata translatordata│
-  │  Storage: AWS S3 (assets)                                        │
+  │  Storage: /data/aspirant/ (RAID1 bind mounts)                    │
   └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -94,6 +93,8 @@ Translator ──(standalone, no database)
 
 Monitor ──connects to──▶ Docker socket (read-only)
         ──reads──▶ /data volume (disk usage)
+        ──reads──▶ /proc, /sys (host CPU, memory, temperature)
+        ──sends──▶ SMTP (daily health report email, if configured)
 
 Remarkable ──(standalone, no database)
            ──connects to──▶ reMarkable Paper Pro (SSH/rsync over LAN)
@@ -187,11 +188,11 @@ Kiwix ──(standalone, serves ZIM files)
 | `ollamadata` | `/root/.ollama` | Ollama | LLM model weights (re-downloadable) |
 | `kiwixdata` | `/data` | Kiwix | Wikipedia ZIM files (re-downloadable) |
 
-### AWS S3
+### Local Asset Storage
 
-| Resource | Purpose |
-|----------|---------|
-| S3 Bucket | Game assets, static content, puzzle assets |
+Assets (images, audio, dictionary files) are served from `/data/aspirant/assets/` on the host, mounted into the server container. The server builds an in-memory MD5 index at startup for O(1) lookups via `GET /fetch-object/:hash`.
+
+AWS S3 was previously used for assets but has been fully replaced by local storage.
 
 ---
 
@@ -286,11 +287,13 @@ Per-repo: Checkout → Test → Login to GHCR → Build & push Docker image
 ### Deployment Process
 
 ```bash
-ssh aspirant
+ssh cell
 cd ~/aspirant-deploy
 docker compose pull
 docker compose up -d --force-recreate
 ```
+
+The SSH alias `cell` is configured in `~/.ssh/config`. Some older docs may reference `ssh aspirant` — both work but `cell` is preferred.
 
 No automated deployment — manual pull after CI builds complete.
 
@@ -342,6 +345,13 @@ No automated deployment — manual pull after CI builds complete.
 | `ADVISOR_URL` | Server | Low |
 | `OLLAMA_URL` | Advisor | Low |
 | `OLLAMA_MODEL` | Advisor | Low |
+| `SMTP_HOST` | Monitor | Low |
+| `SMTP_PORT` | Monitor | Low |
+| `SMTP_USER` | Monitor | Low |
+| `SMTP_PASSWORD` | Monitor | High |
+| `ALERT_EMAIL_TO` | Monitor | Low |
+| `ALERT_EMAIL_FROM` | Monitor | Low |
+| `DAILY_REPORT_HOUR` | Monitor | Low |
 
 ### Build-time (GitHub Secrets)
 
