@@ -142,3 +142,5 @@ docker compose -f docker-compose.dev.yml up -d transcriber
 - **Client depends on server** in dev compose — if server isn't running, Nginx proxy will return 502
 - **Translator is stateless** — no `.env` needed, no database. It downloads language models on demand to its volume
 - **Commander polls transcriber via database** — not HTTP. Both need the same PostgreSQL instance
+- **Assets are served by MD5 hash** — the client requests `/fetch-object/{md5}` and the server looks up the file. If you add a new asset file, the server's in-memory index picks it up on restart. No database or config change needed
+- **Multi-repo deploys require ordering** — when changes span server + client + deploy repos, build and push the server/client images *before* updating compose on the cell, otherwise `docker compose pull` fetches the old images

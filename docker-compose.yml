@@ -31,10 +31,12 @@ services:
       REMARKABLE_URL: http://remarkable:8000
       FINANCE_URL: http://finance:8000
       ADVISOR_URL: http://advisor:8000
+      ASSET_BASE_PATH: /data/assets
     env_file:
       - .env
     volumes:
       - /data/aspirant/files:/data/files
+      - /data/aspirant/assets:/data/assets
     depends_on:
       postgres:
         condition: service_healthy
