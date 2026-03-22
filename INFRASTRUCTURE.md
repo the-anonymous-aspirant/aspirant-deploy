@@ -72,6 +72,8 @@ Full-stack web platform (Go + Vue.js + Python microservices) running on a single
 | **Monitor** | aspirant-monitor | Python 3.11 + FastAPI + Docker SDK | `ghcr.io/.../aspirant-monitor` | 8085 | 8000 | — |
 | **Remarkable** | aspirant-remarkable | Python 3.11 + FastAPI + rmscene + rmc + cairosvg | `ghcr.io/.../aspirant-remarkable` | 8086 | 8000 | 2 GB |
 | **Finance** | aspirant-finance | Python FastAPI | `ghcr.io/.../aspirant-finance` | 8087 | 8000 | — |
+| **Advisor** | aspirant-advisor | Python 3.11 + FastAPI + sentence-transformers + pgvector | `ghcr.io/.../aspirant-advisor` | 8088 | 8000 | 2 GB |
+| **Ollama** | — | Ollama (LLM inference) | `ollama/ollama` | — (internal) | 11434 | 6 GB |
 | **Kiwix** | — | kiwix-serve (3rd party) | `ghcr.io/kiwix/kiwix-serve` | — (internal) | 8080 | — |
 
 ### Service Dependencies
@@ -97,6 +99,11 @@ Remarkable ──(standalone, no database)
            ──connects to──▶ reMarkable Paper Pro (SSH/rsync over LAN)
 
 Finance ──depends on──▶ PostgreSQL (health check)
+
+Advisor ──depends on──▶ PostgreSQL (health check)
+        ──connects to──▶ Ollama (LLM generation)
+
+Ollama ──(standalone, serves LLM models)
 
 Kiwix ──(standalone, serves ZIM files)
 ```
@@ -144,6 +151,14 @@ Kiwix ──(standalone, serves ZIM files)
 | `finance_payee_normalizations` | `id` (UUID) | Payee normalization rules | payee_pattern, canonical_payee |
 | `finance_accounts` | `account_id` (PK) | Bank account definitions | account_name, bank, account_type |
 
+#### Owned by Advisor (Python/SQLAlchemy)
+
+| Table | Primary Key | Description | Key Columns |
+|-------|------------|-------------|-------------|
+| `advisor_domains` | `id` (UUID) | Knowledge domains (insurance, employment, etc.) | name (UNIQUE), display_name, description, icon, sort_order |
+| `advisor_documents` | `id` (UUID) | Uploaded documents and law codes | title, filename, domain (FK), doc_type, language, access_level, tier, file_hash, effective_from/to |
+| `advisor_chunks` | `id` (UUID) | Embedded text chunks with metadata | document_id (FK), content, embedding (VECTOR 384), section_id, section_title, page_number, line_start/end, chunk_index |
+
 ### Roles (seeded)
 
 | Role | Description |
@@ -168,6 +183,8 @@ Kiwix ──(standalone, serves ZIM files)
 | `audiodata` | `/data/audio` | Transcriber | Voice message audio files |
 | `translatordata` | `/data/models` | Translator | Argos translation language models (re-downloadable) |
 | `remarkabledata` | `/data/remarkable` | Remarkable | Synced reMarkable notebook files + to-device staging |
+| `advisordata` | `/data/advisor` | Advisor | Uploaded documents (contracts, policies, law) |
+| `ollamadata` | `/root/.ollama` | Ollama | LLM model weights (re-downloadable) |
 | `kiwixdata` | `/data` | Kiwix | Wikipedia ZIM files (re-downloadable) |
 
 ### AWS S3
@@ -203,6 +220,7 @@ DNS is updated every 5 minutes by a cron job (`~/update-dns.sh`) to handle dynam
 | 8085 | Monitor API | Local network only |
 | 8086 | Remarkable API | Local network only |
 | 8087 | Finance API | Local network only |
+| 8088 | Advisor API | Local network only |
 | 8999 | Client (alt) | Alternate frontend port |
 
 ### Internal Docker Network
@@ -219,6 +237,22 @@ Services communicate by container name. The Go server acts as API gateway, proxy
 - `kiwix` — offline Wikipedia (proxied by server via `KIWIX_URL`, default `http://kiwix:8080`)
 - `remarkable` — reMarkable notebook rendering (proxied by server via `REMARKABLE_URL`, default `http://remarkable:8000`)
 - `finance` — financial transaction management (proxied by server via `FINANCE_URL`, default `http://finance:8000`)
+- `advisor` — document RAG assistant (proxied by server via `ADVISOR_URL`, default `http://advisor:8000`)
+- `ollama` — local LLM inference (internal only, accessed by advisor via `OLLAMA_URL`, default `http://ollama:11434`)
+
+### Device Mesh
+
+Personal devices connect to aspirant-cell via SSH for shell access, file sync, or tunneling. Each device has its own Ed25519 key with per-device restrictions. Configuration and public keys are tracked in the `mesh/` directory.
+
+| Device | Key Name | Access Level | Connection |
+|--------|----------|-------------|------------|
+| Laptop | `laptop` | Full shell + tunnel | On-demand SSH, persistent reverse tunnel on :2200 |
+| Phone (Android) | `phone` | Full shell | On-demand SSH via Termux |
+| reMarkable Paper Pro | `remarkable` | rsync only | Daily systemd timer |
+
+**Reverse tunnel ports (reserved: 2200-2299):** 2200 = laptop.
+
+See [mesh/README.md](mesh/README.md) for setup instructions, adding devices, and extending with reverse tunnels.
 
 ---
 
@@ -275,6 +309,8 @@ No automated deployment — manual pull after CI builds complete.
 | Monitor API | None (v1) | Local network only, no auth |
 | Remarkable API | None (v1) | Local network only, no auth |
 | Finance API | None (v1) | Local network only, no auth |
+| Advisor API | None (v1) | Local network only, no auth |
+| Ollama API | None | Internal only, accessed by advisor |
 | SSH | Key-based | Port 41922, `~/.ssh/the_aspirant_git` |
 | GHCR | GitHub PAT | `read:packages` scope, stored on server |
 
@@ -303,6 +339,9 @@ No automated deployment — manual pull after CI builds complete.
 | `KIWIX_URL` | Server | Low |
 | `REMARKABLE_URL` | Server | Low |
 | `FINANCE_URL` | Server | Low |
+| `ADVISOR_URL` | Server | Low |
+| `OLLAMA_URL` | Advisor | Low |
+| `OLLAMA_MODEL` | Advisor | Low |
 
 ### Build-time (GitHub Secrets)
 
@@ -327,5 +366,6 @@ The **monitor** service provides container status, disk usage, and system metric
 | Monitor health | `curl http://localhost:8085/health` |
 | Remarkable health | `curl http://localhost:8086/health` |
 | Finance health | `curl http://localhost:8087/health` |
+| Advisor health | `curl http://localhost:8088/health` |
 | DB connectivity | `pg_isready -U $DB_USER -d $DB_NAME` |
 | Integration tests | `./tests/integration.sh` (in aspirant-deploy) |
