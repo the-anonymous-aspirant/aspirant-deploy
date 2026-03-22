@@ -62,7 +62,7 @@ Full-stack web platform (Go + Vue.js + Python microservices) running on a single
 
 | Service | Repository | Tech | Container Image | Host Port | Container Port | Memory Limit |
 |---------|-----------|------|----------------|-----------|---------------|-------------|
-| **PostgreSQL** | — | postgres:16-alpine | — (official image) | 5432 | 5432 | — |
+| **PostgreSQL** | — | pgvector/pgvector:pg16 | — (pgvector image) | 5432 | 5432 | — |
 | **Server** | aspirant-server | Go 1.23 + Gin + GORM | `ghcr.io/.../aspirant-server` | 8081 | 8080 | — |
 | **Client** | aspirant-client | Vue 3 + Vuetify + Nginx | `ghcr.io/.../aspirant-client` | 80, 8999 | 80 | — |
 | **Transcriber** | aspirant-transcriber | Python 3.11 + FastAPI + Whisper | `ghcr.io/.../aspirant-transcriber` | 8082 | 8000 | 2 GB |
@@ -113,7 +113,7 @@ Kiwix ──(standalone, serves ZIM files)
 
 ## Database
 
-**Engine:** PostgreSQL 16 (Alpine)
+**Engine:** PostgreSQL 16 (pgvector/pgvector:pg16)
 **Database name:** `aspirant_online_db`
 **Connection:** `DB_HOST=postgres` (Docker networking)
 
@@ -281,6 +281,7 @@ Per-repo: Checkout → Test → Login to GHCR → Build & push Docker image
 | aspirant-monitor | `ghcr.io/the-anonymous-aspirant/aspirant-monitor:latest` |
 | aspirant-remarkable | `ghcr.io/the-anonymous-aspirant/aspirant-remarkable:latest` |
 | aspirant-finance | `ghcr.io/the-anonymous-aspirant/aspirant-finance:latest` |
+| aspirant-advisor | `ghcr.io/the-anonymous-aspirant/aspirant-advisor:latest` |
 
 **Retention:** 3 most recent versions kept, older versions deleted.
 

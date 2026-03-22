@@ -24,6 +24,8 @@ TRANSLATOR_PORT="${TRANSLATOR_PORT:-8084}"
 MONITOR_PORT="${MONITOR_PORT:-8085}"
 REMARKABLE_PORT="${REMARKABLE_PORT:-8086}"
 FINANCE_PORT="${FINANCE_PORT:-8087}"
+ADVISOR_PORT="${ADVISOR_PORT:-8088}"
+OLLAMA_PORT="${OLLAMA_PORT:-11434}"
 NGINX_PORT="${NGINX_PORT:-80}"
 
 BASE_URL="http://localhost"
@@ -71,6 +73,8 @@ Environment variables (defaults in parentheses):
     MONITOR_PORT     Monitor port (8085)
     REMARKABLE_PORT  Remarkable port (8086)
     FINANCE_PORT     Finance port (8087)
+    ADVISOR_PORT     Advisor port (8088)
+    OLLAMA_PORT      Ollama port (11434, internal — only tested if exposed)
     NGINX_PORT       Nginx port (80)
     BOOTSTRAP_USER   Username for test admin user (integration_admin)
     BOOTSTRAP_PASS   Password for test admin user (integration_pass_42)
@@ -141,10 +145,11 @@ declare -A HEALTH_ENDPOINTS=(
     ["monitor"]="${BASE_URL}:${MONITOR_PORT}/health"
     ["remarkable"]="${BASE_URL}:${REMARKABLE_PORT}/health"
     ["finance"]="${BASE_URL}:${FINANCE_PORT}/health"
+    ["advisor"]="${BASE_URL}:${ADVISOR_PORT}/health"
 )
 
 PHASE1_OK=true
-for svc in server transcriber commander translator monitor remarkable finance; do
+for svc in server transcriber commander translator monitor remarkable finance advisor; do
     url="${HEALTH_ENDPOINTS[$svc]}"
     if wait_for_health "$url" "$svc"; then
         pass "$svc health (${url})"
@@ -244,6 +249,16 @@ else
     else
         fail "GET /finance/health (proxy, HTTP ${http_code})"
     fi
+
+    # Advisor health through proxy (Trusted route)
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time "$REQUEST_TIMEOUT" \
+        -H "$AUTH_HEADER" \
+        "${BASE_URL}:${SERVER_PORT}/advisor/health" 2>/dev/null || true)
+    if [[ "$http_code" =~ ^2 ]]; then
+        pass "GET /advisor/health (proxy, HTTP ${http_code})"
+    else
+        fail "GET /advisor/health (proxy, HTTP ${http_code})"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -307,7 +322,25 @@ else
     fail "GET /summary/overview from finance — unexpected response"
 fi
 
-# 3g. If we have a token, test proxy data routes through the server as well
+# 3g. GET sources from advisor (verify domain seeding and pgvector)
+advisor_sources_resp=$(curl -s --max-time "$REQUEST_TIMEOUT" \
+    "${BASE_URL}:${ADVISOR_PORT}/sources" 2>/dev/null || true)
+if echo "$advisor_sources_resp" | grep -q '"total_documents"'; then
+    pass "GET /sources from advisor (domain registry)"
+else
+    fail "GET /sources from advisor — unexpected response"
+fi
+
+# 3h. GET health from advisor (verify ollama connectivity)
+advisor_health_resp=$(curl -s --max-time "$REQUEST_TIMEOUT" \
+    "${BASE_URL}:${ADVISOR_PORT}/health" 2>/dev/null || true)
+if echo "$advisor_health_resp" | grep -q '"ollama":"connected"'; then
+    pass "Advisor → Ollama connectivity (via health check)"
+else
+    fail "Advisor → Ollama connectivity — ollama not connected"
+fi
+
+# 3i. If we have a token, test proxy data routes through the server as well
 if [[ -n "$TOKEN" ]]; then
     AUTH_HEADER="Authorization: Bearer ${TOKEN}"
 
@@ -350,11 +383,21 @@ if [[ -n "$TOKEN" ]]; then
     else
         fail "GET /finance/sources (proxy, HTTP ${proxy_sources_code})"
     fi
+    # Advisor sources through proxy
+    proxy_advisor_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time "$REQUEST_TIMEOUT" \
+        -H "$AUTH_HEADER" \
+        "${BASE_URL}:${SERVER_PORT}/advisor/sources" 2>/dev/null || true)
+    if [[ "$proxy_advisor_code" =~ ^2 ]]; then
+        pass "GET /advisor/sources (proxy, HTTP ${proxy_advisor_code})"
+    else
+        fail "GET /advisor/sources (proxy, HTTP ${proxy_advisor_code})"
+    fi
 else
     skip "GET /commander/tasks (proxy) — no token"
     skip "GET /translator/languages (proxy) — no token"
     skip "GET /remarkable/tree (proxy) — no token"
     skip "GET /finance/sources (proxy) — no token"
+    skip "GET /advisor/sources (proxy) — no token"
 fi
 
 # ---------------------------------------------------------------------------
