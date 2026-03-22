@@ -1,0 +1,36 @@
+# authorized_keys template for aspirant-cell
+#
+# This file shows how to assemble ~/.ssh/authorized_keys on the cell
+# from the per-device .pub files in authorized_keys.d/.
+#
+# Format: [options] key-type key-data comment
+#
+# To deploy: copy the relevant lines to ~/.ssh/authorized_keys on the cell.
+# Do NOT commit the assembled file — it contains server-side paths.
+
+# --- laptop: full shell access ---
+# No restrictions. Can do anything over SSH.
+# Also maintains a reverse tunnel on port 2200 (via autossh on the laptop side).
+#
+# <contents of authorized_keys.d/laptop.pub>
+
+# --- phone: full shell access ---
+# No restrictions. Connects from Termux on Android.
+#
+# <contents of authorized_keys.d/phone.pub>
+
+# --- remarkable: rsync only ---
+# Locked to the rsync validation script. No shell, no forwarding.
+#
+# command="/home/aspirant/remarkable-sync-validate.sh",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding <contents of authorized_keys.d/remarkable.pub>
+
+# --- template: single command ---
+# Replace /path/to/script with the allowed command.
+#
+# command="/path/to/script",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding <contents of authorized_keys.d/device-name.pub>
+
+# --- template: reverse tunnel only ---
+# Replace NNNN with the assigned tunnel port (2200-2299 range).
+# The device can only open a reverse tunnel, nothing else.
+#
+# no-pty,no-agent-forwarding,no-X11-forwarding,permitopen="localhost:NNNN" <contents of authorized_keys.d/device-name.pub>
