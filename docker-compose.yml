@@ -93,6 +93,16 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /data:/host/data:ro
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+    environment:
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
+      ALERT_EMAIL_FROM: ${ALERT_EMAIL_FROM:-}
+      DAILY_REPORT_HOUR: ${DAILY_REPORT_HOUR:-8}
 
   kiwix:
     image: ghcr.io/kiwix/kiwix-serve:latest
