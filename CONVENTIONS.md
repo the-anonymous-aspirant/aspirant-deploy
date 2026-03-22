@@ -102,7 +102,15 @@ Ports are assigned sequentially. Reserve the next available port when adding a s
 | 5432 | 5432 | PostgreSQL | TCP |
 | 8081 | 8080 | Server (Go/Gin) | HTTP |
 | 8082 | 8000 | Transcriber (FastAPI) | HTTP |
-| 8083 | — | *Next service* | — |
+| 8083 | 8000 | Commander (FastAPI) | HTTP |
+| 8084 | 8000 | Translator (FastAPI) | HTTP |
+| 8085 | 8000 | Monitor (FastAPI) | HTTP |
+| 8086 | 8000 | Remarkable (FastAPI) | HTTP |
+| 8087 | 8000 | Finance (FastAPI) | HTTP |
+| 8088 | 8000 | Advisor (FastAPI) | HTTP |
+| — | 11434 | Ollama (internal only) | HTTP |
+| — | 8080 | Kiwix (internal only) | HTTP |
+| 8089 | — | *Next service* | — |
 | 8999 | 80 | Client (alt) | HTTP |
 | 41922 | 22 | SSH | TCP |
 
@@ -115,6 +123,11 @@ Named volumes use short, descriptive names:
 | `pgdata` | `/var/lib/postgresql/data` | PostgreSQL data |
 | `filedata` | `/data/files` | User-uploaded files |
 | `audiodata` | `/data/audio` | Voice message audio |
+| `translatordata` | `/data/models` | Argos translation models |
+| `remarkabledata` | `/data/remarkable` | reMarkable sync data |
+| `advisordata` | `/data/advisor` | RAG knowledge base documents |
+| `ollamadata` | `/root/.ollama` | LLM model weights |
+| `kiwixdata` | `/data` | Wikipedia ZIM files |
 
 Pattern for new volumes: `{contenttype}data` (e.g., `imagedata`, `cachedata`)
 
@@ -658,6 +671,15 @@ Rules:
 | `S3_BUCKET_NAME` | Server | `aspirant-bucket` |
 | `WHISPER_MODEL` | Transcriber | `base` |
 | `AUDIO_STORAGE_PATH` | Transcriber | `/data/audio` |
+| `OLLAMA_URL` | Advisor | `http://ollama:11434` |
+| `OLLAMA_MODEL` | Advisor | `llama3.1:8b-instruct-q4_0` |
+| `SMTP_HOST` | Monitor | `smtp.gmail.com` |
+| `SMTP_PORT` | Monitor | `587` |
+| `SMTP_USER` | Monitor | (email address) |
+| `SMTP_PASSWORD` | Monitor | (app password) |
+| `ALERT_EMAIL_TO` | Monitor | (recipient email) |
+| `ALERT_EMAIL_FROM` | Monitor | (sender email) |
+| `DAILY_REPORT_HOUR` | Monitor | `8` |
 
 ### `.env` File
 
@@ -673,10 +695,10 @@ Rules:
 
 | Document | Filename | Location |
 |----------|----------|----------|
-| Spec | `{PROJECT}_SPEC.md` | `docs/` |
-| Architecture | `{PROJECT}_ARCHITECTURE.md` | `docs/` |
+| Spec | `SPEC.md` | `docs/` |
+| Architecture | `ARCHITECTURE.md` | `docs/` |
 | Changelog | `CHANGELOG.md` | `docs/` |
-| Operations | `{PROJECT}_OPERATIONS.md` | `docs/` |
+| Operations | `OPERATIONS.md` | `docs/` |
 | Decisions | `DECISIONS.md` | `docs/` |
 | Style guide | `STYLE_GUIDE.md` | `docs/` |
 | README | `README.md` | repo root |
