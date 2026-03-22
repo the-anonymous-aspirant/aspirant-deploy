@@ -33,10 +33,12 @@ services:
       REMARKABLE_URL: http://remarkable:8000
       FINANCE_URL: http://finance:8000
       ADVISOR_URL: http://advisor:8000
+      ASSET_BASE_PATH: /data/assets
     env_file:
       - .env
     volumes:
       - filedata-dev:/data/files
+      - assetdata-dev:/data/assets
     depends_on:
       postgres:
         condition: service_healthy
@@ -163,6 +165,7 @@ services:
 volumes:
   pgdata-dev:
   filedata-dev:
+  assetdata-dev:
   audiodata-dev:
   translatordata-dev:
   kiwixdata-dev:
