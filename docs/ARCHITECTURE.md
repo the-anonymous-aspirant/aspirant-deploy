@@ -107,20 +107,34 @@ Internet
 
 ### File Management
 ```
-1. Upload           → client → server → Docker volume (filedata)
+1. Upload           → client → server → Docker volume (/data/files)
 2. Download         → client → server → reads from volume
-3. Assets (images)  → client → server → AWS S3
+3. Assets (images)  → client → server → local filesystem (/data/assets)
 ```
 
-## Volume Layout
+Asset serving uses an in-memory MD5 index built at startup. The client requests assets
+by hash via `GET /fetch-object/:hash`, and the server does an O(1) lookup. See
+`aspirant-server/server/storage/storage.go` for the `StorageBackend` interface.
+
+## Volume Layout (Production)
+
+Production uses bind mounts to the RAID1 array at `/data/aspirant/`:
 
 ```
-Docker Volumes:
-├── pgdata           → /var/lib/postgresql/data  (PostgreSQL)
-├── filedata         → /data/files               (server: user files)
-├── audiodata        → /data/audio               (transcriber: recordings)
-└── translatordata   → /data/models              (translator: language models)
+/data/aspirant/
+├── files/           → /data/files               (server: user file uploads)
+├── assets/          → /data/assets              (server: static assets — images, audio, dictionary)
+├── audio/           → /data/audio               (transcriber: voice recordings)
+├── models/          → /data/models              (translator: Argos language models)
+├── kiwix/           → /data                     (kiwix: Wikipedia .zim files)
+├── remarkable/      → /data/remarkable          (remarkable: tablet sync data)
+├── finance/         → /app/seed_data            (finance: seed CSV data)
+├── advisor/         → /data/advisor             (advisor: RAG knowledge base)
+└── ollama/          → /root/.ollama             (ollama: LLM model weights)
 ```
+
+Development uses named Docker volumes (`pgdata-dev`, `filedata-dev`, `assetdata-dev`, etc.)
+to keep dev data fully isolated from production.
 
 ## Network
 
@@ -131,3 +145,35 @@ All services share a single Docker Compose bridge network. Service names resolve
 - `transcriber` → Whisper service
 - `commander` → Command parser
 - `translator` → Translation service
+- `monitor` → System monitoring sidecar
+- `kiwix` → Offline Wikipedia (kiwix-serve)
+- `remarkable` → reMarkable tablet integration
+- `finance` → Budget/finance tracker
+- `advisor` → RAG knowledge base
+- `ollama` → Local LLM runtime
+
+## Host Machine (aspirant-cell)
+
+### Access
+```bash
+ssh cell                    # SSH alias configured in ~/.ssh/config
+```
+
+### Specs
+- **OS:** Ubuntu 24.04 LTS (x86_64)
+- **User:** `aspirant` (home: `/home/aspirant`)
+- **Deploy dir:** `/home/aspirant/aspirant-deploy/`
+- **Data dir:** `/data/aspirant/` (RAID1 array)
+- **Docker:** Installed, managed by `aspirant` user
+
+### Installed tools
+- Docker, Docker Compose
+- AWS CLI v2 (installed manually — `apt` package unavailable on 24.04)
+- No Python pip, no package managers beyond apt
+
+### Gotchas
+- **Architecture is x86_64** — download `linux-x86_64` binaries, not `aarch64`
+- **No pip** — install CLI tools via apt or manual binary downloads
+- **AWS CLI** was installed for the S3-to-local migration; it is no longer needed for
+  normal operations but remains available for any future AWS tasks
+- **Locale warnings** are cosmetic — `LC_CTYPE` not fully configured, does not affect operation
