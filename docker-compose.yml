@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${DB_USER}
@@ -30,6 +30,7 @@ services:
       KIWIX_URL: http://kiwix:8080
       REMARKABLE_URL: http://remarkable:8000
       FINANCE_URL: http://finance:8000
+      ADVISOR_URL: http://advisor:8000
     env_file:
       - .env
     volumes:
@@ -124,6 +125,30 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+
+  advisor:
+    image: ghcr.io/the-anonymous-aspirant/aspirant-advisor:latest
+    restart: unless-stopped
+    ports:
+      - "8088:8000"
+    env_file:
+      - .env
+    environment:
+      DB_HOST: postgres
+      OLLAMA_URL: http://ollama:11434
+    volumes:
+      - /data/aspirant/advisor:/data/advisor
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 2g
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - /data/aspirant/ollama:/root/.ollama
+    mem_limit: 6g
 
 volumes:
   pgdata:
