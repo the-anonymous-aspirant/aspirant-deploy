@@ -41,12 +41,27 @@ services:
       postgres:
         condition: service_healthy
 
-  client:
-    image: ghcr.io/the-anonymous-aspirant/aspirant-client:latest
+  gateway:
+    image: nginx:alpine
     restart: unless-stopped
     ports:
       - "80:80"
       - "8999:80"
+    volumes:
+      - ./nginx/gateway.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/state:/etc/nginx/state:ro
+    depends_on:
+      - client-blue
+
+  client-blue:
+    image: ghcr.io/the-anonymous-aspirant/aspirant-client:latest
+    restart: unless-stopped
+
+  client-green:
+    image: ghcr.io/the-anonymous-aspirant/aspirant-client:latest
+    restart: unless-stopped
+    profiles:
+      - green
 
   transcriber:
     image: ghcr.io/the-anonymous-aspirant/aspirant-transcriber:latest
