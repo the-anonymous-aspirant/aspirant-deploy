@@ -41,12 +41,15 @@ services:
       postgres:
         condition: service_healthy
 
-  client:
+  # Blue-green client: port 80 assigned via docker-compose.override.yml
+  # Deploy with: ./scripts/deploy-client.sh
+  client-blue:
     image: ghcr.io/the-anonymous-aspirant/aspirant-client:latest
     restart: unless-stopped
-    ports:
-      - "80:80"
-      - "8999:80"
+
+  client-green:
+    image: ghcr.io/the-anonymous-aspirant/aspirant-client:latest
+    restart: unless-stopped
 
   transcriber:
     image: ghcr.io/the-anonymous-aspirant/aspirant-transcriber:latest

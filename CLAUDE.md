@@ -16,6 +16,7 @@ This is the central hub for the Aspirant platform — deployment configuration, 
 | `_template/` | Skeleton files for scaffolding a new service |
 | `.env.example` | Environment variable template |
 | `docs/` | Platform-wide architecture, operations, decisions, changelog |
+| `scripts/deploy-client.sh` | Blue-green client deploy (swap active slot) |
 | `tests/integration.sh` | Cross-service integration tests |
 
 ## Before You Start
@@ -34,7 +35,7 @@ Read these in order:
 |---------|------|------|------|
 | PostgreSQL | (standard image) | 5432 | Database |
 | Server | `../aspirant-server` | 8081→8080 | Go/Gin |
-| Client | `../aspirant-client` | 80 | Vue.js/Nginx |
+| Client | `../aspirant-client` | 80 (blue-green) | Vue.js/Nginx |
 | Transcriber | `../aspirant-transcriber` | 8082→8000 | Python/FastAPI |
 | Commander | `../aspirant-commander` | 8083→8000 | Python/FastAPI |
 | Translator | `../aspirant-translator` | 8084→8000 | Python/FastAPI |
@@ -61,8 +62,13 @@ See `_template/README.md` for the full pre/post-implementation checklist.
 ## Common Commands
 
 ```bash
-# Production
+# Production (backend services)
 docker compose pull && docker compose up -d --force-recreate
+
+# Client deploy (blue-green swap)
+./scripts/deploy-client.sh          # pull + swap to standby slot
+./scripts/deploy-client.sh status   # show which slot is active
+./scripts/deploy-client.sh swap     # swap without pulling (rollback)
 
 # Development (requires sibling repos)
 docker compose -f docker-compose.dev.yml up -d
@@ -93,4 +99,4 @@ python -m app.main scan-all ~/git/
 - Dev compose runs PostgreSQL on port 5433 (not 5432) to avoid conflicts
 - Dev volumes are separate (`pgdata-dev`) so dev data never mixes with production
 - Always use `--force-recreate` when deploying new images
-- Always restart the client container when restarting backend services (Nginx caches DNS)
+- Client uses blue-green deployment — use `./scripts/deploy-client.sh` instead of manual recreate
