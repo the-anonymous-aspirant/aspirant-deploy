@@ -16,8 +16,7 @@ This is the central hub for the Aspirant platform — deployment configuration, 
 | `_template/` | Skeleton files for scaffolding a new service |
 | `.env.example` | Environment variable template |
 | `docs/` | Platform-wide architecture, operations, decisions, changelog |
-| `nginx/` | Gateway config for blue-green client deployment |
-| `scripts/deploy-client.sh` | Zero-downtime client deploy (blue-green swap) |
+| `scripts/deploy-client.sh` | Blue-green client deploy (swap active slot) |
 | `tests/integration.sh` | Cross-service integration tests |
 
 ## Before You Start
@@ -36,8 +35,7 @@ Read these in order:
 |---------|------|------|------|
 | PostgreSQL | (standard image) | 5432 | Database |
 | Server | `../aspirant-server` | 8081→8080 | Go/Gin |
-| Gateway | (nginx:alpine) | 80 | Reverse proxy (blue-green) |
-| Client | `../aspirant-client` | internal 80 | Vue.js/Nginx |
+| Client | `../aspirant-client` | 80 (blue-green) | Vue.js/Nginx |
 | Transcriber | `../aspirant-transcriber` | 8082→8000 | Python/FastAPI |
 | Commander | `../aspirant-commander` | 8083→8000 | Python/FastAPI |
 | Translator | `../aspirant-translator` | 8084→8000 | Python/FastAPI |
@@ -67,9 +65,9 @@ See `_template/README.md` for the full pre/post-implementation checklist.
 # Production (backend services)
 docker compose pull && docker compose up -d --force-recreate
 
-# Client deploy (zero-downtime blue-green)
-./scripts/deploy-client.sh          # pull + swap
-./scripts/deploy-client.sh status   # show active slot
+# Client deploy (blue-green swap)
+./scripts/deploy-client.sh          # pull + swap to standby slot
+./scripts/deploy-client.sh status   # show which slot is active
 ./scripts/deploy-client.sh swap     # swap without pulling (rollback)
 
 # Development (requires sibling repos)
@@ -102,4 +100,3 @@ python -m app.main scan-all ~/git/
 - Dev volumes are separate (`pgdata-dev`) so dev data never mixes with production
 - Always use `--force-recreate` when deploying new images
 - Client uses blue-green deployment — use `./scripts/deploy-client.sh` instead of manual recreate
-- After restarting backend services, redeploy the client (`./scripts/deploy-client.sh`) so nginx picks up new DNS
