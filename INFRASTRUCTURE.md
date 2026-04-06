@@ -36,7 +36,7 @@ Full-stack web platform (Go + Vue.js + Python microservices) running on a single
   │                                                                  │
   │  ┌────────┐  ┌────────┐  ┌──────────┐  ┌─────────┐  ┌────────┐ │
   │  │ Client │  │ Server │  │Transcribe│  │Commander│  │Translat│ │
-  │  │ Nginx  │  │ Go/Gin │  │ FastAPI  │  │ FastAPI │  │ FastAPI│ │
+  │  │ B / G  │  │ Go/Gin │  │ FastAPI  │  │ FastAPI │  │ FastAPI│ │
   │  │ :80    │  │ :8081  │  │ :8082    │  │ :8083   │  │ :8084  │ │
   │  └────────┘  └───┬────┘  └────┬─────┘  └────┬────┘  └────────┘ │
   │                  │            │              │                   │
@@ -64,7 +64,7 @@ Full-stack web platform (Go + Vue.js + Python microservices) running on a single
 |---------|-----------|------|----------------|-----------|---------------|-------------|
 | **PostgreSQL** | — | pgvector/pgvector:pg16 | — (pgvector image) | 5432 | 5432 | — |
 | **Server** | aspirant-server | Go 1.23 + Gin + GORM | `ghcr.io/.../aspirant-server` | 8081 | 8080 | — |
-| **Client** | aspirant-client | Vue 3 + Vuetify + Nginx | `ghcr.io/.../aspirant-client` | 80, 8999 | 80 | — |
+| **Client (blue/green)** | aspirant-client | Vue 3 + Vuetify + Nginx | `ghcr.io/.../aspirant-client` | 80, 8999 | 80 | — |
 | **Transcriber** | aspirant-transcriber | Python 3.11 + FastAPI + Whisper | `ghcr.io/.../aspirant-transcriber` | 8082 | 8000 | 2 GB |
 | **Commander** | aspirant-commander | Python 3.11 + FastAPI + SQLAlchemy + dateparser | `ghcr.io/.../aspirant-commander` | 8083 | 8000 | — |
 | **Translator** | aspirant-translator | Python 3.11 + FastAPI + Argos Translate | `ghcr.io/.../aspirant-translator` | 8084 | 8000 | 2 GB |
@@ -78,10 +78,9 @@ Full-stack web platform (Go + Vue.js + Python microservices) running on a single
 ### Service Dependencies
 
 ```
-Client ──(standalone, no backend dependency)
+Client (blue/green) ──(standalone, no backend dependency; port 80 via override)
 
 Server ──depends on──▶ PostgreSQL (health check)
-       ──connects to──▶ AWS S3
        ──proxies to──▶ Transcriber, Commander, Translator, Monitor, Kiwix, Remarkable, Finance
 
 Transcriber ──depends on──▶ PostgreSQL (health check)
@@ -212,7 +211,7 @@ DNS is updated every 5 minutes by a cron job (`~/update-dns.sh`) to handle dynam
 | Port | Service | Access |
 |------|---------|--------|
 | 22 (→41922) | SSH | Direct via `home.the-aspirant.com` |
-| 80 | Client (Nginx) | Via Cloudflare proxy |
+| 80 | Client (blue/green) | Via Cloudflare proxy |
 | 5432 | PostgreSQL | Internal only (localhost) |
 | 8081 | Server API | Via Cloudflare proxy |
 | 8082 | Transcriber API | Local network only |
@@ -222,7 +221,7 @@ DNS is updated every 5 minutes by a cron job (`~/update-dns.sh`) to handle dynam
 | 8086 | Remarkable API | Local network only |
 | 8087 | Finance API | Local network only |
 | 8088 | Advisor API | Local network only |
-| 8999 | Client (alt) | Alternate frontend port |
+| 8999 | Client alt (blue/green) | Alternate frontend port |
 
 ### Internal Docker Network
 
@@ -230,7 +229,7 @@ Services communicate by container name. The Go server acts as API gateway, proxy
 
 - `postgres` — database hostname
 - `server` — Go API gateway
-- `client` — frontend (standalone)
+- `client-blue` / `client-green` — frontend slots (one active at a time, port 80 via override)
 - `transcriber` — transcription API (proxied by server via `TRANSCRIBER_URL`, default `http://transcriber:8000`)
 - `commander` — voice command parser (proxied by server via `COMMANDER_URL`, default `http://commander:8000`)
 - `translator` — text translation (proxied by server via `TRANSLATOR_URL`, default `http://translator:8000`)
@@ -290,15 +289,21 @@ Per-repo: Checkout → Test → Login to GHCR → Build & push Docker image
 ```bash
 ssh cell
 cd ~/aspirant-deploy
-docker compose pull
-docker compose up -d --force-recreate
+
+# Backend services
+docker compose pull && docker compose up -d --force-recreate
+
+# Client (blue-green swap)
+./scripts/deploy-client.sh          # pull latest + swap to standby slot
+./scripts/deploy-client.sh status   # show which slot is active
+./scripts/deploy-client.sh swap     # swap without pulling (instant rollback)
 ```
 
 The SSH alias `cell` is configured in `~/.ssh/config`. Some older docs may reference `ssh aspirant` — both work but `cell` is preferred.
 
 No automated deployment — manual pull after CI builds complete.
 
-**Important:** Always use `--force-recreate` to pick up new images. Always restart the client container when restarting backend services (nginx caches Docker DNS at startup).
+**Important:** Always use `--force-recreate` to pick up new images. Use `./scripts/deploy-client.sh` for the frontend — it handles blue-green swap with health checks.
 
 ---
 
