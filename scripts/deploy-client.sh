@@ -39,7 +39,14 @@ case "${1:-deploy}" in
     docker compose pull "client-$STANDBY"
     docker compose up -d --force-recreate "client-$STANDBY"
     echo "Health-checking client-$STANDBY..."
-    if ! docker compose exec -T "client-$STANDBY" wget -qO /dev/null --timeout=5 http://localhost:80/; then
+    OK=false
+    for i in 1 2 3 4 5; do
+      if docker compose exec -T "client-$STANDBY" wget -qO /dev/null --timeout=5 http://127.0.0.1:80/ 2>/dev/null; then
+        OK=true; break
+      fi
+      sleep 2
+    done
+    if [ "$OK" = false ]; then
       echo "FAIL — stopping client-$STANDBY, client-$ACTIVE still serving"
       docker compose stop "client-$STANDBY"
       exit 1
