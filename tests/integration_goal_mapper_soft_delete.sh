@@ -176,7 +176,7 @@ SESSION_ID=$(echo "$SESSION_RESP" | grep -o '"editing_session_id":"[^"]*"' | cut
 
 # Create A (root)
 A_RESP=$(scurl -X POST "${BASE_URL}/goals/trees/${TREE1_ID}/nodes" \
-    -d '{"name":"Node A","node_type":"goal","color":"#FF0000"}')
+    -d '{"name":"Node A","type":"goal","color":"#FF0000"}')
 NODE_A=$(extract_id "$A_RESP")
 
 # Create B (child of A)
@@ -266,7 +266,7 @@ SESSION_ID=$(echo "$SESSION_RESP" | grep -o '"editing_session_id":"[^"]*"' | cut
 
 # Create parent
 P_RESP=$(scurl -X POST "${BASE_URL}/goals/trees/${TREE2_ID}/nodes" \
-    -d '{"name":"Parent","node_type":"goal","color":"#00FF00"}')
+    -d '{"name":"Parent","type":"goal","color":"#00FF00"}')
 PARENT_ID=$(extract_id "$P_RESP")
 
 # Create leaf child
@@ -348,7 +348,7 @@ SESSION_ID=$(echo "$SESSION_RESP" | grep -o '"editing_session_id":"[^"]*"' | cut
 
 # Create A (root)
 A_RESP=$(scurl -X POST "${BASE_URL}/goals/trees/${TREE3_ID}/nodes" \
-    -d '{"name":"Node A","node_type":"goal","color":"#0000FF"}')
+    -d '{"name":"Node A","type":"goal","color":"#0000FF"}')
 S3_A=$(extract_id "$A_RESP")
 
 # Create B (child of A)
@@ -468,7 +468,7 @@ SESSION_ID=$(echo "$SESSION_RESP" | grep -o '"editing_session_id":"[^"]*"' | cut
 
 # Create chain: A→B→C→D→E
 S4_A_RESP=$(scurl -X POST "${BASE_URL}/goals/trees/${TREE4_ID}/nodes" \
-    -d '{"name":"Chain A","node_type":"goal","color":"#FFAA00"}')
+    -d '{"name":"Chain A","type":"goal","color":"#FFAA00"}')
 S4_A=$(extract_id "$S4_A_RESP")
 
 S4_B_RESP=$(scurl -X POST "${BASE_URL}/goals/trees/${TREE4_ID}/nodes" \
