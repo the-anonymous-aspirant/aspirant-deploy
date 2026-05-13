@@ -146,7 +146,7 @@ separator "Phase 2: Create Node Hierarchy (depth 1-5)"
 
 # Depth 1: Root goal
 ROOT_RESP=$(scurl -X POST "${BASE_URL}/goals/trees/${TREE_ID}/nodes" \
-    -d '{"name":"Root Goal","node_type":"goal","color":"#4A90D9"}')
+    -d '{"name":"Root Goal","type":"goal","color":"#4A90D9"}')
 ROOT_ID=$(echo "$ROOT_RESP" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
 
 if [[ -z "$ROOT_ID" ]]; then
