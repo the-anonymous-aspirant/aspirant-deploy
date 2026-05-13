@@ -4,7 +4,7 @@ Current state of everything deployed across projects following these standards. 
 
 When adding a new service, also follow the naming and contract standards in [CONVENTIONS.md](CONVENTIONS.md). For architectural rationale, see [DECISIONS.md](DECISIONS.md).
 
-*Last updated: 2026-03-22*
+*Last updated: 2026-05-13*
 
 ---
 
@@ -128,6 +128,10 @@ Kiwix ──(standalone, serves ZIM files)
 | `messages` | `id` (int, auto) | Message board posts | content, sender_id, sent_at, deleted_at (soft delete) |
 | `ludde_feeding_times` | `id` (int, auto) | Pet feeding tracker | timestamp, comment |
 | `templates` | `id` (int, auto) | Template/demo model | unique_not_null_field |
+| `goal_trees` | `id` (int, auto) | Goal Mapper trees (user-scoped) | user_id (FK), name, root_node_id, editing_session_id, deleted_at (soft delete) |
+| `goal_nodes` | `id` (int, auto) | Goal graph nodes | tree_id (FK), parent_id (self-FK), name, node_type (root/goal/milestone/step), color, body (text), sort_order, planned_start, planned_end, completed_at, manual_complete, deleted_at (soft delete) |
+| `goal_edges` | `id` (int, auto) | Directed edges between nodes | tree_id (FK), from_id (FK), to_id (FK, unique) |
+| `goal_comments` | `id` (int, auto) | Comments on goal nodes | node_id (FK), user_id (FK), body (text), deleted_at (soft delete) |
 
 #### Owned by Transcriber (Python/SQLAlchemy)
 
@@ -169,6 +173,55 @@ Kiwix ──(standalone, serves ZIM files)
 | Gamer | Game-specific access |
 | Guest | Public/read-only access |
 | Deleted | Soft-deleted users |
+
+---
+
+## API Endpoints (Server)
+
+### Goal Mapper (`/trusted/goals/...`)
+
+Requires JWT authentication (Trusted role or above). All endpoints are user-scoped — users can only access their own trees/nodes.
+
+#### Trees
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/trusted/goals/trees` | Create a new tree |
+| GET | `/trusted/goals/trees` | List user's trees |
+| GET | `/trusted/goals/trees/:id` | Get single tree |
+| PATCH | `/trusted/goals/trees/:id` | Rename tree |
+| DELETE | `/trusted/goals/trees/:id` | Soft-delete tree |
+
+#### Session Lock
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/trusted/goals/trees/:id/open` | Acquire editing session |
+| POST | `/trusted/goals/trees/:id/take-over` | Force-acquire (bumps other session) |
+| POST | `/trusted/goals/trees/:id/release` | Release editing session |
+
+#### Nodes
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/trusted/goals/trees/:tree_id/nodes` | Create node (types: root, goal, milestone, step) |
+| GET | `/trusted/goals/trees/:tree_id/nodes` | List nodes (supports timeline filter query params) |
+| GET | `/trusted/goals/trees/:tree_id/nodes/:id` | Get single node |
+| PATCH | `/trusted/goals/trees/:tree_id/nodes/:id` | Update node |
+| DELETE | `/trusted/goals/trees/:tree_id/nodes/:id` | Soft-delete node (edges reconnect: parent inherits children) |
+| POST | `/trusted/goals/trees/:tree_id/nodes/:id/complete` | Mark node completed (triggers auto-rollup to ancestors) |
+| POST | `/trusted/goals/trees/:tree_id/nodes/:id/uncomplete` | Revert completion |
+
+**Timeline filter query params** (on GET `/nodes`): `period` (day/week/month/quarter/year/custom), `mode` (planned/achieved/combined), `value` (ISO date or range).
+
+#### Comments
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/trusted/goals/nodes/:node_id/comments` | Add comment to node |
+| GET | `/trusted/goals/nodes/:node_id/comments` | List comments on node |
+| PATCH | `/trusted/goals/comments/:id` | Edit comment |
+| DELETE | `/trusted/goals/comments/:id` | Delete comment |
 
 ---
 
