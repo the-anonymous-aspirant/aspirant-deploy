@@ -165,6 +165,18 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:8081/remarkable/health
 
 Tests validate direct health endpoints, proxied routes through the Go server, data flow smoke tests, and nginx reverse proxy connectivity.
 
+### Goal Mapper E2E Smoke
+
+```bash
+# Post-deploy smoke covering all 11 closure criteria (epic #11978)
+./tests/smoke_goal_mapper_e2e.sh
+
+# Against production:
+BASE_URL=https://the-aspirant.com/api ./tests/smoke_goal_mapper_e2e.sh
+```
+
+Creates two fresh test users, exercises the full goal mapper user flow (tree CRUD, node hierarchy, auto-rollup, soft-delete edge survival, timeline filter, user isolation), and cleans up after itself. Idempotent.
+
 ## Volumes
 
 | Volume | Container Path | Purpose | Backup Priority |
