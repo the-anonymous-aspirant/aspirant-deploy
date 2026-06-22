@@ -4,7 +4,7 @@ Current state of everything deployed across projects following these standards. 
 
 When adding a new service, also follow the naming and contract standards in [CONVENTIONS.md](CONVENTIONS.md). For architectural rationale, see [DECISIONS.md](DECISIONS.md).
 
-*Last updated: 2026-05-13*
+*Last updated: 2026-06-22*
 
 ---
 
@@ -72,6 +72,7 @@ Full-stack web platform (Go + Vue.js + Python microservices) running on a single
 | **Remarkable** | aspirant-remarkable | Python 3.11 + FastAPI + rmscene + rmc + cairosvg | `ghcr.io/.../aspirant-remarkable` | 8086 | 8000 | 2 GB |
 | **Finance** | aspirant-finance | Python FastAPI | `ghcr.io/.../aspirant-finance` | 8087 | 8000 | — |
 | **Advisor** | aspirant-advisor | Python 3.11 + FastAPI + sentence-transformers + pgvector | `ghcr.io/.../aspirant-advisor` | 8088 | 8000 | 2 GB |
+| **Browser** | aspirant-browser | Python 3.11 + FastAPI + Selenium + Chromium | `ghcr.io/.../aspirant-browser` | 8089 | 8000 | 2 GB |
 | **Ollama** | — | Ollama (LLM inference) | `ollama/ollama` | — (internal) | 11434 | 6 GB |
 | **Kiwix** | — | kiwix-serve (3rd party) | `ghcr.io/kiwix/kiwix-serve` | — (internal) | 8080 | — |
 
@@ -102,6 +103,11 @@ Finance ──depends on──▶ PostgreSQL (health check)
 
 Advisor ──depends on──▶ PostgreSQL (health check)
         ──connects to──▶ Ollama (LLM generation)
+
+Browser ──depends on──▶ PostgreSQL (health check)
+        ──connects to──▶ Tor SOCKS5 sidecar (egress anonymisation)
+        ──connects to──▶ Ollama (LLM-authored flow generation)
+        ──writes to──▶ /data/aspirant/browser_flows (per-run screenshots, DOM, HAR)
 
 Ollama ──(standalone, serves LLM models)
 
@@ -237,6 +243,7 @@ Requires JWT authentication (Trusted role or above). All endpoints are user-scop
 | `translatordata` | `/data/models` | Translator | Argos translation language models (re-downloadable) |
 | `remarkabledata` | `/data/remarkable` | Remarkable | Synced reMarkable notebook files + to-device staging |
 | `advisordata` | `/data/advisor` | Advisor | Uploaded documents (contracts, policies, law) |
+| `browserdata` | `/data/aspirant/browser_flows` | Browser | Per-run browser-flow assets (screenshots, DOM snapshots, HAR files), keyed by `run_id` |
 | `ollamadata` | `/root/.ollama` | Ollama | LLM model weights (re-downloadable) |
 | `kiwixdata` | `/data` | Kiwix | Wikipedia ZIM files (re-downloadable) |
 
@@ -274,6 +281,7 @@ DNS is updated every 5 minutes by a cron job (`~/update-dns.sh`) to handle dynam
 | 8086 | Remarkable API | Local network only |
 | 8087 | Finance API | Local network only |
 | 8088 | Advisor API | Local network only |
+| 8089 | Browser API | Local network only |
 | 8999 | Client alt (blue/green) | Alternate frontend port |
 
 ### Internal Docker Network
@@ -291,6 +299,7 @@ Services communicate by container name. The Go server acts as API gateway, proxy
 - `remarkable` — reMarkable notebook rendering (proxied by server via `REMARKABLE_URL`, default `http://remarkable:8000`)
 - `finance` — financial transaction management (proxied by server via `FINANCE_URL`, default `http://finance:8000`)
 - `advisor` — document RAG assistant (proxied by server via `ADVISOR_URL`, default `http://advisor:8000`)
+- `browser` — agentic browser-automation runner (host port 8089; reachable internally as `http://browser:8000`; egresses via the Tor SOCKS5 sidecar)
 - `ollama` — local LLM inference (internal only, accessed by advisor via `OLLAMA_URL`, default `http://ollama:11434`)
 
 ### Device Mesh
@@ -334,6 +343,7 @@ Per-repo: Checkout → Test → Login to GHCR → Build & push Docker image
 | aspirant-remarkable | `ghcr.io/the-anonymous-aspirant/aspirant-remarkable:latest` |
 | aspirant-finance | `ghcr.io/the-anonymous-aspirant/aspirant-finance:latest` |
 | aspirant-advisor | `ghcr.io/the-anonymous-aspirant/aspirant-advisor:latest` |
+| aspirant-browser | `ghcr.io/the-anonymous-aspirant/aspirant-browser:latest` |
 
 **Retention:** 3 most recent versions kept, older versions deleted.
 
@@ -372,6 +382,7 @@ No automated deployment — manual pull after CI builds complete.
 | Remarkable API | None (v1) | Local network only, no auth |
 | Finance API | None (v1) | Local network only, no auth |
 | Advisor API | None (v1) | Local network only, no auth |
+| Browser API | None (v1) | Local network only, no auth |
 | Ollama API | None | Internal only, accessed by advisor |
 | SSH | Key-based | Port 41922, `~/.ssh/the_aspirant_git` |
 | GHCR | GitHub PAT | `read:packages` scope, stored on server |
@@ -436,5 +447,6 @@ The **monitor** service provides container status, disk usage, and system metric
 | Remarkable health | `curl http://localhost:8086/health` |
 | Finance health | `curl http://localhost:8087/health` |
 | Advisor health | `curl http://localhost:8088/health` |
+| Browser health | `curl http://localhost:8089/health` |
 | DB connectivity | `pg_isready -U $DB_USER -d $DB_NAME` |
 | Integration tests | `./tests/integration.sh` (in aspirant-deploy) |
