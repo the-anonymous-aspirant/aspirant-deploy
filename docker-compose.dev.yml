@@ -166,6 +166,25 @@ services:
         condition: service_healthy
     mem_limit: 2g
 
+  browser:
+    build:
+      context: ../aspirant-browser
+      dockerfile: Dockerfile-Browser
+    ports:
+      - "8089:8000"
+    env_file:
+      - .env
+    environment:
+      DB_HOST: postgres
+      BROWSER_FLOW_DATA_DIR: /data/aspirant/browser_flows
+    volumes:
+      - filedata-dev:/data/files
+      - browserdata-dev:/data/aspirant/browser_flows
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 2g
+
   ollama:
     image: ollama/ollama:latest
     volumes:
@@ -181,4 +200,5 @@ volumes:
   kiwixdata-dev:
   remarkabledata-dev:
   advisordata-dev:
+  browserdata-dev:
   ollamadata-dev:
