@@ -168,13 +168,21 @@ services:
     environment:
       DB_HOST: postgres
       BROWSER_FLOW_DATA_DIR: /data/aspirant/browser_flows
+      TOR_SOCKS_URL: socks5://tor:9050
     volumes:
       - /data/aspirant/files:/data/files
       - /data/aspirant/browser_flows:/data/aspirant/browser_flows
     depends_on:
       postgres:
         condition: service_healthy
+      tor:
+        condition: service_started
     mem_limit: 2g
+
+  tor:
+    image: dperson/torproxy:latest
+    restart: unless-stopped
+    mem_limit: 256m
 
   ollama:
     image: ollama/ollama:latest
