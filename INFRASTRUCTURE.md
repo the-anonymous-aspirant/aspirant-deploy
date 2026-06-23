@@ -73,6 +73,7 @@ Full-stack web platform (Go + Vue.js + Python microservices) running on a single
 | **Finance** | aspirant-finance | Python FastAPI | `ghcr.io/.../aspirant-finance` | 8087 | 8000 | — |
 | **Advisor** | aspirant-advisor | Python 3.11 + FastAPI + sentence-transformers + pgvector | `ghcr.io/.../aspirant-advisor` | 8088 | 8000 | 2 GB |
 | **Browser** | aspirant-browser | Python 3.11 + FastAPI + Selenium + Chromium | `ghcr.io/.../aspirant-browser` | 8089 | 8000 | 2 GB |
+| **Tor** | — | Tor SOCKS5 proxy (egress anonymisation for Browser) | `dperson/torproxy` | — (internal) | 9050 | 256 MB |
 | **Ollama** | — | Ollama (LLM inference) | `ollama/ollama` | — (internal) | 11434 | 6 GB |
 | **Kiwix** | — | kiwix-serve (3rd party) | `ghcr.io/kiwix/kiwix-serve` | — (internal) | 8080 | — |
 
@@ -300,6 +301,7 @@ Services communicate by container name. The Go server acts as API gateway, proxy
 - `finance` — financial transaction management (proxied by server via `FINANCE_URL`, default `http://finance:8000`)
 - `advisor` — document RAG assistant (proxied by server via `ADVISOR_URL`, default `http://advisor:8000`)
 - `browser` — agentic browser-automation runner (host port 8089; reachable internally as `http://browser:8000`; egresses via the Tor SOCKS5 sidecar)
+- `tor` — Tor SOCKS5 sidecar (internal only; reachable from `browser` as `socks5://tor:9050` via `TOR_SOCKS_URL`; no host port exposed)
 - `ollama` — local LLM inference (internal only, accessed by advisor via `OLLAMA_URL`, default `http://ollama:11434`)
 
 ### Device Mesh
@@ -415,6 +417,7 @@ No automated deployment — manual pull after CI builds complete.
 | `ADVISOR_URL` | Server | Low |
 | `OLLAMA_URL` | Advisor | Low |
 | `OLLAMA_MODEL` | Advisor | Low |
+| `TOR_SOCKS_URL` | Browser | Low |
 | `SMTP_HOST` | Monitor | Low |
 | `SMTP_PORT` | Monitor | Low |
 | `SMTP_USER` | Monitor | Low |
