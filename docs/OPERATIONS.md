@@ -48,6 +48,29 @@ docker compose pull
 docker compose up -d
 ```
 
+### Auto-pull on `:latest` image push
+
+`scripts/auto-pull.sh` polls every aspirant-* service whose image is `ghcr.io/the-anonymous-aspirant/aspirant-*:latest`. When the local image SHA drifts from the running container's image SHA, it recreates the container (or, for `client`, delegates to `scripts/deploy-client.sh` for the blue/green swap). Each decision is appended as one JSON line to `/var/log/aspirant-auto-pull/decisions.jsonl`. Failed deploys (container not running after `ASPIRANT_AUTO_PULL_HEALTH_WAIT` seconds, default 30 s) record the new SHA in `/var/lib/aspirant-auto-pull/known-bad.txt` so subsequent ticks skip the bad image instead of looping on it forever.
+
+Install on the cell:
+
+```bash
+sudo install -d -o aspirant -g aspirant /var/log/aspirant-auto-pull /var/lib/aspirant-auto-pull
+( crontab -l 2>/dev/null; echo '*/5 * * * * /home/aspirant/aspirant-deploy/scripts/auto-pull.sh >> /var/log/aspirant-auto-pull/cron.log 2>&1' ) | crontab -
+```
+
+Dry-run from the deploy directory to see what *would* happen without pulling or recreating:
+
+```bash
+./scripts/auto-pull.sh --dry-run
+```
+
+To force a single new SHA back into rotation after a fix lands, drop it from the known-bad cache:
+
+```bash
+sed -i '/sha256:abc.../d' /var/lib/aspirant-auto-pull/known-bad.txt
+```
+
 ### Development
 
 ```bash
