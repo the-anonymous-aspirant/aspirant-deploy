@@ -48,6 +48,14 @@ done
 mkdir -p "$LOG_DIR" "$STATE_DIR"
 touch "$KNOWN_BAD_FILE"
 
+# Cron fires every 5 min; a deploy + health wait may run longer. Take an
+# exclusive lock so a slow run does not race the next tick. Library-mode
+# sourcing skips the lock (no main loop runs).
+LOCK_FILE="${STATE_DIR}/auto-pull.lock"
+if [[ "${ASPIRANT_AUTO_PULL_LIB:-0}" -ne 1 && -z "${ASPIRANT_AUTO_PULL_LOCKED:-}" ]]; then
+  exec env ASPIRANT_AUTO_PULL_LOCKED=1 flock -n "$LOCK_FILE" "$0" "$@"
+fi
+
 iso_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 # log_decision SERVICE ACTION FROM_SHA TO_SHA REASON
