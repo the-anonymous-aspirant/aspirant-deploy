@@ -88,17 +88,41 @@ services:
       - /data/aspirant/models:/data/models
     mem_limit: 2g
 
+  # Read-only Docker API gateway for the network-published monitor
+  # container. Holds the docker.sock bind mount so `monitor` does not.
+  # Attached only to `docker_proxy_net`, which is not routed to the host
+  # (no `ports:` map), so a compromised published container cannot reach
+  # the socket. Allowlist is minimal: CONTAINERS (for /containers/json,
+  # inspect, and stats) + SYSTEM (for /system/df) + the default PING.
+  # POST=0 (default) blocks every write verb, so the socket cannot be
+  # used to launch a privileged container. See system_3 #1378.
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1
+      SYSTEM: 1
+      POST: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - docker_proxy_net
+    read_only: true
+    tmpfs:
+      - /run
+    mem_limit: 64m
+
   monitor:
     image: ghcr.io/the-anonymous-aspirant/aspirant-monitor:latest
     restart: unless-stopped
     ports:
       - "8085:8000"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
       - /data:/host/data:ro
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
     environment:
+      DOCKER_SOCKET: tcp://docker-socket-proxy:2375
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER:-}
@@ -106,6 +130,11 @@ services:
       ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
       ALERT_EMAIL_FROM: ${ALERT_EMAIL_FROM:-}
       DAILY_REPORT_HOUR: ${DAILY_REPORT_HOUR:-8}
+    networks:
+      - default
+      - docker_proxy_net
+    depends_on:
+      - docker-socket-proxy
 
   kiwix:
     image: ghcr.io/kiwix/kiwix-serve:latest
@@ -202,3 +231,10 @@ services:
 
 volumes:
   pgdata:
+
+networks:
+  default:
+  # Internal-only bridge used by monitor to reach docker-socket-proxy.
+  # Never mapped to the host. See docker-socket-proxy service comment.
+  docker_proxy_net:
+    internal: true
