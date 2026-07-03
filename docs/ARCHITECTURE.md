@@ -151,6 +151,10 @@ All services share a single Docker Compose bridge network. Service names resolve
 - `finance` → Budget/finance tracker
 - `advisor` → RAG knowledge base
 - `ollama` → Local LLM runtime
+- `browser` → aspirant-browser (agentic browser flows). Internal-only:
+  no host `ports:` mapping in production. All ingress goes through
+  `server:8080` with JWT + Admin/Trusted role checks, matching the
+  reverse-proxy pattern used for the other Python services.
 
 ## Host Machine (aspirant-cell)
 

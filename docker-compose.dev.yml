@@ -170,8 +170,12 @@ services:
     build:
       context: ../aspirant-browser
       dockerfile: Dockerfile-Browser
+    # Bind the dev port to loopback only so pytest / curl from the dev
+    # host still work, but the service isn't reachable from the LAN.
+    # See system_3 #1375: prod compose removes the mapping entirely and
+    # ingress runs exclusively through aspirant-server's authed proxy.
     ports:
-      - "8089:8000"
+      - "127.0.0.1:8089:8000"
     env_file:
       - .env
     environment:
