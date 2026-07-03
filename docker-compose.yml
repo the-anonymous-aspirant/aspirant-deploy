@@ -174,6 +174,10 @@ services:
       DB_HOST: postgres
       BROWSER_FLOW_DATA_DIR: /data/aspirant/browser_flows
       TOR_SOCKS_URL: socks5://tor:9050
+      # Silences /docs, /redoc, /openapi.json, and the uvicorn `Server`
+      # header per system_3 #1444. Dev compose intentionally omits the
+      # override so onboarding + curl testing keep working.
+      BROWSER_ENV: production
     volumes:
       - /data/aspirant/files:/data/files
       - /data/aspirant/browser_flows:/data/aspirant/browser_flows
