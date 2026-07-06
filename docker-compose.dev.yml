@@ -96,6 +96,24 @@ services:
       - translatordata-dev:/data/models
     mem_limit: 2g
 
+  # Mirrors docker-compose.yml: monitor reaches the Docker API through
+  # a read-only socket-proxy on an internal-only bridge. See the main
+  # compose file's docker-socket-proxy service comment for rationale.
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    environment:
+      CONTAINERS: 1
+      SYSTEM: 1
+      POST: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - docker_proxy_net
+    read_only: true
+    tmpfs:
+      - /run
+    mem_limit: 64m
+
   monitor:
     build:
       context: ../aspirant-monitor
@@ -103,11 +121,11 @@ services:
     ports:
       - "8085:8000"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
       - /data:/host/data:ro
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
     environment:
+      DOCKER_SOCKET: tcp://docker-socket-proxy:2375
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER:-}
@@ -115,6 +133,11 @@ services:
       ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
       ALERT_EMAIL_FROM: ${ALERT_EMAIL_FROM:-}
       DAILY_REPORT_HOUR: ${DAILY_REPORT_HOUR:-8}
+    networks:
+      - default
+      - docker_proxy_net
+    depends_on:
+      - docker-socket-proxy
 
   kiwix:
     image: ghcr.io/kiwix/kiwix-serve:latest
@@ -213,3 +236,9 @@ volumes:
   advisordata-dev:
   browserdata-dev:
   ollamadata-dev:
+
+networks:
+  default:
+  # Internal-only bridge for the socket-proxy sidecar (see main compose).
+  docker_proxy_net:
+    internal: true
