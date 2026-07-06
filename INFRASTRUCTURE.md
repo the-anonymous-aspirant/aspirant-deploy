@@ -92,10 +92,17 @@ Commander ──depends on──▶ PostgreSQL (health check)
 
 Translator ──(standalone, no database)
 
-Monitor ──connects to──▶ Docker socket (read-only)
+Monitor ──queries Docker API via──▶ docker-socket-proxy (internal net only)
         ──reads──▶ /data volume (disk usage)
         ──reads──▶ /proc, /sys (host CPU, memory, temperature)
         ──sends──▶ SMTP (daily health report email, if configured)
+
+docker-socket-proxy ──bind-mounts (read-only)──▶ /var/run/docker.sock
+        (tecnativa/docker-socket-proxy; attached to `docker_proxy_net` —
+         an `internal: true` bridge with no host port publish, so the
+         socket is unreachable from anything outside the compose graph.
+         Allowlist: CONTAINERS + SYSTEM + PING; POST verbs denied. See
+         system_3 #1378 for the container-escape rationale.)
 
 Remarkable ──(standalone, no database)
            ──connects to──▶ reMarkable Paper Pro (SSH/rsync over LAN)
