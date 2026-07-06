@@ -9,7 +9,10 @@ services:
     volumes:
       - pgdata-dev:/var/lib/postgresql/data
     ports:
-      - "5433:5432"
+      # Loopback publish only. Reachable to compose peers via internal
+      # DNS (`postgres:5432`) and to the dev host via localhost. See
+      # system_3 #1379.
+      - "127.0.0.1:5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
       interval: 5s
@@ -58,7 +61,8 @@ services:
       context: ../aspirant-transcriber
       dockerfile: Dockerfile-Transcriber
     ports:
-      - "8082:8000"
+      # Loopback publish only. See system_3 #1379.
+      - "127.0.0.1:8082:8000"
     env_file:
       - .env
     environment:
@@ -77,7 +81,7 @@ services:
       context: ../aspirant-commander
       dockerfile: Dockerfile-Commander
     ports:
-      - "8083:8000"
+      - "127.0.0.1:8083:8000"
     environment:
       DB_HOST: postgres
     env_file:
@@ -91,7 +95,7 @@ services:
       context: ../aspirant-translator
       dockerfile: Dockerfile-Translator
     ports:
-      - "8084:8000"
+      - "127.0.0.1:8084:8000"
     volumes:
       - translatordata-dev:/data/models
     mem_limit: 2g
@@ -119,7 +123,7 @@ services:
       context: ../aspirant-monitor
       dockerfile: Dockerfile-Monitor
     ports:
-      - "8085:8000"
+      - "127.0.0.1:8085:8000"
     volumes:
       - /data:/host/data:ro
       - /proc:/host/proc:ro
@@ -150,7 +154,7 @@ services:
       context: ../aspirant-remarkable
       dockerfile: Dockerfile-Remarkable
     ports:
-      - "8086:8000"
+      - "127.0.0.1:8086:8000"
     volumes:
       - remarkabledata-dev:/data/remarkable
     mem_limit: 2g
@@ -160,7 +164,7 @@ services:
       context: ../aspirant-finance
       dockerfile: Dockerfile-Finance
     ports:
-      - "8087:8000"
+      - "127.0.0.1:8087:8000"
     env_file:
       - .env
     environment:
@@ -176,7 +180,7 @@ services:
       context: ../aspirant-advisor
       dockerfile: Dockerfile-Advisor
     ports:
-      - "8088:8000"
+      - "127.0.0.1:8088:8000"
     env_file:
       - .env
     environment:

@@ -62,20 +62,22 @@ Full-stack web platform (Go + Vue.js + Python microservices) running on a single
 
 | Service | Repository | Tech | Container Image | Host Port | Container Port | Memory Limit |
 |---------|-----------|------|----------------|-----------|---------------|-------------|
-| **PostgreSQL** | — | pgvector/pgvector:pg16 | — (pgvector image) | 5432 | 5432 | — |
-| **Server** | aspirant-server | Go 1.23 + Gin + GORM | `ghcr.io/.../aspirant-server` | 8081 | 8080 | — |
+| **PostgreSQL** | — | pgvector/pgvector:pg16 | — (pgvector image) | 127.0.0.1:5432 | 5432 | — |
+| **Server** | aspirant-server | Go 1.23 + Gin + GORM | `ghcr.io/.../aspirant-server` | 8081 (public) | 8080 | — |
 | **Client (blue/green)** | aspirant-client | Vue 3 + Vuetify + Nginx | `ghcr.io/.../aspirant-client` | 80, 8999 | 80 | — |
-| **Transcriber** | aspirant-transcriber | Python 3.11 + FastAPI + Whisper | `ghcr.io/.../aspirant-transcriber` | 8082 | 8000 | 2 GB |
-| **Commander** | aspirant-commander | Python 3.11 + FastAPI + SQLAlchemy + dateparser | `ghcr.io/.../aspirant-commander` | 8083 | 8000 | — |
-| **Translator** | aspirant-translator | Python 3.11 + FastAPI + Argos Translate | `ghcr.io/.../aspirant-translator` | 8084 | 8000 | 2 GB |
-| **Monitor** | aspirant-monitor | Python 3.11 + FastAPI + Docker SDK | `ghcr.io/.../aspirant-monitor` | 8085 | 8000 | — |
-| **Remarkable** | aspirant-remarkable | Python 3.11 + FastAPI + rmscene + rmc + cairosvg | `ghcr.io/.../aspirant-remarkable` | 8086 | 8000 | 2 GB |
-| **Finance** | aspirant-finance | Python FastAPI | `ghcr.io/.../aspirant-finance` | 8087 | 8000 | — |
-| **Advisor** | aspirant-advisor | Python 3.11 + FastAPI + sentence-transformers + pgvector | `ghcr.io/.../aspirant-advisor` | 8088 | 8000 | 2 GB |
-| **Browser** | aspirant-browser | Python 3.11 + FastAPI + Selenium + Chromium | `ghcr.io/.../aspirant-browser` | 8089 | 8000 | 2 GB |
+| **Transcriber** | aspirant-transcriber | Python 3.11 + FastAPI + Whisper | `ghcr.io/.../aspirant-transcriber` | 127.0.0.1:8082 | 8000 | 2 GB |
+| **Commander** | aspirant-commander | Python 3.11 + FastAPI + SQLAlchemy + dateparser | `ghcr.io/.../aspirant-commander` | 127.0.0.1:8083 | 8000 | — |
+| **Translator** | aspirant-translator | Python 3.11 + FastAPI + Argos Translate | `ghcr.io/.../aspirant-translator` | 127.0.0.1:8084 | 8000 | 2 GB |
+| **Monitor** | aspirant-monitor | Python 3.11 + FastAPI + Docker SDK | `ghcr.io/.../aspirant-monitor` | 127.0.0.1:8085 | 8000 | — |
+| **Remarkable** | aspirant-remarkable | Python 3.11 + FastAPI + rmscene + rmc + cairosvg | `ghcr.io/.../aspirant-remarkable` | 127.0.0.1:8086 | 8000 | 2 GB |
+| **Finance** | aspirant-finance | Python FastAPI | `ghcr.io/.../aspirant-finance` | 127.0.0.1:8087 | 8000 | — |
+| **Advisor** | aspirant-advisor | Python 3.11 + FastAPI + sentence-transformers + pgvector | `ghcr.io/.../aspirant-advisor` | 127.0.0.1:8088 | 8000 | 2 GB |
+| **Browser** | aspirant-browser | Python 3.11 + FastAPI + Selenium + Chromium | `ghcr.io/.../aspirant-browser` | — (internal) | 8000 | 2 GB |
 | **Tor** | — | Tor SOCKS5 proxy (egress anonymisation for Browser) | `dperson/torproxy` | — (internal) | 9050 | 256 MB |
 | **Ollama** | — | Ollama (LLM inference) | `ollama/ollama` | — (internal) | 11434 | 6 GB |
 | **Kiwix** | — | kiwix-serve (3rd party) | `ghcr.io/kiwix/kiwix-serve` | — (internal) | 8080 | — |
+
+**Host-port bindings.** Only ports 80/8999 (client) and 8081 (server, the sole authenticated web tier) are published on `0.0.0.0`. Every other listed host port is bound to `127.0.0.1` so it is reachable to on-cell debug shells (localhost) and to compose peers via internal DNS, but never from the LAN or WAN. See system_3 #1379 for the container-escape / weak-DB-credential attack chain this closes; the aspirant-server `/api/*` proxy remains the single authenticated ingress for downstream microservices. `browser` is un-published entirely per #1375.
 
 ### Service Dependencies
 
