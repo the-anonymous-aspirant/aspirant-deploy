@@ -9,7 +9,10 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      # Bind to loopback: DB is reachable to compose peers via internal
+      # DNS (`postgres:5432`) and to the cell host via localhost. Never
+      # exposed to LAN. See system_3 #1379.
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
       interval: 5s
@@ -55,7 +58,10 @@ services:
     image: ghcr.io/the-anonymous-aspirant/aspirant-transcriber:latest
     restart: unless-stopped
     ports:
-      - "8082:8000"
+      # Loopback publish only. Ingress runs through aspirant-server's
+      # authenticated /api proxy on the internal compose network. See
+      # system_3 #1379.
+      - "127.0.0.1:8082:8000"
     env_file:
       - .env
     environment:
@@ -72,7 +78,7 @@ services:
     image: ghcr.io/the-anonymous-aspirant/aspirant-commander:latest
     restart: unless-stopped
     ports:
-      - "8083:8000"
+      - "127.0.0.1:8083:8000"
     env_file:
       - .env
     depends_on:
@@ -83,7 +89,7 @@ services:
     image: ghcr.io/the-anonymous-aspirant/aspirant-translator:latest
     restart: unless-stopped
     ports:
-      - "8084:8000"
+      - "127.0.0.1:8084:8000"
     volumes:
       - /data/aspirant/models:/data/models
     mem_limit: 2g
@@ -116,7 +122,7 @@ services:
     image: ghcr.io/the-anonymous-aspirant/aspirant-monitor:latest
     restart: unless-stopped
     ports:
-      - "8085:8000"
+      - "127.0.0.1:8085:8000"
     volumes:
       - /data:/host/data:ro
       - /proc:/host/proc:ro
@@ -149,7 +155,7 @@ services:
     image: ghcr.io/the-anonymous-aspirant/aspirant-remarkable:latest
     restart: unless-stopped
     ports:
-      - "8086:8000"
+      - "127.0.0.1:8086:8000"
     volumes:
       - /data/aspirant/remarkable:/data/remarkable
     mem_limit: 2g
@@ -159,7 +165,7 @@ services:
     platform: linux/amd64
     restart: unless-stopped
     ports:
-      - "8087:8000"
+      - "127.0.0.1:8087:8000"
     env_file:
       - .env
     environment:
@@ -174,7 +180,7 @@ services:
     image: ghcr.io/the-anonymous-aspirant/aspirant-advisor:latest
     restart: unless-stopped
     ports:
-      - "8088:8000"
+      - "127.0.0.1:8088:8000"
     env_file:
       - .env
     environment:
