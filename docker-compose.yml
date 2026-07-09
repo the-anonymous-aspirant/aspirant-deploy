@@ -35,6 +35,10 @@ services:
       FINANCE_URL: http://finance:8000
       ADVISOR_URL: http://advisor:8000
       ASSET_BASE_PATH: /data/assets
+      # Refuse to boot on unset JWT_SECRET. The aspirant-server binary
+      # additionally rejects known-placeholder / short values at start.
+      # See system_3 #1374.
+      JWT_SECRET: "${JWT_SECRET:?JWT_SECRET must be set in .env — generate with: openssl rand -base64 32}"
     env_file:
       - .env
     volumes:
