@@ -107,7 +107,13 @@ services:
   # POST=0 (default) blocks every write verb, so the socket cannot be
   # used to launch a privileged container. See system_3 #1378.
   docker-socket-proxy:
-    image: tecnativa/docker-socket-proxy:latest
+    # Pinned to a specific tag (not :latest) because this container runs
+    # read_only:true — an upstream manifest change that writes to a path
+    # not listed under `tmpfs:` crash-loops the sidecar (cell hit
+    # RestartCount 5490x when v0.4.x drifted in behind :latest and its
+    # HAProxy entrypoint tried to write /tmp/haproxy.cfg). Bump the tag
+    # in a PR after verifying the new version's writable-path set.
+    image: tecnativa/docker-socket-proxy:v0.4.2
     restart: unless-stopped
     environment:
       CONTAINERS: 1
@@ -119,7 +125,10 @@ services:
       - docker_proxy_net
     read_only: true
     tmpfs:
+      # /run — allowlist file used by the entrypoint.
+      # /tmp — HAProxy config written by v0.4.x entrypoints.
       - /run
+      - /tmp
     mem_limit: 64m
 
   monitor:

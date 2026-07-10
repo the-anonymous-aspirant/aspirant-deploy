@@ -104,7 +104,8 @@ services:
   # a read-only socket-proxy on an internal-only bridge. See the main
   # compose file's docker-socket-proxy service comment for rationale.
   docker-socket-proxy:
-    image: tecnativa/docker-socket-proxy:latest
+    # See docker-compose.yml for pin + tmpfs rationale.
+    image: tecnativa/docker-socket-proxy:v0.4.2
     environment:
       CONTAINERS: 1
       SYSTEM: 1
@@ -116,6 +117,7 @@ services:
     read_only: true
     tmpfs:
       - /run
+      - /tmp
     mem_limit: 64m
 
   monitor:
