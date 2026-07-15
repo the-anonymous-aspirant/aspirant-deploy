@@ -7,20 +7,22 @@
 
 1. **The cell has 15 GiB of RAM, not 2 TB.** The 2 TB is storage: a 1.8 TiB RAID1 pair (`/data`, 8% used), a 916 GiB empty scratch disk, and a 233 GiB SSD with ~131 GiB unallocated. 15 GiB RAM rules out Spark/Trino/Hive-class engines and makes DuckDB-class embedded engines the only sane choice. This is a feature: at your scale, the heavyweight stack is pure liability.
 
-2. **Your precious data is ~2 GiB, growing < 2 GiB/year — and it has zero backups.** Of 124 GiB on `/data`, 122 GiB is re-downloadable cache (a Wikipedia ZIM + Ollama models). The irreplaceable set — reMarkable notebooks (1.4 G), user files/valuations/finance reports, advisor uploads, audio, and a 31 MB Postgres — is protected today only by RAID1 across two ~2010-era WD Green drives of the same model and age (correlated-failure risk), with no protection at all against deletion, corruption, ransomware, or fire. **The most valuable 20% of this project is the backup subsystem, and it should ship first.** A data lake is not a backup, and a backup is not a data lake; this design delivers both, in that order.
+2. **Your precious cell-side data is ~2 GiB, growing < 2 GiB/year — and it has zero backups.** (The 2026-07-15 scope extension adds system_3's workstation-side data — a 5.8 GB Postgres, 1.2 GB of session transcripts, cron logs — as lake sources too; see §5b. The ordering conclusion is unchanged.) Of 124 GiB on `/data`, 122 GiB is re-downloadable cache (a Wikipedia ZIM + Ollama models). The irreplaceable set — reMarkable notebooks (1.4 G), user files/valuations/finance reports, advisor uploads, audio, and a 31 MB Postgres — is protected today only by RAID1 across two ~2010-era WD Green drives of the same model and age (correlated-failure risk), with no protection at all against deletion, corruption, ransomware, or fire. **The most valuable 20% of this project is the backup subsystem, and it should ship first.** A data lake is not a backup, and a backup is not a data lake; this design delivers both, in that order.
 
 ## 1. Architecture overview
 
 ```
-producers (unchanged)                 lake (new, additive)
-─────────────────────                ────────────────────────────────
-postgres ──pg_dump──────┐            ┌─ S3 object store (Garage, /data)
-/data/aspirant/* ─rclone┤            │   bronze/  raw, immutable
-browser_flows cron ─────┼─ ingest ──▶│   silver/  parquet (DuckLake tables)
-ecosio drive (manual) ──┘  runner    │   gold/    curated marts
-                                     ├─ DuckLake catalog (existing Postgres)
-                                     ├─ backup: restic → /scratch + off-cell
-                                     └─ aspirant-explorer frontend (read-only)
+producers (unchanged)                    lake on the cell (new, additive)
+─────────────────────                   ────────────────────────────────
+CELL                                    ┌─ S3 object store (Garage, /data)
+ aspirant pg ──CDC/pg_dump──┐           │   bronze/  raw, immutable
+ /data/aspirant/* ──rclone──┤           │   silver/  parquet (DuckLake tables)
+ browser_flows cron ────────┤           │   gold/    curated marts (dbt-built)
+WORKSTATION                 ├─ingest──▶ ├─ DuckLake catalog (existing Postgres)
+ system3 pg ──CDC/cursor────┤  (Dagster │─ dbt: bronze→silver→gold models
+ pane transcripts ──rclone──┤   daily + │─ backup: restic → /scratch + off-cell
+ cron logs ──rclone─────────┤   stream) │─ aspirant-explorer frontend (read-only)
+ ecosio drive (manual) ─────┘           └─ BI: Metabase over gold
 ```
 
 Cardinal rule: **the lake is an analytical copy, never the system of record.** Apps keep owning their native stores; every connector is read-only against its source; killing the lake harms nothing upstream. That is also the rollback plan.
@@ -79,6 +81,73 @@ One scheduled **ingest-runner** container (Python + rclone + DuckDB), one run le
 | ecosio 250GB1 drive | Manual `rclone sync` when mounted at the workstation (it currently isn't — only the empty partition is). Treat as an external site with a "last seen" freshness alert. | Small, but **availability-gated** |
 | Host/app logs | Out of scope v1; keep logrotate. | — |
 
+## 5b. System_3 integration (scope extension, operator 2026-07-15)
+
+system_3 — running on the workstation, not the cell — becomes a first-class source. Measured this pass:
+
+| Source | Size / shape | Ingestion path |
+|---|---|---|
+| `system3` Postgres | **5.8 GB** (dwarfs everything aspirant-side); dominated by `activity_log` monthly partitions (Jun 2.9 G, May archive 2.6 G, Jul 125 M post-churn-fix), `request_log` 58 M, `comments` 23 M, `tasks` 3 M | Split by table nature: `activity_log`/`request_log` are **append-only** → cursor-based incremental batch (see §5c — CDC on an append-only event log buys nothing). Mutable tables (`tasks`, `comments`, `mentions`, `item_prs`) → CDC stream. Matviews (`v_system_anomalies`) → recompute in gold, don't replicate. |
+| Pane transcripts | 1.2 GB JSONL under `~/.claude/projects/` | Nightly `rclone sync` → bronze blobs; silver = parsed per-turn rows (session, actor, ts, role, token counts). **Privacy flag**: transcripts contain secrets pasted mid-session — see §12 legal questions. |
+| Cron logs | ~130 MB rotating `.<cron>.log.YYYYMMDD` at repo root | Nightly rclone of rotated-out files → bronze; silver = parsed run ledger. Trivial. |
+| Frontend `request_log` | 58 MB, append-only table | Cursor-based incremental, same as activity_log. |
+
+Cross-host consequence: workstation → cell ingest runs over the existing SSH path (rclone-over-ssh or an S3 key scoped write-only-bronze reachable via tunnel). If the cell is down, CDC slots on the workstation **retain WAL until the consumer returns** — see the slot-risk warning in §5c. The test/dogfood/scratch databases (system3_test, dogfood copies, ~2.4 GB) are explicitly excluded.
+
+## 5c. CDC design
+
+Operator intent: every DB write persisted to the lake continuously, not just periodic snapshots. Ground truth first: **both Postgres instances currently run `wal_level=replica`** (verified via `SHOW wal_level` on each) — logical CDC requires `wal_level=logical` + a restart of each instance before anything streams. That is a scheduled-downtime prerequisite, and on system_3's side it must respect the backend-restart discipline.
+
+**Where CDC actually pays.** CDC's value is capturing *mutations* (UPDATE/DELETE) you'd otherwise lose between snapshots. Two-thirds of the interesting volume here (`activity_log`, `request_log`, browser-flow outputs) is append-only; for those, an incremental cursor read (`WHERE id > :last`) delivers the same completeness with zero replication-slot risk. So the design is **hybrid**: CDC for mutable business tables, cursor batch for append-only logs, dumps for disaster recovery regardless.
+
+| Candidate | Shape | Pro / con for this fleet |
+|---|---|---|
+| Debezium + Kafka Connect | The canonical stack; Connect has a production S3 sink | JVM ×3 (broker, Connect, schema registry realistically) on a 15 GiB host serving two small PGs — ops burden and RAM wildly out of proportion. **No.** |
+| [Debezium Server](https://debezium.io/documentation/reference/stable/operations/debezium-server.html) | Single container, no Kafka; sinks are brokers (Redis Stream, NATS, Pulsar…) — **no S3 sink**, so it still needs a broker + a consumer writing parquet | Two extra moving parts per host. Credible, but heavier than the job. Fallback if the lightweight option disappoints. |
+| **Lightweight logical-replication consumer** (dlt's `pg_replication` source, or ~200 lines of Python on `pgoutput`) | One process per source PG: reads the slot, micro-batches events to bronze parquet every N minutes | Right-sized: no broker, no JVM, state = slot LSN + file cursor; runs as a Dagster schedule/sensor. **Recommended.** (assumption — verify dlt `pg_replication` maturity in a spike before committing; hand-rolled `pgoutput` consumer is the fallback) |
+| Snapshot-diff polling | Periodic full/keyed re-reads, diff at silver | No PG config change needed, but O(table) reads and misses intermediate states; only right for tiny mutable tables. Kept as the degraded mode if `wal_level` change is refused. |
+
+**Pipeline shape**: slot (`pgoutput`, one publication per source DB covering mutable tables) → consumer micro-batches raw change events to `bronze/cdc/<db>/<table>/date=…/*.parquet` (event = op, LSN, ts, before/after JSON) → dbt models in silver **merge** events into current-state tables (dedup on primary key + LSN ordering handles replays and late arrivals; DuckLake snapshots make each merge atomic and time-travelable). Replay = truncate silver table, re-run merge over bronze history — bronze is never mutated.
+
+**Schema evolution**: `pgoutput` emits relation metadata with each change; new columns appear in events automatically. Consumer policy: write events with the *union* schema (parquet handles added columns natively); dbt staging models select explicit columns, so a new column is invisible until a model is updated to expose it — absorbed without replay. Column *renames/drops* are breaking and get a documented runbook (rare on both fleets).
+
+**The risk nobody mentions**: an unconsumed replication slot pins WAL forever — consumer dies silently for a month ⇒ source disk fills ⇒ **the production DB goes down**. This is the single worst failure mode CDC imports into the fleet. Mitigations: `max_slot_wal_keep_size` cap on both PGs (bounded damage: slot invalidates rather than disk fills, lake re-syncs from snapshot), slot-lag gauge in §10 observability with a red alert, and the nightly dump lane as the always-on recovery floor.
+
+## 5d. dbt as the modeling layer
+
+**Recommended: dbt-core + [dbt-duckdb](https://github.com/duckdb/dbt-duckdb)** running against the DuckLake catalog (DuckLake connections supported as of dbt-duckdb 1.9.6 — verify the exact profile shape for self-hosted [not MotherDuck] DuckLake in a spike; the adapter docs demonstrate `is_ducklake` profiles). All silver→gold transforms (and the CDC merge models) become dbt models; bronze stays outside dbt (immutable ingest is not a transform).
+
+- **vs SQLMesh**: genuinely better incremental-model semantics and environment management, and it can even read dbt projects ([comparison](https://www.modern-datatools.com/compare/dbt-vs-sqlmesh)); but smaller ecosystem, and its killer features (virtual environments, column-level lineage across warehouses) matter at team scale, not single-operator scale. Revisit if incremental-model pain appears.
+- **vs plain SQL scripts**: dbt buys dependency-ordered DAG execution, `dbt test` (not-null/unique/relationship checks on every run — your data-quality lane), docs + model-level lineage UI for free, and models-as-files that agents can PR against with review. That last point is the real win for this fleet: **the transform layer becomes corpus-like — versioned, reviewable, agent-editable.**
+- What dbt does *not* give: blob/asset lineage (the §7 inventory table owns that), ingestion orchestration (Dagster's job), and column-level lineage (accept the gap; model-level suffices at this scale).
+
+## 5e. Daily orchestrator
+
+| Candidate | Single-host fit | dbt integration | Verdict |
+|---|---|---|---|
+| **Dagster OSS** | Compose-friendly ([official guide](https://docs.dagster.io/deployment/oss/deployment-options/docker)): webserver + daemon + code container; run-storage can reuse the existing Postgres | [dagster-dbt](https://docs.dagster.io/integrations/libraries/dbt) maps every dbt model to an asset — the UI shows the whole bronze→gold graph with per-asset freshness and retries | **Recommended** |
+| Airflow | Scheduler + webserver + metadata DB; the heaviest idle footprint of the group and task-centric, not asset-centric | Cosmos plugin, adequate | Over-toolerd for one host |
+| Prefect | Light server, nice API | prefect-dbt exists but is shallower than dagster-dbt | Second place |
+| Argo Workflows | Requires Kubernetes | — | Disqualified (no k8s, and installing one for this would be malpractice) |
+| Plain cron | Zero new services; already the cell's idiom | None — you hand-order the DAG, hand-build retries/alerting | The honest null option; what §11 phase 1-2 uses before the orchestrator lands |
+
+Why an orchestrator at all, given cron got this far: the moment CDC merge → dbt build → mart publish → backup verify have *ordering dependencies and retry semantics*, cron chains become the silent-failure machine the fleet already knows (unwired safety nets, invisible cron drift). Dagster's asset graph + per-asset freshness policies is exactly the missing §10 observability surface, and its daily schedule replaces four would-be crons. RAM cost is a few hundred MB across services (assumption — verify by measuring the compose stack during the spike; no official figure published). State/backup story: Dagster's run history lives in the existing Postgres ⇒ already inside the §6 backup scope.
+
+Deployment: one `orchestration` compose group on the cell (pinned versions, per §4); workstation-side collectors stay dumb (cron/systemd timer pushing to bronze), the cell-side Dagster owns everything downstream.
+
+## 5f. Insights & visualization
+
+Gold marts are **published to Postgres** (tiny tables, e.g. `gold` schema in the existing cell instance) as the final dbt step. This decouples BI-tool choice from DuckDB-driver maturity — every tool on earth speaks Postgres.
+
+| Candidate | Fit | Verdict |
+|---|---|---|
+| **Metabase** | Single JVM container, ~1-2 GB RAM ([docs](https://www.metabase.com/learn/metabase-basics/administration/administration-and-operation/metabase-in-production)); question-builder the operator can use without SQL; points at the gold schema | **Recommended for exploration** |
+| Superset | 2-4 GB+, multiple services, richer chart types | Heavier than the need |
+| Grafana | Lightest idle (~200-300 MB); superb for the §10 *ops* metrics, clumsy for ad-hoc analytical questions | Adopt *for observability dashboards* if aspirant-monitor outgrows itself, not for BI |
+| Custom Vue page (aspirant DS) | Full design-system consistency; every chart is a build | Reserve for the top ~6 curated insights on aspirant-explorer's Overview once questions stabilize in Metabase |
+
+Pattern: **explore in Metabase → promote stabilized questions to dbt gold models → hand-build the few that earn a place in aspirant-explorer.** BI tools are where questions are discovered; the design system is where answers are productized.
+
 ## 6. Backup strategy (ships before the lake proper)
 
 3-2-1 with the precious set (~3 GiB incl. dumps) so small that every option is cheap:
@@ -122,15 +191,16 @@ Auth: reuse aspirant-server's session/user model (operator decision §10 Q9); se
 
 ## 10. Observability
 
-Feed the existing aspirant-monitor: per-source freshness age vs SLA; connector run success/duration/bytes; lake bytes by layer + `/data` `/scratch` SSD fill %; backup last-success/last-verify/last-drill ages; restic repo stats; orphan-blob count (inventory vs catalog sweep); small-file count in silver (compaction trigger); mdadm state; **SMART attributes — `smartmontools` is not installed today, so two 16-year-old disks are running blind; install it in week 1 regardless of everything else**; DuckDB query p95 on the frontend API.
+Feed the existing aspirant-monitor: per-source freshness age vs SLA; connector run success/duration/bytes; lake bytes by layer + `/data` `/scratch` SSD fill %; backup last-success/last-verify/last-drill ages; restic repo stats; orphan-blob count (inventory vs catalog sweep); small-file count in silver (compaction trigger); mdadm state; **SMART attributes — `smartmontools` is not installed today, so two 16-year-old disks are running blind; install it in week 1 regardless of everything else**; DuckDB query p95 on the frontend API; **replication-slot lag bytes on both source PGs (red alert well before `max_slot_wal_keep_size`)**; CDC end-to-end lag (source commit → bronze landing); dbt test pass-rate + run duration; Dagster asset freshness (which subsumes most per-source freshness checks once it lands).
 
 ## 11. Phasing
 
 1. **Week 1 — stop the bleeding (no lake yet)**: smartmontools + SMART alerts; restic to `/scratch` + B2 for the precious set as it sits today; docker image prune; verify reMarkable sync (0 files in 30 d).
-2. **Weeks 2-3**: Garage + DuckLake catalog + ingest-runner with the trivial connectors (pg dumps, rclone syncs, browser_flows hook); inventory table; backups extended over the lake.
-3. **Weeks 4-6**: extraction pipeline (text/OCR/transcripts/thumbnails); silver tables; first gold marts (finance).
-4. **Weeks 7-9**: aspirant-explorer v1 (Overview, Datasets, Documents, Runs); restore drill #1; runbooks.
-5. **Later**: search + provenance UI, ecosio drive ingest, log ingestion, hardware refresh decision.
+2. **Weeks 2-3**: Garage + DuckLake catalog + cron-driven ingest of the trivial connectors (pg dumps, rclone syncs of files/transcripts/cron-logs, browser_flows hook, cursor reads of `activity_log`/`request_log`); inventory table; backups extended over the lake.
+3. **Weeks 4-5 — dbt + orchestrator**: dbt project over silver (CDC-less at first); Dagster OSS compose group absorbs the phase-2 crons; daily schedule + asset freshness.
+4. **Weeks 6-7 — CDC spike, then rollout**: `wal_level=logical` change window on both PGs; dlt/`pgoutput` consumer spike on ONE mutable table (`tasks`); slot-lag alerting proven **before** widening the publication; then all mutable tables.
+5. **Weeks 8-10**: extraction pipeline (text/OCR/transcripts/thumbnails); gold marts published to Postgres; Metabase; aspirant-explorer v1 (Overview, Datasets, Documents, Runs); restore drill #1; runbooks.
+6. **Later**: search + provenance UI, ecosio drive ingest, curated Vue insights page, hardware refresh decision.
 
 Each phase is a separate implementation epic with its own PRs; nothing here starts until the operator answers §12's top questions.
 
@@ -145,7 +215,9 @@ Each phase is a separate implementation epic with its own PRs; nothing here star
 **The rest (grouped):**
 
 - *Retention*: keep every bronze browser-flow scrape forever (~1.5 G/yr — probably yes) or window it? Pg dump retention ladder (e.g. 30 daily / 12 monthly / ∞ yearly)? What's deletable at 80% disk fill, and does an automated policy get to act, or only alert?
-- *Legal/PII*: finance transactions, property valuations, voice messages (other people's voices — consent?), `banned_books` (jurisdiction?): any data that must be encrypted, retention-limited, or kept OUT of the centralized bag? GDPR-style erasure: if some future app stores other people's data, immutable bronze needs a crypto-erasure design — cheaper to decide now.
+- *Legal/PII*: finance transactions, property valuations, voice messages (other people's voices — consent?), `banned_books` (jurisdiction?): any data that must be encrypted, retention-limited, or kept OUT of the centralized bag? GDPR-style erasure: if some future app stores other people's data, immutable bronze needs a crypto-erasure design — cheaper to decide now. **Pane transcripts specifically**: they can contain pasted secrets, tokens, and third-party content — ingest as-is, redact at ingest, or exclude?
+- *CDC (§5c)*: acceptable end-to-end lag — is minutes fine (micro-batch) or is it truly per-write streaming? Who schedules the `wal_level=logical` restart windows on each PG? Confirm the hybrid split (CDC only for mutable tables, cursor for append-only) or insist on CDC-everything? What `max_slot_wal_keep_size` cap = how much WAL you'll trade for consumer downtime before the slot self-destructs?
+- *Orchestrator/dbt*: is a web UI on the cell's internal network acceptable for Dagster/Metabase (auth story)? Who owns dbt model review — agents PR, operator merges?
 - *Ownership & evolution*: who owns the catalog schema when it evolves — is future-you willing to be the DBA, or should schema changes be agent-run with review? Who patches Garage/DuckDB quarterly?
 - *Access*: is the operator the only reader, or do agents (advisor, finance, commander) get read keys? Does anything ever *write back* (lake becomes system of record)? — recommend no for v1.
 - *Frontend*: reuse aspirant-server auth? Any need for access from outside the LAN (→ tunnel vs auth hardening)?
@@ -160,4 +232,6 @@ Each phase is a separate implementation epic with its own PRs; nothing here star
 - **Query performance at "2 TB" is a red herring at 15 GiB RAM and ~GB data.** DuckDB scans parquet at disk speed; your gold layer will answer in milliseconds. The real ceiling is the WD Greens' ~100 MB/s sequential and dreadful random I/O — which is why catalog/metadata go on SSD and why full-scan patterns stay in gold-sized data.
 - **Cataloging is a tax you pay forever.** Every source added = connector + inventory + freshness SLA + backup scope + restore-drill coverage. The §10 metrics automate the audit, but each new surface is a standing cost — that's the honest price of "single storage for ALL data".
 - **The medallion's dirty secret for personal data**: most value sits in *silver* (searchable text, typed transactions, inventory), not gold. Don't over-invest in marts before search works.
-- **Correlated infrastructure**: lake, catalog, backups tier-1, and producers all share one host, one PSU, one building. Tier-2 off-site is the only uncorrelated copy — treat its health metric as the single most important number on the Overview page.
+- **Correlated infrastructure**: lake, catalog, backups tier-1, and producers all share one host, one PSU, one building (and now, via §5b, the workstation joins the same fire domain). Tier-2 off-site is the only uncorrelated copy — treat its health metric as the single most important number on the Overview page.
+- **CDC imports a failure mode INTO your production databases.** A dead consumer pins WAL via its replication slot until the source DB's disk fills (§5c). Snapshot-based ingestion can only lose lake freshness; CDC done carelessly can take down the thing it observes. This asymmetry is why the design gates CDC behind proven slot-lag alerting, caps slot WAL, and keeps the dump lane running underneath forever.
+- **The lake will observe the system that builds it.** Once system_3's activity_log, transcripts, and request_log are silver tables, the operator can query agent behavior with SQL joins instead of psql archaeology — likely the single highest-insight-per-byte source in the whole design. But it also means agent mistakes (this session included) become permanent, queryable history: decide deliberately that that's wanted.
