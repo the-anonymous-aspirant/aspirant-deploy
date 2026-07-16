@@ -145,6 +145,15 @@ services:
     depends_on:
       - docker-socket-proxy
 
+  # Dev build of the Histoire workbench straight from the sibling DS
+  # checkout (prod uses the GHCR image published by the DS pre-push hook).
+  histoire:
+    build:
+      context: ../aspirant-design-system
+      dockerfile: Dockerfile.histoire
+    ports:
+      - "127.0.0.1:8090:80"
+
   kiwix:
     image: ghcr.io/kiwix/kiwix-serve:latest
     command: --port 8080 --urlRootLocation /api/wikipedia /data/wikipedia_en_all_maxi_2026-02.zim
