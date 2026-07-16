@@ -1,6 +1,7 @@
 # Changelog
 
 ### 2026-07-16
+- Harden `scripts/deploy-client.sh` (system_3 #2195-C1 friction): all compose invocations now target the two client services explicitly — an untargeted `docker compose up -d` pulls every project-wide missing image first, so a merged-but-not-yet-pulled sub-stack (or a dead registry link) blocked client swaps entirely; `swap` accepts an optional explicit slot (`swap green`) that is idempotent and retry-safe, where the bare toggle form flips direction on every rerun; pure helpers extracted behind an `ASPIRANT_DEPLOY_CLIENT_LIB=1` escape hatch with unit coverage in `tests/deploy_client_unit.sh` (mirrors the `auto_pull_unit.sh` pattern).
 - Add the Penpot design service sub-stack (system_3 #2195): upstream Penpot 2.16.2 (frontend/backend/exporter) mirrored to `ghcr.io/the-anonymous-aspirant/penpot-*` and digest-pinned (the cell cannot pull docker.io over its Wi-Fi uplink — see DECISIONS.md), dedicated postgres:15 + redis:7 on an isolated `penpot` network, storage bind-mounted under `/data/aspirant/penpot/`. Secrets (`PENPOT_SECRET_KEY`, `PENPOT_DB_PASSWORD`) migrate from the dev-box `.env` and are gated at compose boot. Public ingress (`design.the-aspirant.com` vhost) and the `/admin/penpot` entry land with aspirant-client (system_3 #2195-C1); content migration is #2195-B1. See docs/PENPOT_SPEC.md + docs/PENPOT_ARCHITECTURE.md.
 
 ### 2026-07-09
