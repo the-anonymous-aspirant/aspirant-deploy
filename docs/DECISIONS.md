@@ -169,3 +169,15 @@
 **Decision:** Mirror the five upstream Penpot images to `ghcr.io/the-anonymous-aspirant/penpot-*` (copied from the dev box via `docker buildx imagetools create`, digest-pinned in compose). They are mirrors, not builds — no build lane exists for them; upgrading Penpot means re-mirroring a new upstream digest.
 
 **Rationale:** Registry-to-registry manifest copy preserves provenance (the source digest is recorded in docker-compose.yml comments), the cell demonstrably pulls GHCR reliably, and one registry for every image simplifies the auto-pull story.
+
+### GHCR image + pre-push hook for publishing Histoire (over tarball-sync or on-cell build)
+
+**Context:** The design-system component workbench (Histoire, static `histoire build` output) must be reachable on the cell at `the-aspirant.com/admin/histoire/` and stay current without anyone remembering a rebuild step (system_3 #2218; operator's sustainability framing). This repo family uses no GitHub Actions by design — tests and image publishing run locally.
+
+**Decision:** `Dockerfile.histoire` in aspirant-design-system builds the static output inside the image (`npm ci` + `histoire build`, `HISTOIRE_BASE=/admin/histoire/` baked) and serves it with nginx at that same path; a tracked pre-push hook (`git config core.hooksPath scripts/git-hooks`, aspirant-browser precedent) publishes `ghcr.io/the-anonymous-aspirant/aspirant-histoire` on every push to main; the cell's auto-pull cron deploys `:latest` unattended.
+
+**Alternatives considered:**
+- Static tarball / OCI artifact + synced directory (rejected: requires inventing a new sync mechanism; every other deployable already rides GHCR + auto-pull)
+- On-cell git-pull + `histoire build` (rejected: puts a node toolchain and npm-install traffic on a RAM-constrained box behind a radio link that kills long flows — see the #2195-B1 transfer saga)
+
+**Rationale:** The image is fully self-contained — the DS repo builds alone, with node pinned by the base image, so the aspirant-client sibling-checkout gap (#2195 pre-flight finding 2) is structurally impossible. Merge-to-main and image-publish are the same human action. Failure mode if the hook is bypassed (`--no-verify` or a GitHub-side merge, which runs no local hooks): a stale but still-serving Histoire — rerun `scripts/build-and-push-image.sh` to catch up. Subpath serving is spike-verified (vite `base` honored by histoire 0.17.17; app renders behind the prefix with zero escaping requests).
