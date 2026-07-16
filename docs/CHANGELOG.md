@@ -1,5 +1,8 @@
 # Changelog
 
+### 2026-07-16
+- Add the Penpot design service sub-stack (system_3 #2195): upstream Penpot 2.16.2 (frontend/backend/exporter) pinned by the dev-box-proven sha256 digests, dedicated postgres:15 + redis:7 on an isolated `penpot` network, storage bind-mounted under `/data/aspirant/penpot/`. Secrets (`PENPOT_SECRET_KEY`, `PENPOT_DB_PASSWORD`) migrate from the dev-box `.env` and are gated at compose boot. Public ingress (`design.the-aspirant.com` vhost) and the `/admin/penpot` entry land with aspirant-client (system_3 #2195-C1); content migration is #2195-B1. See docs/PENPOT_SPEC.md + docs/PENPOT_ARCHITECTURE.md.
+
 ### 2026-07-09
 - Guard `JWT_SECRET` at compose boot: `${JWT_SECRET:?...}` on the `server` service refuses to render `docker compose up` when the variable is unset, replacing the silent-fallback path that let an insecure default reach production. `.env.example` no longer ships the `change-me` placeholder — the entry is empty with a generation-hint comment mirroring the existing `DB_PASSWORD` block. Coordinates with aspirant-server PR #56 + aspirant-online PR #53 (system_3 #1374). Live rotation on cell (`openssl rand -base64 32` into `~/aspirant-deploy/.env` + `docker compose up -d --force-recreate server`) invalidates existing tokens by design — operator action tracked on the system_3 task.
 
