@@ -256,16 +256,18 @@ services:
   # docker.io over its Wi-Fi uplink — see docs/DECISIONS.md; upstream
   # sources: penpotapp/{frontend,backend,exporter}:2.16.2 @ 4725b4 / 6c8e38
   # / b370f1, library/postgres:15 @ bcab09, library/redis:7 @ b2b956),
-  # digest-pinned so the auto-pull cron is a no-op for these services. Public access lands via a client-nginx vhost
-  # for design.the-aspirant.com (Cloudflare TLS); the frontend is therefore
-  # on `default` as well, and only loopback-published for on-cell debug.
+  # digest-pinned so the auto-pull cron is a no-op for these services.
+  # Public access lands via the client-nginx /admin/penpot/ location on
+  # the apex (Cloudflare TLS, admin auth_request — system_3 #2198); the
+  # frontend is therefore on `default` as well, and only loopback-published
+  # for on-cell debug.
   penpot-frontend:
     image: ghcr.io/the-anonymous-aspirant/penpot-frontend:2.16.2@sha256:7bcd6d8ffa333054906cde55f6e9da9936a19b2ab30d2b50cb263d44e7740c7b
     restart: unless-stopped
     ports:
       # Loopback publish only, for on-cell debug/verification. Public
-      # ingress runs through the client-nginx design.the-aspirant.com
-      # vhost on the internal compose network. See system_3 #1379.
+      # ingress runs through the client-nginx /admin/penpot/ location
+      # on the internal compose network. See system_3 #1379.
       - "127.0.0.1:9001:8080"
     depends_on:
       penpot-backend:
@@ -290,7 +292,10 @@ services:
       # bound to localhost inside the container).
       PENPOT_FLAGS: enable-login-with-password enable-access-tokens disable-registration disable-email-verification disable-telemetry enable-prepl-server
       PENPOT_SECRET_KEY: "${PENPOT_SECRET_KEY:?PENPOT_SECRET_KEY must be set in .env — migrate the dev-box value; regenerating invalidates sessions and signed URLs}"
-      PENPOT_PUBLIC_URI: https://design.the-aspirant.com
+      # Path-bearing on purpose (system_3 #2198): Penpot mounts under the
+      # apex admin path. Verified on 2.16.2 — cookies, CORS, websocket and
+      # signed asset URLs all honor the path (spike, #2198 comment 8700).
+      PENPOT_PUBLIC_URI: https://the-aspirant.com/admin/penpot/
       PENPOT_DATABASE_URI: postgresql://penpot-postgres/penpot
       PENPOT_DATABASE_USERNAME: penpot
       PENPOT_DATABASE_PASSWORD: "${PENPOT_DB_PASSWORD:?PENPOT_DB_PASSWORD must be set in .env — migrate the dev-box value}"
