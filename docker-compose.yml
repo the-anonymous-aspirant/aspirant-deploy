@@ -248,6 +248,18 @@ services:
       - /data/aspirant/ollama:/root/.ollama
     mem_limit: 6g
 
+  # Histoire component workbench (system_3 #2218): static build of
+  # aspirant-design-system stories, served by nginx at /admin/histoire/
+  # (the base path is baked into the image — the client-nginx location
+  # proxies without rewriting). Published to GHCR by the DS repo's
+  # pre-push hook on every push to main; the auto-pull cron deploys it
+  # unattended. No ports: reached only via client-nginx (auth_request-
+  # gated) on the default network; /health per the service contract.
+  histoire:
+    image: ghcr.io/the-anonymous-aspirant/aspirant-histoire:latest
+    restart: unless-stopped
+    mem_limit: 128m
+
   # --- Penpot design service (system_3 #2195) -------------------------------
   # Third-party design tool, migrated from the dev box. Runs on its own
   # `penpot` bridge with a dedicated postgres:15 + redis:7 (NOT the shared
