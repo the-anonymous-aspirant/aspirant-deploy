@@ -148,11 +148,21 @@
 
 ### Subdomain (design.the-aspirant.com) over a URL subpath for Penpot
 
+> **Superseded (2026-07-16)** by "Admin subpath over the design subdomain" below.
+
 **Context:** Public access to Penpot needs an origin. The apex domain already serves the client SPA.
 
 **Decision:** A dedicated subdomain, proxied by the client nginx as a named vhost.
 
 **Rationale:** Penpot documents root-URI deployment only (`PENPOT_PUBLIC_URI`, help.penpot.app technical guide — examples are all root subdomains; no subpath support is documented). `PENPOT_PUBLIC_URI` must also exactly match the browser origin or login silently fails.
+
+### Admin subpath (the-aspirant.com/admin/penpot/) over the design subdomain
+
+**Context:** Operator direction (system_3 #2198, 2026-07-16): ride the apex's proven TLS/Cloudflare/auth boundary instead of duplicating it on a second origin — the subdomain added a DDNS-untracked CNAME, an independently-failing origin dependency, and a second auth surface. The prior decision's premise ("no subpath support") was documentation-derived, not tested.
+
+**Decision:** Penpot mounts at `location /admin/penpot/` on the apex server block, behind the existing admin `auth_request` gate, with a `config.js` short-circuit injecting a path-bearing `penpotPublicURI` and a matching path-bearing `PENPOT_PUBLIC_URI` on the backend. `design.the-aspirant.com` stays as a plain 302 to the path (workspace `#` deep links survive the redirect).
+
+**Rationale:** Empirically falsified the root-URI-only premise on the live 2.16.2 stack (playwright spike, #2198 comment 8700): the frontend uses relative asset refs + hash routing and computes `public-uri = ensure_path_slash(penpotPublicURI || fallback)`; authenticated login, dashboard, path-prefixed websocket, RPC file creation, and full workspace render all stayed inside the prefix with zero escapes. The one console error (`css/ui.css` 404) reproduces identically at root — a pre-existing image quirk. Residual risk: the exporter path (PNG/PDF render round-trip) was not exercised in the spike; verify at cell dogfood.
 
 ### Proxied CNAME over a new A record for the design subdomain
 
