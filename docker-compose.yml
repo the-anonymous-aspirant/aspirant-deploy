@@ -251,13 +251,16 @@ services:
   # --- Penpot design service (system_3 #2195) -------------------------------
   # Third-party design tool, migrated from the dev box. Runs on its own
   # `penpot` bridge with a dedicated postgres:15 + redis:7 (NOT the shared
-  # pgvector/pg16 instance — see docs/DECISIONS.md). Images pinned by digest
-  # (same digests as the proven dev-box stack) so the auto-pull cron is a
-  # no-op for these services. Public access lands via a client-nginx vhost
+  # pgvector/pg16 instance — see docs/DECISIONS.md). Images are GHCR
+  # mirrors of the dev-box-proven upstream digests (the cell cannot pull
+  # docker.io over its Wi-Fi uplink — see docs/DECISIONS.md; upstream
+  # sources: penpotapp/{frontend,backend,exporter}:2.16.2 @ 4725b4 / 6c8e38
+  # / b370f1, library/postgres:15 @ bcab09, library/redis:7 @ b2b956),
+  # digest-pinned so the auto-pull cron is a no-op for these services. Public access lands via a client-nginx vhost
   # for design.the-aspirant.com (Cloudflare TLS); the frontend is therefore
   # on `default` as well, and only loopback-published for on-cell debug.
   penpot-frontend:
-    image: penpotapp/frontend:2.16.2@sha256:4725b4698d8d1bd25ee1666e0d900d20da8937fea845c6a088f76cd69293560b
+    image: ghcr.io/the-anonymous-aspirant/penpot-frontend:2.16.2@sha256:7bcd6d8ffa333054906cde55f6e9da9936a19b2ab30d2b50cb263d44e7740c7b
     restart: unless-stopped
     ports:
       # Loopback publish only, for on-cell debug/verification. Public
@@ -275,7 +278,7 @@ services:
     mem_limit: 512m
 
   penpot-backend:
-    image: penpotapp/backend:2.16.2@sha256:6c8e3851f3734e98e48d5a4a68e2c64485f6bd67a1ffec809aa9f1847d90a646
+    image: ghcr.io/the-anonymous-aspirant/penpot-backend:2.16.2@sha256:c322cb8f864dc8c23ab033883c22e8b2e11ffb03cb63bede249b21ca6d56f6b4
     restart: unless-stopped
     volumes:
       - /data/aspirant/penpot/assets:/opt/data/assets
@@ -305,7 +308,7 @@ services:
     mem_limit: 2g
 
   penpot-exporter:
-    image: penpotapp/exporter:2.16.2@sha256:b370f14927050fb05ac646441b5993d9337dda7eec60d944aa112819c88207bc
+    image: ghcr.io/the-anonymous-aspirant/penpot-exporter:2.16.2@sha256:7f4cc034d9366627d7c8e222a70fbbeacc88ad4ee8dd5bc2302ad83b77c2d148
     restart: unless-stopped
     environment:
       # Must match the backend's key; the exporter validates signed export
@@ -319,7 +322,7 @@ services:
     mem_limit: 2g
 
   penpot-postgres:
-    image: postgres:15@sha256:bcab099bfaab33333a73a2ebe8c1d615c9f4c2402dd43452f989a36c6da9a5ba
+    image: ghcr.io/the-anonymous-aspirant/penpot-postgres:15@sha256:1439cab601c7157f909d6e85b096adc81264bba698b40ad163c15cf4bcad74bb
     restart: unless-stopped
     stop_signal: SIGINT
     healthcheck:
@@ -338,7 +341,7 @@ services:
     mem_limit: 1g
 
   penpot-redis:
-    image: redis:7@sha256:b2b95679e3b46fb51864949ed25ea976fc3a6bcc00a40a1bc00d568cb2822e50
+    image: ghcr.io/the-anonymous-aspirant/penpot-redis:7@sha256:33d3a320585c78a71f509c68284a3423a0d790380931829e8abac44aaa31b8c0
     restart: unless-stopped
     networks:
       - penpot
