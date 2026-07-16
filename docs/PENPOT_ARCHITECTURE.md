@@ -9,8 +9,8 @@
 
 ```mermaid
 flowchart TD
-    Browser["Operator browser"] -->|"HTTPS :443, design.the-aspirant.com (Cloudflare TLS)"| CF["Cloudflare proxy"]
-    CF -->|"HTTP :80, Host: design.the-aspirant.com"| NGINX["client-blue/green nginx (de-facto ingress)"]
+    Browser["Operator browser"] -->|"HTTPS :443, the-aspirant.com/admin/penpot/ (Cloudflare TLS)"| CF["Cloudflare proxy"]
+    CF -->|"HTTP :80, apex Host"| NGINX["client-blue/green nginx (de-facto ingress, admin auth_request)"]
     NGINX -->|"HTTP + WebSocket :8080, penpot-frontend (default net)"| FE["penpot-frontend"]
     FE -->|"HTTP :6060, penpot-backend (penpot net)"| BE["penpot-backend"]
     FE -->|"HTTP :6061, penpot-exporter (penpot net)"| EX["penpot-exporter"]
@@ -21,7 +21,7 @@ flowchart TD
     Cell["Cell shell (debug)"] -->|"HTTP :9001 → :8080, 127.0.0.1 loopback only"| FE
 ```
 
-The client nginx vhost (`server_name design.the-aspirant.com` → `penpot-frontend:8080`, WebSocket upgrade headers, resolver-variable upstream) ships with aspirant-client (system_3 #2195-C1). `penpot-frontend` is dual-homed on `default` + `penpot`; backend, exporter, postgres, and redis are reachable only from `penpot` peers.
+The client nginx location (`location /admin/penpot/` on the apex server block → `penpot-frontend:8080`, admin `auth_request` gate, WebSocket upgrade headers, resolver-variable upstream, plus a `config.js` short-circuit that injects the path-bearing `penpotPublicURI`) ships with aspirant-client (system_3 #2195-C1, retargeted from the design vhost per #2198 operator direction — `design.the-aspirant.com` is now a plain 302 to the path). `penpot-frontend` is dual-homed on `default` + `penpot`; backend, exporter, postgres, and redis are reachable only from `penpot` peers.
 
 ## Networks and exposure
 
@@ -44,4 +44,4 @@ The client nginx vhost (`server_name design.the-aspirant.com` → `penpot-fronte
 
 ## Auth model
 
-TLS terminates at Cloudflare. The design surface is guarded by Penpot's own login (`enable-login-with-password`, `disable-registration`, secure session cookies — the dev-box `disable-secure-session-cookies` flag is dropped because the public origin is HTTPS). Account management (password reset, adding accounts) uses `manage.py` over PREPL via `docker exec`, as on the dev box. The admin-page `/admin/penpot` entry is itself behind the client's Admin JWT gate, but the Penpot vhost does not depend on it — Penpot's login is the boundary.
+TLS terminates at Cloudflare. The design surface sits behind two gates: the client's Admin JWT (`auth_request` on the `location /admin/penpot/` block — unauthenticated requests 302 to `/login`), then Penpot's own login (`enable-login-with-password`, `disable-registration`, secure session cookies — the dev-box `disable-secure-session-cookies` flag is dropped because the public origin is HTTPS). Account management (password reset, adding accounts) uses `manage.py` over PREPL via `docker exec`, as on the dev box.
