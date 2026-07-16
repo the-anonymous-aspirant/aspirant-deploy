@@ -161,3 +161,11 @@
 **Decision:** `design.the-aspirant.com` is a Cloudflare-proxied CNAME to `the-aspirant.com`.
 
 **Rationale:** The CNAME follows the apex A record automatically, so the DDNS script needs no third hardcoded record ID and the subdomain can never go stale on an IP change.
+
+### GHCR mirrors for the Penpot images over direct Docker Hub pulls
+
+**Context:** The cell's docker daemon cannot complete TLS handshakes to registry-1.docker.io over the lossy Wi-Fi uplink (curl passes; the daemon's pull connections time out repeatedly), while ghcr.io answers in under a second. All first-party images already come from GHCR.
+
+**Decision:** Mirror the five upstream Penpot images to `ghcr.io/the-anonymous-aspirant/penpot-*` (copied from the dev box via `docker buildx imagetools create`, digest-pinned in compose). They are mirrors, not builds — no build lane exists for them; upgrading Penpot means re-mirroring a new upstream digest.
+
+**Rationale:** Registry-to-registry manifest copy preserves provenance (the source digest is recorded in docker-compose.yml comments), the cell demonstrably pulls GHCR reliably, and one registry for every image simplifies the auto-pull story.
