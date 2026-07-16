@@ -137,3 +137,35 @@
 **Decision:** Co-located `tests/` inside each service directory.
 
 **Rationale:** Each service is independent. Tests should follow the same principle — you can clone one service and run its tests without any other service.
+
+### Dedicated postgres:15 + redis:7 for Penpot over the shared pgvector/pg16
+
+**Context:** Penpot (third-party design tool, system_3 #2195) needs PostgreSQL and Redis. The platform convention is that aspirant-authored services share the single pgvector/pg16 instance.
+
+**Decision:** Penpot gets its own `penpot-postgres` (postgres:15, digest-pinned) and `penpot-redis` on an isolated `penpot` network.
+
+**Rationale:** Penpot is a third-party stack like ollama/kiwix, which also own their storage. A dedicated pg15 gives byte-identical restore parity with the proven dev-box instance (the content migration is a straight dump/restore), keeps Penpot's schema churn and upgrade cadence independent of the shared DB, and lets the whole sub-stack be backed up or dropped as a unit.
+
+### Subdomain (design.the-aspirant.com) over a URL subpath for Penpot
+
+**Context:** Public access to Penpot needs an origin. The apex domain already serves the client SPA.
+
+**Decision:** A dedicated subdomain, proxied by the client nginx as a named vhost.
+
+**Rationale:** Penpot documents root-URI deployment only (`PENPOT_PUBLIC_URI`, help.penpot.app technical guide — examples are all root subdomains; no subpath support is documented). `PENPOT_PUBLIC_URI` must also exactly match the browser origin or login silently fails.
+
+### Proxied CNAME over a new A record for the design subdomain
+
+**Context:** The cell has a dynamic IP; `~/update-dns.sh` (cron, every 5 min) updates two hardcoded Cloudflare record IDs (apex + home).
+
+**Decision:** `design.the-aspirant.com` is a Cloudflare-proxied CNAME to `the-aspirant.com`.
+
+**Rationale:** The CNAME follows the apex A record automatically, so the DDNS script needs no third hardcoded record ID and the subdomain can never go stale on an IP change.
+
+### GHCR mirrors for the Penpot images over direct Docker Hub pulls
+
+**Context:** The cell's docker daemon cannot complete TLS handshakes to registry-1.docker.io over the lossy Wi-Fi uplink (curl passes; the daemon's pull connections time out repeatedly), while ghcr.io answers in under a second. All first-party images already come from GHCR.
+
+**Decision:** Mirror the five upstream Penpot images to `ghcr.io/the-anonymous-aspirant/penpot-*` (copied from the dev box via `docker buildx imagetools create`, digest-pinned in compose). They are mirrors, not builds — no build lane exists for them; upgrading Penpot means re-mirroring a new upstream digest.
+
+**Rationale:** Registry-to-registry manifest copy preserves provenance (the source digest is recorded in docker-compose.yml comments), the cell demonstrably pulls GHCR reliably, and one registry for every image simplifies the auto-pull story.
