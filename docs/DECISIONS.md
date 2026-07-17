@@ -191,3 +191,17 @@
 - On-cell git-pull + `histoire build` (rejected: puts a node toolchain and npm-install traffic on a RAM-constrained box behind a radio link that kills long flows — see the #2195-B1 transfer saga)
 
 **Rationale:** The image is fully self-contained — the DS repo builds alone, with node pinned by the base image, so the aspirant-client sibling-checkout gap (#2195 pre-flight finding 2) is structurally impossible. Merge-to-main and image-publish are the same human action. Failure mode if the hook is bypassed (`--no-verify` or a GitHub-side merge, which runs no local hooks): a stale but still-serving Histoire — rerun `scripts/build-and-push-image.sh` to catch up. Subpath serving is spike-verified (vite `base` honored by histoire 0.17.17; app renders behind the prefix with zero escaping requests).
+
+### Post-merge publish poller for dev-box-built images (over local-push-only enforcement)
+
+**Context:** aspirant-client, aspirant-browser, and aspirant-design-system images are built and pushed from the dev box by design (no CI publish — operator direction 2026-07-16). The publish trigger is a local `pre-push` hook, so a GitHub-side merge (UI button or system_3 auto-merge) publishes no image; auto-merge is enabled on client and browser, making that path routine. Bit twice: client#141 auto-merged with no image; design-system#23's bootstrap publish was manual. Full evidence and analysis: `docs/IMAGE_PUBLISH_DECISION.md` (system_3 #2281).
+
+**Decision:** Add a dev-box post-merge publish poller (cron, `aspirant_auto_redeploy.py` operational shape): poll each repo's `origin/main` HEAD, and when GHCR holds no `sha-<short>` image for it, build from a freshly staged checkout (two-repo staged context for the client's `file:../aspirant-design-system` dependency) and push `:latest` + `:sha-<short>`. Extend the freshness sweep with a SHA-granular GHCR-vs-main publish-lag metric (plus an aspirant-histoire row) as the backstop that detects a wedged poller. Pre-push hooks remain as the fast path; the SHA-existence check makes the poller a no-op behind them.
+
+**Alternatives considered:**
+- Local-push-only merges as policy + freshness alert only (rejected: unenforceable without CI status checks, requires disabling auto-merge on the two most active image-bearing repos, and recovery still needs a human — fails the unattended-6-months criterion)
+- Fixing the repos' GitHub `build-image.yml` workflows (out of scope: images are built locally by design per the 2026-07-16 operator direction; the client workflow also cannot see the design-system `file:` sibling)
+
+**Rationale:** Decouples "image exists for main HEAD" from *which door the merge went through*; idempotent against the existing hooks; keeps auto-merge throughput; the backstop metric catches the poller's own failure mode.
+
+**Status:** Proposed 2026-07-17 — ratified by merging this PR (system_3 #2281; implementation tasks listed in `docs/IMAGE_PUBLISH_DECISION.md` §Remediation).
