@@ -1,0 +1,17 @@
+# DuckDB client for the phase-0 lake skeleton (DATA_LAKE_DESIGN.md §11.1).
+# Carries the ducklake + httpfs extensions baked in, so the container works on
+# the cell's degraded link without reaching out to the extension repository.
+FROM python:3.12-slim
+
+# duckdb >= 1.5.2 is the floor for DuckLake v1.0 (ducklake.select stable docs).
+# pytz is not optional despite not being a duckdb dependency: the Python client
+# raises on any result carrying a TIMESTAMP WITH TIME ZONE, which includes
+# DuckLake's snapshots() — the table you reach for first when debugging.
+RUN pip install --no-cache-dir duckdb==1.5.4 pytz==2025.2
+
+# Pre-install the extensions into the image's duckdb home rather than fetching
+# them at query time — the cell cannot be relied on to reach extensions.duckdb.org.
+RUN python -c "import duckdb; c = duckdb.connect(); c.install_extension('ducklake'); c.install_extension('httpfs'); c.install_extension('postgres')"
+
+WORKDIR /work
+ENTRYPOINT ["python"]

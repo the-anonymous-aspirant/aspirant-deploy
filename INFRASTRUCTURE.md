@@ -257,6 +257,23 @@ Requires JWT authentication (Trusted role or above). All endpoints are user-scop
 | `ollamadata` | `/root/.ollama` | Ollama | LLM model weights (re-downloadable) |
 | `kiwixdata` | `/data` | Kiwix | Wikipedia ZIM files (re-downloadable) |
 
+### Lake Skeleton (phase 0, disposable)
+
+Separate compose project `aspirant-lake-skeleton` — **not** part of the production
+stack. See [docs/LAKE_SKELETON.md](docs/LAKE_SKELETON.md).
+
+| Path | Owner | Contents |
+|------|-------|----------|
+| `/scratch/lake-skeleton/garage/{meta,data}` | Garage | S3 objects + cluster metadata (synthetic fixtures only) |
+| `/scratch/lake-skeleton/catalog` | PostgreSQL 16 | DuckLake catalog `lake_catalog_skeleton` |
+| `/scratch/lake-skeleton/config` | — | Generated `garage.toml` |
+| `/scratch/lake-skeleton/lake-skeleton.env` | — | Generated credentials (mode 600, regenerated on every `up`) |
+
+Bind mounts, not named volumes, so the whole stack is one path to delete.
+**Publishes no host ports** — the S3 API and catalog are reachable only from the
+project's own bridge network, which is deliberately not attached to
+`aspirant-online_default`. Everything lives on `/scratch`, never `/data`.
+
 ### Local Asset Storage
 
 Assets (images, audio, dictionary files) are served from `/data/aspirant/assets/` on the host, mounted into the server container. The server builds an in-memory MD5 index at startup for O(1) lookups via `GET /fetch-object/:hash`.
@@ -293,6 +310,7 @@ DNS is updated every 5 minutes by a cron job (`~/update-dns.sh`) to handle dynam
 | 8088 | Advisor API | Local network only |
 | 8089 | Browser API | Local network only |
 | 8999 | Client alt (blue/green) | Alternate frontend port |
+| — | Lake skeleton (Garage S3, catalog) | **No host port.** Docker network only (§4 of the data-lake design forbids new public ports) |
 
 ### Internal Docker Network
 
