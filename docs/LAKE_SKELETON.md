@@ -107,6 +107,39 @@ authenticates holds only fixtures.
 
 ---
 
+## Finding: DuckLake inlines small writes into the catalog by default
+
+Discovered while building this stack, and it matters well beyond it.
+
+DuckLake's data inlining is **on by default with a row limit of 10**
+([docs](https://ducklake.select/docs/stable/duckdb/advanced_features/data_inlining)).
+Writes under that limit are stored as rows in the catalog database and never
+reach the object store at all. The first run of the acceptance check caught it
+exactly this way: three fixture rows queried back perfectly while
+`ducklake_data_file` was empty and the bucket held nothing under `bronze/`.
+
+This stack therefore attaches with `DATA_INLINING_ROW_LIMIT 0`, and asserts the
+result rather than trusting it.
+
+**Why it matters for the real lake**, beyond making a test honest:
+
+- §9's envelope encryption operates on objects the ingest-runner encrypts before
+  `PUT`. Inlined rows never become objects, so with stock settings a small write
+  of `sensitivity=high` data would land **unencrypted in the catalog Postgres**,
+  bypassing layer 2 entirely. Crypto-erasure (destroy the wrapped DEK) would not
+  reach it either.
+- §6/§7 assume the catalog is small and the Postgres backup protects "the lake's
+  brain", not its body. Inlining silently makes the catalog hold data.
+- §9's exit story rests on data being parquet any engine can read. Inlined rows
+  are DuckLake-internal tables.
+
+None of this is a DuckLake defect — inlining is a sensible small-write
+optimization. But the encryption design assumes object-store-or-nothing, so
+whichever epic implements the real ingest path should set the inlining limit
+explicitly and assert on `ducklake_data_file`, exactly as `verify` does here.
+
+---
+
 ## Teardown, and why it is an acceptance criterion
 
 The skeleton's safety argument is only as good as its disposability, so
