@@ -3,6 +3,7 @@
 *Task #2149 · 2026-07-15 · Status: design for operator review, no implementation yet.*
 *Rev 2 (2026-07-15): folds the operator's answers to the three blocking questions — personal-data scope confirmed (§0.3, §2, §5g), Garage-vs-build-own compared (§3.5), RPO 24 h confirmed (§6), encryption + access rewritten as mandatory (§9), compliance section added (§14).*
 *Rev 3 (2026-07-18): folds Q-N1–Q-N4 and is deliberately **smaller** than rev 2. Retention is keep-forever, so the windowing branch is deleted (§14). Jurisdiction is EU (§14), which also makes the GDPR subject access request an export **tool** (§5g). Key custody is settled: hardware token or written down, manual LUKS unlock over SSH (§9). Export mechanics are deferred by operator decision — five designed connectors collapse to **one manual medical-records export** (§5g), with the rest described but unscheduled. New §11.0 states the one thing that cannot be deferred: encryption at rest must exist before the first byte lands.*
+*Rev 3b (2026-07-18): operator re-sequenced — the **walkable interface on synthetic data comes first** (§11.1 phase 0), encryption moves to phase 0b. Rev 3's "encryption before the first byte" was stated too broadly: it conflated the first byte of any data with the first byte of REAL data. §11.0 now states the constraint precisely — real personal data must not land on unencrypted storage — plus a guardrail keeping the unencrypted skeleton structurally unable to receive real data. Encryption is re-ordered, not dropped.*
 *Rev 3a (2026-07-18): adds §11.2 — the cell's permanently degraded Wi-Fi link (#2195–#2197) makes the Q-N3 remote-unlock path less reliable than assumed, so the phase-0 drill must run over the real link. Does not reopen Q-N3; changes drill acceptance criteria only.*
 *Companion: [SURVEY.md](./SURVEY.md) — full Phase-1 storage-surface inventory with raw evidence.*
 
@@ -245,23 +246,34 @@ Feed the existing aspirant-monitor: per-source freshness age vs SLA; connector r
 
 ## 11. Phasing
 
-### 11.0 The one thing that must NOT be deferred
+### 11.0 The constraint that binds, stated precisely
 
-**Encryption at rest must be in place before the first byte lands.** This is not conservatism; it is an ordering property of the technology: **a disk cannot be encrypted in place once it is populated.** Retrofitting means evacuating the data, rebuilding the volume, and restoring — an hour of setup on an empty disk becomes a risky migration afterwards, and the risk grows monotonically with every byte ingested.
+*(Rev 3b, 2026-07-18: rev 3 stated this as "encryption before the first byte lands" and put it first in the sequence. That was too broad — it conflated the first byte of **any** data with the first byte of **real** data, and so blocked work it had no need to block. The operator has re-sequenced; the constraint below is the corrected form and it still binds.)*
 
-Three facts compound it:
+> **Real personal data — medical, finance, messages, photos — must not land on unencrypted storage.**
 
-1. The operator's chosen first source is **medical records — the highest-sensitivity category in the entire scope** (§5g). Deferring encryption would put the most sensitive data on an unencrypted volume first.
+The technical premise is unchanged and still holds: **a populated disk cannot be encrypted in place.** Retrofitting means evacuating the data, rebuilding the volume, and restoring — an hour of setup on an empty disk becomes a risky migration afterwards. What changes is the *trigger*: that cost is only incurred by data worth keeping. **Synthetic fixtures on a scratch volume incur none of it, because the correct disposal method for a scratch volume is to destroy it.**
+
+Three facts set the bar for when the constraint fires:
+
+1. The operator's chosen first real source is **medical records — the highest-sensitivity category in the entire scope** (§5g). Whenever that arrives, encryption must already exist.
 2. Retention is **forever** (§14). A breach is permanent, not windowed — there is no future date at which exposure ages out.
-3. The cell already runs internet-exposed services (§9 threat model). The window between "first byte" and "encryption done" is not theoretical.
+3. The cell already runs internet-exposed services (§9 threat model). The window between "first real byte" and "encryption done" is not theoretical.
 
-So the walking skeleton is, in strict order: **LUKS volume + SSH remote unlock → the one manual medical export → everything else.** Every other item in this spec is reorderable; this is not.
+So the corrected order is: **walkable interface on synthetic data → LUKS volume + SSH remote unlock → the one manual medical export → everything else.** Steps 2 and 3 are not reorderable with respect to each other; step 1 is genuinely free of that constraint.
 
-A fourth fact does not compound the *ordering* argument but does raise the cost of the unlock half, so it is specified separately: the cell's network link is permanently degraded, which makes remote unlock less reliable than the Q-N3 decision assumed (§11.2).
+A further fact does not affect the *ordering* argument but raises the cost of the unlock half, so it is specified separately: the cell's network link is permanently degraded, which makes remote unlock less reliable than the Q-N3 decision assumed (§11.2).
+
+**Guardrail while the skeleton runs unencrypted.** The re-sequencing is safe only as long as nothing real arrives early, so make that structurally hard rather than a matter of discipline:
+
+- Fixtures must be **obviously synthetic** — clearly fake names, dates and values — so a sample record can never be mistaken for a real one, in a screenshot or in a database.
+- Skeleton storage lives on a **scratch path expected to be destroyed**, never on the volume intended for the real lake. If the skeleton's data survives the skeleton, the guardrail has already failed.
+- **Wanting to demo with a real medical PDF is the signal that step 2 is now due** — not a small exception to be made once. Treat the temptation as the trigger it is.
 
 ### 11.1 Phases
 
-0. **Phase 0 — encryption first (blocks all ingest)**: LUKS on `/data`, `/scratch`, and the lake's SSD LV; `dropbear-initramfs`-class remote unlock proven with a deliberate reboot drill; KEK generated and placed in its off-cell custody (§9). No data moves until a cold-boot-then-SSH-unlock has succeeded at least once — see §11.2 for what that drill has to prove.
+0. **Phase 0 — the walkable interface, on synthetic data (operator's chosen first deliverable)**: a functioning `aspirant-explorer` skeleton the operator can actually click through — Overview, Datasets, Documents — over a Garage + DuckLake stack seeded with **obviously-synthetic fixtures on a scratch path** (§11.0 guardrail). The point is to make the design walkable and correctable while it is still cheap: an interface disagreement found by clicking costs a page rewrite; the same disagreement found after five connectors and an encryption story costs a migration. **No real data, and nothing here touches the volume intended for the real lake.**
+0b. **Phase 0b — encryption (blocks all REAL data, not the skeleton)**: LUKS on `/data`, `/scratch`, and the lake's SSD LV; `dropbear-initramfs`-class remote unlock proven with a deliberate reboot drill; KEK generated and placed in its off-cell custody (§9). Must complete before the medical export in phase 2 — see §11.2 for what that drill has to prove.
 
 ### 11.2 Phase-0 drill acceptance criteria — and the link the unlock depends on
 
@@ -280,8 +292,10 @@ This does **not** reopen Q-N3. The security reasoning behind it — stolen hardw
 - **The runbook must say that several attempts are normal**, so an operator mid-outage reads retries as expected behaviour rather than as a fault to debug under pressure.
 
 Honest residual risk, not designed away: if the Wi-Fi link is down hard, no amount of timeout tuning helps and the cell stays encrypted-and-dark until someone is physically present. That is the accepted cost of the custody decision, and it is the strongest argument in this spec for restoring wired networking whenever access to the ethernet becomes possible.
-1. **Week 1 — stop the bleeding (no lake yet)**: smartmontools + SMART alerts; restic to `/scratch` + B2 for the precious set as it sits today; docker image prune; verify reMarkable sync (0 files in 30 d).
-2. **Weeks 2-3**: Garage + DuckLake catalog + cron-driven ingest of the trivial connectors (pg dumps, rclone syncs of files/transcripts/cron-logs, browser_flows hook, cursor reads of `activity_log`/`request_log`); inventory table; backups extended over the lake. **Plus the §5g walking skeleton: the one manual medical-records export, end-to-end into bronze with layer-2 envelope encryption and extracted text in silver.** It is small enough to ride along here and it is the slice that proves the sensitive-data path works before anything else is trusted to it.
+1. **Week 1 — stop the bleeding (no lake yet)**: smartmontools + SMART alerts; restic to `/scratch` + B2 for the precious set as it sits today; docker image prune; verify reMarkable sync (0 files in 30 d). Independent of phases 0/0b — this protects data that already exists, and can run in parallel with either.
+2. **Weeks 2-3**: Garage + DuckLake catalog + cron-driven ingest of the trivial connectors (pg dumps, rclone syncs of files/transcripts/cron-logs, browser_flows hook, cursor reads of `activity_log`/`request_log`); inventory table; backups extended over the lake. **Plus the §5g *data* skeleton — the one manual medical-records export**, end-to-end into bronze with layer-2 envelope encryption and extracted text in silver. It is small enough to ride along here and it is the slice that proves the sensitive-data path works before anything else is trusted to it. **Gated on phase 0b: this is the first real data, so encryption must already exist.**
+
+*(Two distinct skeletons, deliberately named apart: the **interface skeleton** (phase 0) proves the surface is right using fake data; the **data skeleton** (here) proves the sensitive-data path is right using one real document. They answer different questions and neither substitutes for the other.)*
 3. **Weeks 4-5 — dbt + orchestrator**: dbt project over silver (CDC-less at first); Dagster OSS compose group absorbs the phase-2 crons; daily schedule + asset freshness.
 4. **Weeks 6-7 — CDC spike, then rollout**: `wal_level=logical` change window on both PGs; dlt/`pgoutput` consumer spike on ONE mutable table (`tasks`); slot-lag alerting proven **before** widening the publication; then all mutable tables.
 5. **Weeks 8-10**: extraction pipeline (text/OCR/transcripts/thumbnails); gold marts published to Postgres; Metabase; aspirant-explorer v1 (Overview, Datasets, Documents, Runs); restore drill #1; runbooks.
