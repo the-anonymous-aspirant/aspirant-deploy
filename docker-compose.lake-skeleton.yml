@@ -24,7 +24,7 @@ name: aspirant-lake-skeleton
 
 services:
   garage:
-    image: ghcr.io/the-anonymous-aspirant/garage:v2.3.0
+    image: ghcr.io/the-anonymous-aspirant/garage:v2.3.0@sha256:2d3f94a89a8a02dc49fa75594d6df67ed9c6ffe08fe55ed023d0c9776f71a9bd
     container_name: lake-skeleton-garage
     restart: unless-stopped
     volumes:
@@ -45,7 +45,7 @@ services:
       start_period: 10s
 
   catalog:
-    image: ghcr.io/the-anonymous-aspirant/lake-catalog-postgres:16-alpine
+    image: ghcr.io/the-anonymous-aspirant/lake-catalog-postgres:16-alpine@sha256:0fc5c901ec0a3c55ce70b99b040daeb89d5b35b61febbced1b4b24dbc3153ec8
     container_name: lake-skeleton-catalog
     restart: unless-stopped
     environment:
@@ -68,7 +68,7 @@ services:
       start_period: 10s
 
   duckdb:
-    image: ghcr.io/the-anonymous-aspirant/aspirant-lake-duckdb:1.5.4
+    image: ghcr.io/the-anonymous-aspirant/aspirant-lake-duckdb:1.5.4@sha256:591c14070c233b679c8331fb146b971791a82b774141a7153a363c85e9fed1ad
     container_name: lake-skeleton-duckdb
     # A client, not a server: it runs on demand via `lake-skeleton.sh verify`
     # and exits. Nothing depends on it staying up.
