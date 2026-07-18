@@ -1,6 +1,7 @@
 # Changelog
 
 ### 2026-07-18
+- Correct the credential claim in the design-subdomain decommission entry (system_3 #2195-C1): the prior entry stated no Cloudflare API credential exists on the cell or dev box. It does — `~/update-dns.sh` hardcodes an active zone token with DNS edit scope, so the CNAME deletion is API-doable; only the edge redirect rule needs the dashboard, that token having no Ruleset permission. The original claim came from searching for `CLOUDFLARE_*` environment variables and never grepping script bodies for hardcoded literals.
 - Record the `design.the-aspirant.com` decommission across the Penpot docs (system_3 #2195-C1): operator direction settled Penpot as an auth-gated subpath matching histoire, so the subdomain is removed rather than kept as the 302 alias the earlier subpath decision had left in place. `https://the-aspirant.com/admin/penpot/` is the sole public entry point. Docs-only — the record and its redirect rule live at the Cloudflare edge, not in this repo, so the teardown itself is operator action tracked on the system_3 task and the subdomain still answers until it lands. See DECISIONS.md "Decommission the design subdomain entirely".
 
 ### 2026-07-16
