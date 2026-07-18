@@ -151,15 +151,87 @@ At cutover (immediately before pointing users at the target):
    using it; there is no multi-writer story.
 2. Re-run the **export** steps. The DB dump is small (hundreds of KB for
    this content set) and ships fine even on a degraded link; the assets
-   delta is only the storage objects created since the bulk copy
-   (compare `md5sum` manifests, send the missing files).
-3. Re-run the **restore** steps on the target (`pg_restore --clean` makes
-   this idempotent), re-verify row counts and the file `revn` values
-   against a fresh source baseline.
+   delta is only the storage objects created since the bulk copy.
+3. Re-run the **restore** steps on the target, then re-verify row counts
+   and the file `revn` values against a fresh source baseline.
 
 Skipping this step silently loses the source's post-export edits the
 moment users start writing on the target — after that, the two histories
 can no longer be merged (Penpot has no design-file merge).
+
+#### Executed 2026-07-18 — what the procedure above gets wrong
+
+The sync was performed for real on 2026-07-18. By then the source had
+advanced further than the estimate above: `system_3-mockups` was at
+**revn 155** (modified 07-17 14:52) against **revn 150** on the target,
+plus one extra project and one extra file. Five revisions of design work
+would have been lost by cutting over without this step.
+
+Four corrections to the recipe, each one something that actually bit:
+
+- **Take the target-side backup first.** `pg_dump -Fc` the target before
+  any write, to `/data/aspirant/penpot/backups/penpot-pre-delta-<stamp>.dump`.
+  The restore below drops the database; the backup is the only way back.
+
+- **Drop and recreate the database — `pg_restore --clean` is not enough.**
+  `--clean` cannot drop objects while the backend holds connections. Stop
+  `penpot-backend`, `penpot-exporter` and `penpot-frontend` first, then
+  terminate any residual sessions and recreate:
+
+  ```bash
+  docker compose stop penpot-backend penpot-exporter penpot-frontend
+  docker exec <pg> psql -U penpot -d postgres -c \
+    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+     WHERE datname='penpot' AND pid <> pg_backend_pid();"
+  docker exec <pg> psql -U penpot -d postgres -c "DROP DATABASE penpot;"
+  docker exec <pg> psql -U penpot -d postgres -c "CREATE DATABASE penpot OWNER penpot;"
+  docker exec <pg> pg_restore -U penpot -d penpot --no-owner --no-acl /tmp/delta.dump
+  ```
+
+- **Build the target asset manifest from the host bind mount, not
+  `docker exec`.** The backend container is stopped at this point in the
+  procedure, so `docker exec … find /opt/data/assets` returns *nothing* and
+  the diff then claims every file is missing. Read
+  `/data/aspirant/penpot/assets` directly (needs `sudo`). Use size-bearing
+  manifests and `comm`, which also surfaces files the target has and the
+  source does not:
+
+  ```bash
+  find . -type f -printf "%p %s\n" | sort   # both sides, from the assets root
+  comm -23 dev.txt cell.txt                 # missing on target → ship these
+  comm -13 dev.txt cell.txt                 # target-only → usually GC'd orphans
+  ```
+
+- **Assets are keyed by storage_object `id`, not by the content hash.** The
+  `metadata->>'~:hash'` value is a `blake2b:…` string and is *not* the path.
+  The fs path is the object UUID with dashes stripped, split 2/2/rest:
+
+  ```bash
+  # audit: every referenced asset present on disk?
+  psql -tAc "select replace(id::text,'-','') from storage_object where deleted_at is null" \
+  | while read h; do
+      test -f "/data/aspirant/penpot/assets/${h:0:2}/${h:2:2}/${h:4}" || echo "MISSING $h"
+    done
+  ```
+
+**Expect orphan rows, and check the source before calling them data loss.**
+The 07-18 audit reported 1 missing file out of 91 storage objects. It was
+missing on the *source* too — a row created 07-14, never touched, with zero
+`file_media_object` / `file_object_thumbnail` references. A dangling
+`storage_object` whose blob was already gone is a pre-existing condition,
+not a migration failure. Verify against the source before reacting.
+
+**Verify content identity, not just row counts.** Row counts agreeing does
+not prove the designs survived. Compare the file data blobs directly:
+
+```bash
+psql -tAc "select name||' '||md5(data::text)||' '||length(data) from file order by name"
+```
+
+Post-sync on 07-18 both sides returned identical md5s for all three files
+(`system_3-mockups` = 579,567 bytes), identical `storage_object` counts and
+byte totals (91 / 75,757,642), and matching profile/project/file/team
+counts. That is the evidence standard worth meeting before cutover.
 
 ### Secrets discipline
 
