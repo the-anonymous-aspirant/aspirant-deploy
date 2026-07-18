@@ -87,6 +87,7 @@ services:
       AWS_SECRET_ACCESS_KEY: ${LAKE_S3_SECRET_KEY:?set LAKE_S3_SECRET_KEY}
     volumes:
       - ./scripts/lake_skeleton_verify.py:/work/verify.py:ro
+      - ./scripts/lake_skeleton_fixtures.py:/work/fixtures.py:ro
     networks:
       - lake
 
