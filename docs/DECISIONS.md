@@ -162,15 +162,29 @@
 
 **Decision:** Penpot mounts at `location /admin/penpot/` on the apex server block, behind the existing admin `auth_request` gate, with a `config.js` short-circuit injecting a path-bearing `penpotPublicURI` and a matching path-bearing `PENPOT_PUBLIC_URI` on the backend. `design.the-aspirant.com` stays as a plain 302 to the path (workspace `#` deep links survive the redirect).
 
+> The residual 302 alias was **withdrawn (2026-07-18)** — see "Decommission the design subdomain entirely" below. The subpath decision itself stands.
+
 **Rationale:** Empirically falsified the root-URI-only premise on the live 2.16.2 stack (playwright spike, #2198 comment 8700): the frontend uses relative asset refs + hash routing and computes `public-uri = ensure_path_slash(penpotPublicURI || fallback)`; authenticated login, dashboard, path-prefixed websocket, RPC file creation, and full workspace render all stayed inside the prefix with zero escapes. The one console error (`css/ui.css` 404) reproduces identically at root — a pre-existing image quirk. Residual risk: the exporter path (PNG/PDF render round-trip) was not exercised in the spike; verify at cell dogfood.
 
 ### Proxied CNAME over a new A record for the design subdomain
+
+> **Superseded (2026-07-18)** by "Decommission the design subdomain entirely" below — the CNAME is being removed, not re-pointed.
 
 **Context:** The cell has a dynamic IP; `~/update-dns.sh` (cron, every 5 min) updates two hardcoded Cloudflare record IDs (apex + home).
 
 **Decision:** `design.the-aspirant.com` is a Cloudflare-proxied CNAME to `the-aspirant.com`.
 
 **Rationale:** The CNAME follows the apex A record automatically, so the DDNS script needs no third hardcoded record ID and the subdomain can never go stale on an IP change.
+
+### Decommission the design subdomain entirely
+
+**Context:** Operator direction (system_3 #2198, 2026-07-18): *"Regarding penpot, I would like for that to just be similar in structure to what we have with histoire."* Histoire is reached at `https://the-aspirant.com/admin/histoire/` behind the admin auth gate, with no subdomain of its own. The subpath decision above had already moved Penpot's real entry point to `/admin/penpot/` but left `design.the-aspirant.com` alive as a 302 alias; matching histoire means the alias goes too.
+
+**Decision:** `design.the-aspirant.com` is removed — both the Cloudflare DNS record and the edge redirect rule. `https://the-aspirant.com/admin/penpot/` is the sole public entry point.
+
+**Rationale:** An alias that no longer has a structural job is a maintenance and security surface rather than a convenience: a DNS record outliving its purpose is the classic subdomain-takeover precondition, and keeping it means every future ingress or TLS change has a second origin to reason about. The redirect bought only bookmark compatibility for a surface that has been operator-only and short-lived. Deep links survive regardless — the `/admin/penpot/` path preserves the workspace `#` fragment.
+
+**State:** The redirect and record are served at the **Cloudflare edge**, not from this repo — `grep -rn "design\.the-aspirant" .` matches documentation only; no nginx vhost or compose entry exists to remove. Teardown is therefore **operator action in the Cloudflare dashboard**, tracked on system_3 #2198; no Cloudflare API credential is present on the cell or the dev box. Until that lands, `design.the-aspirant.com` continues to 302 — this entry records the decision, not a completed teardown.
 
 ### GHCR mirrors for the Penpot images over direct Docker Hub pulls
 

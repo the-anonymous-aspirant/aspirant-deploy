@@ -21,7 +21,7 @@ flowchart TD
     Cell["Cell shell (debug)"] -->|"HTTP :9001 → :8080, 127.0.0.1 loopback only"| FE
 ```
 
-The client nginx location (`location /admin/penpot/` on the apex server block → `penpot-frontend:8080`, admin `auth_request` gate, WebSocket upgrade headers, resolver-variable upstream, plus a `config.js` short-circuit that injects the path-bearing `penpotPublicURI`) ships with aspirant-client (system_3 #2195-C1, retargeted from the design vhost per #2198 operator direction — `design.the-aspirant.com` is now a plain 302 to the path). `penpot-frontend` is dual-homed on `default` + `penpot`; backend, exporter, postgres, and redis are reachable only from `penpot` peers.
+The client nginx location (`location /admin/penpot/` on the apex server block → `penpot-frontend:8080`, admin `auth_request` gate, WebSocket upgrade headers, resolver-variable upstream, plus a `config.js` short-circuit that injects the path-bearing `penpotPublicURI`) ships with aspirant-client (system_3 #2195-C1, retargeted from the design vhost per #2198 operator direction; `design.the-aspirant.com` is decommissioned rather than kept as a redirect alias — see DECISIONS.md). `penpot-frontend` is dual-homed on `default` + `penpot`; backend, exporter, postgres, and redis are reachable only from `penpot` peers.
 
 ## Networks and exposure
 
