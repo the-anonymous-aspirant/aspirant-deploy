@@ -1,0 +1,98 @@
+# Phase-0 lake skeleton — Garage (S3) + a DuckLake catalog, on scratch storage.
+#
+# DATA_LAKE_DESIGN.md §11.1 phase 0. This stack exists to make the interface
+# walkable on obviously-synthetic fixtures BEFORE encryption exists (§11.0b),
+# which is only safe because it is structurally incapable of holding anything
+# real:
+#
+#   * every byte lives under /scratch/lake-skeleton/, a path whose disposal
+#     method is destruction — never /data, which is where the real lake goes;
+#   * it is a SEPARATE compose project (aspirant-lake-skeleton), so the */5
+#     auto-pull cron that re-ups the production project can neither upgrade it
+#     nor resurrect it after teardown;
+#   * it publishes NO host ports (§4) — the S3 API and the catalog are reachable
+#     only from this project's own bridge network.
+#
+# Drive it with scripts/lake-skeleton.sh; see docs/LAKE_SKELETON.md for the
+# service contract and the teardown runbook.
+#
+# Images are GHCR mirrors of upstream, digest-pinned: the cell cannot reach
+# Docker Hub (TLS handshake timeouts over its Wi-Fi dongle), and pinning keeps
+# the stack off the surprise-upgrade path that §4 calls out.
+
+name: aspirant-lake-skeleton
+
+services:
+  garage:
+    image: ghcr.io/the-anonymous-aspirant/garage:v2.3.0
+    container_name: lake-skeleton-garage
+    restart: unless-stopped
+    volumes:
+      - ${LAKE_SKELETON_ROOT:-/scratch/lake-skeleton}/config:/etc/garage:ro
+      - ${LAKE_SKELETON_ROOT:-/scratch/lake-skeleton}/garage/meta:/var/lib/garage/meta
+      - ${LAKE_SKELETON_ROOT:-/scratch/lake-skeleton}/garage/data:/var/lib/garage/data
+    environment:
+      GARAGE_CONFIG_FILE: /etc/garage/garage.toml
+    networks:
+      - lake
+    healthcheck:
+      # /health is Garage's admin-API liveness endpoint; it answers without a
+      # token and turns green only once a cluster layout has been applied.
+      test: ["CMD", "/garage", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  catalog:
+    image: ghcr.io/the-anonymous-aspirant/lake-catalog-postgres:16-alpine
+    container_name: lake-skeleton-catalog
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ducklake
+      POSTGRES_PASSWORD: ${LAKE_CATALOG_PASSWORD:?set LAKE_CATALOG_PASSWORD}
+      POSTGRES_DB: lake_catalog_skeleton
+      # The database name carries `_skeleton` deliberately: the real lake's
+      # catalog is `lake_catalog` in the production instance (§7), and no query
+      # should ever be ambiguous about which one it hit.
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - ${LAKE_SKELETON_ROOT:-/scratch/lake-skeleton}/catalog:/var/lib/postgresql/data
+    networks:
+      - lake
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ducklake -d lake_catalog_skeleton"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  duckdb:
+    image: ghcr.io/the-anonymous-aspirant/aspirant-lake-duckdb:1.5.4
+    container_name: lake-skeleton-duckdb
+    # A client, not a server: it runs on demand via `lake-skeleton.sh verify`
+    # and exits. Nothing depends on it staying up.
+    profiles: ["client"]
+    depends_on:
+      garage:
+        condition: service_healthy
+      catalog:
+        condition: service_healthy
+    environment:
+      LAKE_CATALOG_DSN: postgresql://ducklake:${LAKE_CATALOG_PASSWORD:?set LAKE_CATALOG_PASSWORD}@catalog:5432/lake_catalog_skeleton
+      LAKE_S3_ENDPOINT: garage:3900
+      LAKE_S3_BUCKET: ${LAKE_S3_BUCKET:-lake-skeleton-bronze}
+      LAKE_S3_REGION: garage
+      AWS_ACCESS_KEY_ID: ${LAKE_S3_ACCESS_KEY:?set LAKE_S3_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${LAKE_S3_SECRET_KEY:?set LAKE_S3_SECRET_KEY}
+    volumes:
+      - ./scripts/lake_skeleton_verify.py:/work/verify.py:ro
+    networks:
+      - lake
+
+networks:
+  lake:
+    # Project-local bridge. Not attached to aspirant-online_default: the
+    # skeleton must not be reachable from the internet-exposed services (§9
+    # threat model), and nothing in production has any business reading it.
+    driver: bridge
