@@ -18,7 +18,7 @@ The design system work (Penpot mockups, design tokens, component libraries) curr
 
 - Run the upstream Penpot 2.16.2 stack (frontend, backend, exporter, dedicated postgres:15, dedicated redis:7) as part of the production compose project.
 - Migrate all existing content (Penpot database + uploaded assets) from the dev box, byte-identical, including the `PENPOT_SECRET_KEY` so sessions and signed asset URLs survive.
-- Public access at `https://the-aspirant.com/admin/penpot/` — the apex origin, TLS at the Cloudflare edge, admin-gated (`auth_request`) client-nginx location proxying to the frontend (lands in aspirant-client, same feature). `design.the-aspirant.com` remains a plain 302 to the path.
+- Public access at `https://the-aspirant.com/admin/penpot/` — the apex origin, TLS at the Cloudflare edge, admin-gated (`auth_request`) client-nginx location proxying to the frontend (lands in aspirant-client, same feature). This is the sole public entry point — `design.the-aspirant.com` is decommissioned (see DECISIONS.md).
 - A Penpot card on the admin page that opens `/admin/penpot/` in a new tab (Penpot's canvas needs a full browser tab, not an iframe embed).
 
 ### Out of Scope
