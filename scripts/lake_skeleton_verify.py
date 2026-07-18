@@ -74,7 +74,18 @@ check(
 )
 
 # --- 2. DuckLake catalog is queryable ------------------------------------
-con.execute(f"ATTACH 'ducklake:postgres:{DSN}' AS lake (DATA_PATH 's3://{BUCKET}/bronze/')")
+# DATA_INLINING_ROW_LIMIT 0 is load-bearing, not tidiness. DuckLake inlines
+# writes of up to 10 rows into the catalog database by default
+# (ducklake.select/docs/stable/duckdb/advanced_features/data_inlining), so with
+# stock settings a small insert never reaches the object store at all — it sits
+# as rows in Postgres. That would make this script's S3 assertion vacuous, and
+# in the real lake it would route data around the object-level encryption §9
+# specifies. Writing straight to parquet keeps "data lives in the object store"
+# true rather than usually-true.
+con.execute(
+    f"ATTACH 'ducklake:postgres:{DSN}' AS lake "
+    f"(DATA_PATH 's3://{BUCKET}/bronze/', DATA_INLINING_ROW_LIMIT 0)"
+)
 con.execute("USE lake")
 con.execute("DROP TABLE IF EXISTS synthetic_people")
 con.execute(
@@ -114,14 +125,30 @@ check(
 
 # The catalog itself must be in Postgres, not smuggled into a local file — this
 # is what makes the lake "multiplayer" (§7) and what #2359/#2360 will attach to.
+# Attached separately: `lake` is the DuckLake database, which does not expose the
+# catalog's own tables.
+con.execute(f"ATTACH '{DSN}' AS catalog_db (TYPE postgres, READ_ONLY)")
 catalog_tables = con.execute(
-    "SELECT count(*) FROM postgres_query('lake', "
-    "'SELECT 1 FROM information_schema.tables WHERE table_name LIKE ''ducklake_%''')"
+    "SELECT count(*) FROM catalog_db.information_schema.tables "
+    "WHERE table_name LIKE 'ducklake_%'"
 ).fetchone()[0]
 check(
     "Catalog metadata lives in Postgres",
     catalog_tables > 0,
     f"{catalog_tables} ducklake_* table(s) in the catalog database",
+)
+
+# Belt-and-braces on the inlining setting above: if any row were inlined, the
+# object store would not be the system of record for it.
+inlined = con.execute(
+    "SELECT count(*) FROM catalog_db.information_schema.tables "
+    "WHERE table_name LIKE 'ducklake_inlined%'"
+).fetchone()[0]
+data_files = con.execute("SELECT count(*) FROM catalog_db.public.ducklake_data_file").fetchone()[0]
+check(
+    "Table data is in parquet files, not inlined into the catalog",
+    data_files >= 1,
+    f"{data_files} data-file row(s); {inlined} inlining table(s) present in schema",
 )
 
 # --- 4. snapshots exist (time-travel is the skeleton's stand-in for object
