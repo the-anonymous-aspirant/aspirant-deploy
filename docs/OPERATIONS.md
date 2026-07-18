@@ -59,6 +59,25 @@ sudo install -d -o aspirant -g aspirant /var/log/aspirant-auto-pull /var/lib/asp
 ( crontab -l 2>/dev/null; echo '*/5 * * * * /home/aspirant/aspirant-deploy/scripts/auto-pull.sh >> /var/log/aspirant-auto-pull/cron.log 2>&1' ) | crontab -
 ```
 
+#### Deploy gates
+
+Two gates run once per tick, before any `docker compose pull` or recreate. Both log to the cron log and append a `service: "-"` line to `decisions.jsonl`.
+
+**1. Maintenance pause.** While `/home/aspirant/aspirant-deploy/.maintenance-pause` exists, every tick is a logged no-op and the run exits 0 — a sanctioned freeze is not a fault. Open and close a window with:
+
+```bash
+touch /home/aspirant/aspirant-deploy/.maintenance-pause   # freeze
+rm    /home/aspirant/aspirant-deploy/.maintenance-pause   # resume
+```
+
+Presence alone is the signal; the file is never read, so an unreadable marker cannot crash the cron, and anything written into it is advisory metadata for whoever finds it (who paused, why, when). The marker is gitignored — a committed one would freeze every checkout permanently.
+
+The filename and contract match the system_3 side (`shared/paths.py::MAINTENANCE_MARKER_NAME`), but each host carries its own marker: the dev box and the cell share no filesystem, so a freeze is two commands, not one. Pausing both is the operator's job.
+
+**2. Checkout provenance.** `auto-pull.sh` drives `docker compose` against the `docker-compose.yml` *in this checkout*, so a checkout parked on a feature branch would recreate production services from an unreviewed compose file. The run refuses unless `HEAD` is `main` tracking `origin/main`, exiting 1 with the drift reason and the fix command. A detached HEAD, a missing upstream, and a directory that is not a git checkout at all are all refusals — the gate needs to *prove* provenance, not merely fail to disprove it.
+
+Neither gate inspects the working tree for uncommitted or untracked files. The cell carries stray `.env.bak-*` and `docker-compose.yml.bak-*` files; sweeping those into a cleanliness check would wedge every deploy for a reason that has nothing to do with which compose file is being deployed.
+
 Dry-run from the deploy directory to see what *would* happen without pulling or recreating:
 
 ```bash

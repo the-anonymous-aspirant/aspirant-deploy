@@ -8,6 +8,12 @@ node_modules/
 .idea/
 docker-compose.override.yml
 
+# Sanctioned maintenance-mode marker honoured by scripts/auto-pull.sh (task
+# #2279). Checkout-root runtime state whose whole purpose is to be host-local —
+# a freeze window opened on the cell must not travel to another box through a
+# commit, and a committed marker would pause every checkout permanently.
+/.maintenance-pause
+
 # SSH private keys (public keys are safe to commit)
 id_ed25519
 id_rsa
