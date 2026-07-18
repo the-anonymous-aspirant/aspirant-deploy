@@ -171,7 +171,14 @@ check("DuckLake snapshots are recorded", snapshots > 0, f"{snapshots} snapshot(s
 # --- 5. fixture coverage: every surface the explorer must render has data --
 # Skipped rather than failed when the stack has not been seeded — `verify` must
 # stay meaningful on a bare stack, which is what the teardown drill exercises.
-tables = {r[0] for r in con.execute("SELECT table_name FROM lake.information_schema.tables").fetchall()}
+# A DuckLake attachment exposes no information_schema, so enumerate through
+# DuckDB's own catalog view instead.
+tables = {
+    r[0]
+    for r in con.execute(
+        "SELECT table_name FROM duckdb_tables() WHERE database_name = 'lake'"
+    ).fetchall()
+}
 seeded = "asset_inventory" in tables
 
 if not seeded:
@@ -220,7 +227,10 @@ else:
     # value in every fixture table has to be self-labelling. A field that does
     # not match the vocabulary is reported, not waved through — that is what
     # stops realism creeping in one column at a time.
-    MARKERS = ("SYNTHETIC", "FAKE-", "synthetic", "fake-")
+    # "2999" counts as a marker in its own right: an impossible year is exactly
+    # as self-labelling as the word SYNTHETIC, and month strings like "2999-08"
+    # carry no other prose to mark up.
+    MARKERS = ("SYNTHETIC", "FAKE-", "synthetic", "fake-", "2999")
     ALLOWED_ENUMS = {
         "normal", "high", "success", "failed", "green", "amber", "red",
         "document", "image", "audio", "message_export",
