@@ -7,7 +7,10 @@ FROM python:3.12-slim
 # pytz is not optional despite not being a duckdb dependency: the Python client
 # raises on any result carrying a TIMESTAMP WITH TIME ZONE, which includes
 # DuckLake's snapshots() — the table you reach for first when debugging.
-RUN pip install --no-cache-dir duckdb==1.5.4 pytz==2025.2
+# boto3: DuckDB writes parquet well but cannot PUT arbitrary binary, and §2's
+# bronze layer is content-addressed *blobs*. The real ingest-runner is specified
+# as "Python + rclone + DuckDB" (§5), so an S3 client belongs here regardless.
+RUN pip install --no-cache-dir duckdb==1.5.4 pytz==2025.2 boto3==1.40.47
 
 # Pre-install the extensions into the image's duckdb home rather than fetching
 # them at query time — the cell cannot be relied on to reach extensions.duckdb.org.

@@ -68,7 +68,7 @@ services:
       start_period: 10s
 
   duckdb:
-    image: ghcr.io/the-anonymous-aspirant/aspirant-lake-duckdb:1.5.4@sha256:f1422f3ae3e03f3e0e57acee070af7a175fb9e54fff16ff6991bd7873e9b84ed
+    image: ghcr.io/the-anonymous-aspirant/aspirant-lake-duckdb:1.5.4@sha256:9dcd7396d2875f9a133ed18611f1e4d76bf4d45554cdcca22f92332177fc251a
     container_name: lake-skeleton-duckdb
     # A client, not a server: it runs on demand via `lake-skeleton.sh verify`
     # and exits. Nothing depends on it staying up.
@@ -87,6 +87,7 @@ services:
       AWS_SECRET_ACCESS_KEY: ${LAKE_S3_SECRET_KEY:?set LAKE_S3_SECRET_KEY}
     volumes:
       - ./scripts/lake_skeleton_verify.py:/work/verify.py:ro
+      - ./scripts/lake_skeleton_fixtures.py:/work/fixtures.py:ro
     networks:
       - lake
 

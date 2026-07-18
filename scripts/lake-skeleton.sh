@@ -3,6 +3,7 @@
 # Drive the phase-0 lake skeleton (DATA_LAKE_DESIGN.md §11.1).
 #
 #   lake-skeleton.sh up        bring the stack up and bootstrap bucket + key
+#   lake-skeleton.sh seed      generate the obviously-synthetic fixture set
 #   lake-skeleton.sh verify    run the acceptance checks (bucket + catalog)
 #   lake-skeleton.sh status    show containers, published ports, and disk use
 #   lake-skeleton.sh down      stop the stack, keep the scratch data
@@ -131,6 +132,11 @@ case "${1:-}" in
     bootstrap_garage
     wait_healthy garage
     echo "lake skeleton up — bucket '$BUCKET' on $ROOT (credentials in $ENV_FILE)"
+    echo "next: 'lake-skeleton.sh seed' to generate fixtures, then 'verify'"
+    ;;
+
+  seed)
+    compose --profile client run --rm duckdb /work/fixtures.py
     ;;
 
   verify)

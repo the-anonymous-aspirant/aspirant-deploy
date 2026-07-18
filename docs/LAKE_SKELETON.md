@@ -107,6 +107,60 @@ authenticates holds only fixtures.
 
 ---
 
+## The fixture set
+
+`scripts/lake-skeleton.sh seed` regenerates everything in one command. It is
+idempotent — blobs are content-addressed so they land at the same key every
+time, and the tables are replaced rather than appended to.
+
+Layout follows §2's medallion mapping rather than approximating it: **binary
+blobs live once in bronze**, content-addressed at
+`bronze/blobs/sha256/ab/cd/<hash>`, and only their *derived artifacts* appear in
+silver. A PDF is not copied three times to "promote" it.
+
+**Bronze** — 8 content-addressed blobs: 2 PDFs, 2 images plus their 2
+thumbnails, 1 WAV, 1 JSON message export. They are real files, not stand-ins:
+the PNGs decode, the PDFs open to a page of visible text. Both are synthesized
+in pure Python (`zlib` + `struct` for PNG, hand-written object syntax for PDF)
+so the client image needs no image-processing stack for three fixture pictures.
+
+**Silver** — `asset_inventory` (one row per blob: hash, key, source path, mime,
+size, kind, **sensitivity**, ingest date, run id), `extracted_text`,
+`image_metadata` (dimensions, camera, thumbnail ref), `audio_transcripts`,
+`messages` (unified across telegram/sms/email per §2, with an attachment blob
+ref), `finance_transactions` (a typed table export standing in for a Postgres
+source), and `ingest_runs` (the connector ledger §8.6's page reads).
+
+**Gold** — `gold_finance_monthly`, `gold_timeline`, `gold_source_freshness`
+(green/amber/red, which is what the Overview page renders).
+
+§2 is explicit that `sensitivity=high` is **a column, not a folder convention**,
+so the one high-sensitivity fixture (a synthetic medical note) sits at the same
+path layout as everything else and differs only in that column. That is
+deliberately the harder case for the explorer to get right.
+
+### How "obviously fake" is enforced
+
+Not by discipline — by a check that fails closed. `verify` walks every VARCHAR
+column of every fixture table and asserts each distinct value is self-labelling:
+it carries `SYNTHETIC`, `FAKE-`, or the impossible year `2999`, or it is a
+structural value (a hash, an object key, or a known enum like `image/png`).
+Anything else is reported as a leak and fails the run.
+
+This matters more than it looks. The guardrail's real failure mode is not
+someone loading a real medical PDF on day one — it is realism creeping in one
+column at a time until a screenshot becomes ambiguous. A check that fails on
+unrecognised prose catches that; a code review of the fixture file does not.
+
+`verify` also asserts that every blob's bytes actually hash to its own key. A
+blob whose content does not match its content address would make provenance
+(§8.5) a lie, and the check is cheap.
+
+Running `verify` on an **unseeded** stack skips the coverage block rather than
+failing it — the teardown drill exercises exactly that state.
+
+---
+
 ## Finding: DuckLake inlines small writes into the catalog by default
 
 Discovered while building this stack, and it matters well beyond it.
