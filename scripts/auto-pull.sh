@@ -17,6 +17,17 @@ set -euo pipefail
 # Outputs:
 #   /var/log/aspirant-auto-pull/decisions.jsonl   one JSON line per (service, run, decision)
 #   /var/lib/aspirant-auto-pull/known-bad.txt     list of image SHAs we will not re-deploy
+#
+# Gates (checked once per run, before any pull or recreate):
+#   1. Maintenance pause — if .maintenance-pause exists in this checkout, the
+#      run is a logged no-op. Lets an operator freeze deploys mid-cutover
+#      without editing the crontab. Exits 0: a sanctioned freeze is not a fault.
+#   2. Checkout provenance — this script drives `docker compose` against the
+#      docker-compose.yml in THIS checkout, so a checkout parked on a feature
+#      branch would recreate production services from the wrong compose file.
+#      Refuses to act unless HEAD is `main` tracking `origin/main`. Exits 1.
+#   Neither gate inspects the working tree for uncommitted or untracked files;
+#   the cell carries stray .bak files and they are not a provenance signal.
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 COMPOSE_DIR="$(pwd)"
@@ -29,6 +40,13 @@ KNOWN_BAD_FILE="${STATE_DIR}/known-bad.txt"
 IMAGE_PREFIX="${ASPIRANT_AUTO_PULL_IMAGE_PREFIX:-ghcr.io/the-anonymous-aspirant/aspirant-}"
 HEALTH_WAIT_SECONDS="${ASPIRANT_AUTO_PULL_HEALTH_WAIT:-30}"
 
+# Maintenance-pause marker. Same filename and same presence-is-the-signal
+# contract as the system_3 side (shared/paths.py::MAINTENANCE_MARKER_NAME), but
+# resolved against THIS checkout: the two hosts share no filesystem, so one
+# marker per box is the most a file-based contract can offer. Contents are
+# advisory only — never read, so an unreadable marker cannot crash the cron.
+MAINTENANCE_MARKER="${ASPIRANT_MAINTENANCE_MARKER:-${COMPOSE_DIR}/.maintenance-pause}"
+
 DRY_RUN=0
 TARGET_SERVICE=""
 
@@ -38,7 +56,7 @@ while [[ $# -gt 0 ]]; do
     --service)       TARGET_SERVICE="$2"; shift 2 ;;
     --once)          shift ;;
     -h|--help)
-      sed -n '3,18p' "$0"
+      sed -n '4,30p' "$0"
       exit 0
       ;;
     *) echo "Unknown flag: $1" >&2; exit 2 ;;
@@ -63,6 +81,33 @@ log_decision() {
   local svc="$1" action="$2" from="$3" to="$4" reason="$5"
   printf '{"ts":"%s","service":"%s","action":"%s","from_sha":"%s","to_sha":"%s","reason":"%s"}\n' \
     "$(iso_now)" "$svc" "$action" "$from" "$to" "$reason" >> "$DECISIONS_LOG"
+}
+
+# maintenance_paused MARKER_PATH -> true when a freeze window is open.
+# Presence alone is the signal; the file is deliberately never read.
+maintenance_paused() {
+  [[ -e "$1" ]]
+}
+
+# checkout_provenance DIR -> echoes "ok", or a reason token naming the drift.
+# Guards the compose file this script deploys from, so anything that leaves us
+# unable to *prove* the checkout is release-tracking counts as drift — an
+# absent git binary and a detached HEAD are both refusals, not pass-throughs.
+checkout_provenance() {
+  local dir="$1" branch upstream
+  branch="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  if [[ -z "$branch" ]]; then
+    echo "not_a_git_checkout"; return
+  fi
+  if [[ "$branch" != "main" ]]; then
+    # Detached HEAD reports the literal string "HEAD" and lands here too.
+    echo "branch_not_main:${branch}"; return
+  fi
+  upstream="$(git -C "$dir" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
+  if [[ "$upstream" != "origin/main" ]]; then
+    echo "upstream_not_origin_main:${upstream:-none}"; return
+  fi
+  echo "ok"
 }
 
 is_known_bad() {
@@ -176,6 +221,24 @@ deploy_service() {
 # running the main loop.
 if [[ "${ASPIRANT_AUTO_PULL_LIB:-0}" -eq 1 ]]; then
   return 0
+fi
+
+# Gate 1 — maintenance freeze. A sanctioned no-op, so exit 0.
+if maintenance_paused "$MAINTENANCE_MARKER"; then
+  printf '[%s] auto-pull: PAUSED — maintenance marker present at %s. No image will be pulled and no service recreated this tick. Remove the marker to resume.\n' \
+    "$(iso_now)" "$MAINTENANCE_MARKER" >&2
+  log_decision "-" "paused_maintenance" "" "" "maintenance_marker_present"
+  exit 0
+fi
+
+# Gate 2 — compose-file provenance. A refusal, so exit non-zero: a run that
+# declined to do its job must not report success to whatever reads the code.
+PROVENANCE="$(checkout_provenance "$COMPOSE_DIR")"
+if [[ "$PROVENANCE" != "ok" ]]; then
+  printf '[%s] auto-pull: REFUSING TO DEPLOY — the deploy checkout at %s is not on main tracking origin/main (%s). Recreating services now would deploy them from an unreviewed docker-compose.yml. No image pulled, no service touched. Fix with:\n  git -C %s checkout main && git -C %s branch --set-upstream-to=origin/main main\n' \
+    "$(iso_now)" "$COMPOSE_DIR" "$PROVENANCE" "$COMPOSE_DIR" "$COMPOSE_DIR" >&2
+  log_decision "-" "refused_checkout_drift" "" "" "$PROVENANCE"
+  exit 1
 fi
 
 # Main loop.

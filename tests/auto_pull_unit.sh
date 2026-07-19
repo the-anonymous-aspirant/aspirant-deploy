@@ -99,6 +99,87 @@ for field in '"service":"server"' '"action":"deploy"' '"from_sha":"sha256:old"' 
   fi
 done
 
+# --- maintenance_paused ------------------------------------------------------
+
+MARKER="$TMPDIR_TEST/.maintenance-pause"
+
+if maintenance_paused "$MARKER"; then
+  FAIL=$((FAIL + 1)); printf "  FAIL  maintenance_paused true with no marker present\n"
+else
+  PASS=$((PASS + 1)); printf "  PASS  maintenance_paused false when marker absent\n"
+fi
+
+touch "$MARKER"
+if maintenance_paused "$MARKER"; then
+  PASS=$((PASS + 1)); printf "  PASS  maintenance_paused true when marker present\n"
+else
+  FAIL=$((FAIL + 1)); printf "  FAIL  maintenance_paused missed an existing marker\n"
+fi
+
+# An empty marker still pauses — presence is the signal, contents are advisory.
+: > "$MARKER"
+if maintenance_paused "$MARKER"; then
+  PASS=$((PASS + 1)); printf "  PASS  maintenance_paused true for an empty marker\n"
+else
+  FAIL=$((FAIL + 1)); printf "  FAIL  maintenance_paused required marker contents\n"
+fi
+rm -f "$MARKER"
+
+# --- checkout_provenance -----------------------------------------------------
+
+# A non-repo directory cannot prove its compose file's provenance.
+NOT_A_REPO="$TMPDIR_TEST/not-a-repo"
+mkdir -p "$NOT_A_REPO"
+got="$(checkout_provenance "$NOT_A_REPO")"
+assert_eq "not_a_git_checkout" "$got" "checkout_provenance refuses a non-git directory"
+
+# Build a local "origin" and a clone of it so upstream tracking is real.
+ORIGIN_REPO="$TMPDIR_TEST/origin.git"
+git init -q --bare --initial-branch=main "$ORIGIN_REPO"
+
+SEED="$TMPDIR_TEST/seed"
+git init -q --initial-branch=main "$SEED"
+git -C "$SEED" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "seed"
+git -C "$SEED" remote add origin "$ORIGIN_REPO"
+git -C "$SEED" push -q origin main
+
+CLONE="$TMPDIR_TEST/clone"
+git clone -q "$ORIGIN_REPO" "$CLONE"
+
+got="$(checkout_provenance "$CLONE")"
+assert_eq "ok" "$got" "checkout_provenance passes on main tracking origin/main"
+
+# Untracked and modified files must NOT read as drift — the cell carries stray
+# .bak files, and sweeping them into the gate would wedge every deploy.
+touch "$CLONE/docker-compose.yml.bak-20260710-044340"
+echo "dirty" > "$CLONE/tracked-change.txt"
+git -C "$CLONE" add tracked-change.txt
+got="$(checkout_provenance "$CLONE")"
+assert_eq "ok" "$got" "checkout_provenance ignores untracked and staged working-tree files"
+
+# On a feature branch → drift, naming the branch.
+git -C "$CLONE" checkout -q -b feature/wip
+got="$(checkout_provenance "$CLONE")"
+assert_eq "branch_not_main:feature/wip" "$got" "checkout_provenance refuses a feature branch"
+
+# Detached HEAD → drift (rev-parse --abbrev-ref reports the literal "HEAD").
+git -C "$CLONE" checkout -q --detach
+got="$(checkout_provenance "$CLONE")"
+assert_eq "branch_not_main:HEAD" "$got" "checkout_provenance refuses a detached HEAD"
+
+# On main, but tracking nothing → drift.
+git -C "$CLONE" checkout -q main
+git -C "$CLONE" branch --unset-upstream
+got="$(checkout_provenance "$CLONE")"
+assert_eq "upstream_not_origin_main:none" "$got" "checkout_provenance refuses main with no upstream"
+
+# On main, but tracking the wrong remote branch → drift.
+git -C "$CLONE" push -q origin main:release
+git -C "$CLONE" fetch -q origin
+git -C "$CLONE" branch --set-upstream-to=origin/release main >/dev/null 2>&1
+got="$(checkout_provenance "$CLONE")"
+assert_eq "upstream_not_origin_main:origin/release" "$got" "checkout_provenance refuses main tracking a non-origin/main upstream"
+
 echo
 echo "Passed: $PASS  Failed: $FAIL"
 [[ "$FAIL" -eq 0 ]]
