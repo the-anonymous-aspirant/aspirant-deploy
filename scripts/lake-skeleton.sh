@@ -22,6 +22,23 @@ ROOT="${LAKE_SKELETON_ROOT:-/scratch/lake-skeleton}"
 PROJECT="aspirant-lake-skeleton"
 BUCKET="${LAKE_S3_BUCKET:-lake-skeleton-bronze}"
 KEY_NAME="lake-skeleton-rw"
+
+# The explorer's read-only credentials (#2409-D4, system_3 #2542).
+#
+# These exist because the mediated lake bridge is only bounded if the
+# CREDENTIALS are bounded. The operator authorised a mediated *read* path; a
+# read-write key would make it a mediated read-write path with nothing marking
+# the difference.
+#
+# They are issued HERE, by the bootstrap, and not by hand. Both credentials
+# previously existed only as manual artifacts on one host: correct on that
+# machine, absent from the repo, and silently gone after the destroy-and-
+# recreate that LAKE_SKELETON.md makes an acceptance criterion. A bound that
+# does not survive a rebuild is not a bound, and one that lives in a single
+# host's memory cannot be reviewed.
+RO_KEY_NAME="lake-skeleton-explorer-ro"
+CATALOG_RO_ROLE="explorer_ro"
+
 ENV_FILE="$ROOT/lake-skeleton.env"
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -43,6 +60,28 @@ compose() {
 
 garage_cli() {
   docker exec -e GARAGE_CONFIG_FILE=/etc/garage/garage.toml lake-skeleton-garage /garage "$@"
+}
+
+catalog_psql() {
+  docker exec -i lake-skeleton-catalog \
+    psql -v ON_ERROR_STOP=1 -U ducklake -d lake_catalog_skeleton "$@"
+}
+
+# Upsert a key into $ENV_FILE.
+#
+# NOT a bare `sed -i "s|^KEY=.*|KEY=$v|"`. That is what the file used before,
+# and it silently does nothing when the key is absent — which is exactly the
+# case for every env file created before this change, since seed_config only
+# writes the template when the file does not already exist. The result would be
+# a bootstrap that reports success while leaving the explorer with no
+# credentials, on precisely the hosts that already exist.
+env_set() {
+  local key="$1" value="$2"
+  if grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
+    sed -i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
+  else
+    printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
+  fi
 }
 
 seed_config() {
@@ -76,9 +115,14 @@ EOF
 LAKE_SKELETON_ROOT=$ROOT
 LAKE_S3_BUCKET=$BUCKET
 LAKE_CATALOG_PASSWORD=$(openssl rand -hex 24)
-# Filled in by 'up' once Garage issues the key.
+# Filled in by 'up' once Garage issues the keys.
 LAKE_S3_ACCESS_KEY=pending
 LAKE_S3_SECRET_KEY=pending
+# The explorer's read-only pair — read by docker-compose.yml's explorer-api.
+EXPLORER_S3_ACCESS_KEY=pending
+EXPLORER_S3_SECRET_KEY=pending
+LAKE_CATALOG_RO_PASSWORD=pending
+LAKE_CATALOG_RO_DSN=pending
 EOF
     chmod 600 "$ENV_FILE"
   fi
@@ -114,12 +158,80 @@ bootstrap_garage() {
     garage_cli bucket allow --read --write "$BUCKET" --key "$KEY_NAME" >/dev/null
   fi
 
-  local key_id secret
+  # The explorer's key: --read, and deliberately no --write.
+  #
+  # Re-granted on every run even when the key already exists. Creation and
+  # permission are separate operations in Garage, so a key that exists proves
+  # nothing about what it is allowed to do — and `--read` is idempotent, so
+  # asserting it costs nothing and closes the window where a key was created
+  # here and widened elsewhere.
+  if ! garage_cli key info "$RO_KEY_NAME" >/dev/null 2>&1; then
+    garage_cli key create "$RO_KEY_NAME" >/dev/null
+  fi
+  garage_cli bucket allow --read "$BUCKET" --key "$RO_KEY_NAME" >/dev/null
+  garage_cli bucket deny --write "$BUCKET" --key "$RO_KEY_NAME" >/dev/null 2>&1 || true
+
+  local key_id secret ro_key_id ro_secret
   key_id="$(garage_cli key info "$KEY_NAME" --show-secret | awk '/Key ID:/ {print $3}')"
   secret="$(garage_cli key info "$KEY_NAME" --show-secret | awk '/Secret key:/ {print $3}')"
-  sed -i "s|^LAKE_S3_ACCESS_KEY=.*|LAKE_S3_ACCESS_KEY=$key_id|" "$ENV_FILE"
-  sed -i "s|^LAKE_S3_SECRET_KEY=.*|LAKE_S3_SECRET_KEY=$secret|" "$ENV_FILE"
+  env_set LAKE_S3_ACCESS_KEY "$key_id"
+  env_set LAKE_S3_SECRET_KEY "$secret"
+
+  ro_key_id="$(garage_cli key info "$RO_KEY_NAME" --show-secret | awk '/Key ID:/ {print $3}')"
+  ro_secret="$(garage_cli key info "$RO_KEY_NAME" --show-secret | awk '/Secret key:/ {print $3}')"
+  # Written under the names the main compose file reads for explorer-api, so
+  # the service is bound to THIS key rather than to whatever the environment
+  # happened to hold. That binding is the second half of the guarantee: issuing
+  # a read-only key changes nothing if the consumer is handed a different one.
+  env_set EXPLORER_S3_ACCESS_KEY "$ro_key_id"
+  env_set EXPLORER_S3_SECRET_KEY "$ro_secret"
 }
+
+# SELECT-only catalog role, for the same reason and with the same history: it
+# existed on one host and in no script.
+bootstrap_catalog_role() {
+  local pw
+  pw="$(grep '^LAKE_CATALOG_RO_PASSWORD=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)"
+  if [ -z "$pw" ] || [ "$pw" = "pending" ]; then
+    pw="$(openssl rand -hex 24)"
+    env_set LAKE_CATALOG_RO_PASSWORD "$pw"
+  fi
+
+  # Idempotent by construction: CREATE ROLE fails if it exists, so the DO block
+  # branches, and the GRANTs are re-asserted every run for the same reason the
+  # Garage --read is.
+  catalog_psql <<SQL >/dev/null
+DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$CATALOG_RO_ROLE') THEN
+    CREATE ROLE $CATALOG_RO_ROLE LOGIN;
+  END IF;
+END
+\$\$;
+ALTER ROLE $CATALOG_RO_ROLE WITH PASSWORD '$pw';
+REVOKE ALL ON SCHEMA public FROM $CATALOG_RO_ROLE;
+GRANT CONNECT ON DATABASE lake_catalog_skeleton TO $CATALOG_RO_ROLE;
+GRANT USAGE ON SCHEMA public TO $CATALOG_RO_ROLE;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO $CATALOG_RO_ROLE;
+-- Tables created later by the DuckLake catalog must inherit SELECT, or the
+-- role is read-only today and blind tomorrow.
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO $CATALOG_RO_ROLE;
+SQL
+
+  env_set LAKE_CATALOG_RO_DSN \
+    "postgresql://$CATALOG_RO_ROLE:$pw@lake-skeleton-catalog:5432/lake_catalog_skeleton"
+}
+
+# The write-denial proof lives in lake_skeleton_verify.py, not here.
+#
+# It belongs with the other acceptance checks because that is what it is: the
+# claim "the explorer holds a read-only key" is exactly as strong as the
+# attempt to write with it. Putting it there also keeps it on the stack's own
+# client image — an earlier draft of this ran `amazon/aws-cli` via `docker run`,
+# which adds a ~400MB pull to the bootstrap of a deliberately disposable
+# skeleton, over a link the standing constraints call slow and lossy.
+#
+# Run it with: scripts/lake-skeleton.sh verify
 
 case "${1:-}" in
   up)
@@ -131,7 +243,10 @@ case "${1:-}" in
     sleep 5
     bootstrap_garage
     wait_healthy garage
+    bootstrap_catalog_role
     echo "lake skeleton up — bucket '$BUCKET' on $ROOT (credentials in $ENV_FILE)"
+    echo "explorer read-only credentials issued: '$RO_KEY_NAME' + catalog role '$CATALOG_RO_ROLE'"
+    echo "their read-only-ness is PROVEN by 'verify', not asserted here — run it next"
     echo "next: 'lake-skeleton.sh seed' to generate fixtures, then 'verify'"
     ;;
 

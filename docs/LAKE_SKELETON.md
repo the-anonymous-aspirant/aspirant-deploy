@@ -86,7 +86,33 @@ scripts/lake-skeleton.sh destroy  # stop and delete every byte it owns
 when absent, assigns a Garage cluster layout only when the node has no role yet,
 and creates the bucket and access key only when they do not already exist.
 
-Credentials (Garage access key, catalog password) are generated at `up` and
+### The explorer's read-only credentials
+
+`up` issues **two** Garage keys and two catalog identities, not one:
+
+| identity | grant | used by |
+|---|---|---|
+| `lake-skeleton-rw` | `RW` on the bronze bucket | fixtures, verify, the skeleton itself |
+| `lake-skeleton-explorer-ro` | `R` only | `explorer-api` (the mediated bridge, #2409-D2) |
+| `ducklake` | catalog owner | the skeleton |
+| `explorer_ro` | `SELECT` only | `explorer-api` |
+
+The read-only pair is what makes the lake bridge a mediated **read** path rather
+than a mediated read-write one. That distinction is the basis on which the
+bridge was authorised, so it is issued here rather than by hand.
+
+It is issued here for a specific reason: both credentials once existed only as
+manual artifacts on a single host. `destroy` and `up` is an acceptance
+criterion of this skeleton — rebuilding is how its correctness is shown — so a
+bound that lives in one machine's memory disappears on exactly the operation
+this document tells you to perform, and nothing would have reported it.
+
+`verify` proves the bound rather than restating it: it attempts a `PUT` with the
+read-only key and a `CREATE TABLE` with the read-only role, and **fails if
+either succeeds**. It also checks each can still read, because a credential that
+can do nothing is a broken explorer wearing the costume of a working guardrail.
+
+Credentials (Garage access keys, catalog passwords) are generated at `up` and
 written to `/scratch/lake-skeleton/lake-skeleton.env`, mode 600. They live on
 the scratch path with everything else, so `destroy` takes them too — a fresh
 `up` mints new ones. Nothing here is a secret worth keeping; the stack it

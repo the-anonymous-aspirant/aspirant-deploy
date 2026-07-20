@@ -263,6 +263,99 @@ else:
     ).fetchone()[0]
     check("Fixture dates are all in 2999", dates == 0, f"{dates} row(s) outside 2999")
 
+# --- 4. the explorer's credentials are read-only, PROVEN by being denied -----
+#
+# The lake bridge (#2409-D2) is bounded only if the credentials are bounded.
+# Every other statement of that guarantee is a claim: the acceptance criterion
+# says "read-only key", the compose comment says it, and the explorer's own
+# source asserts it. None of those attempt a write.
+#
+# This does. A denied write is evidence; an assertion is not. It matters
+# specifically because both read-only credentials began life as HAND-MADE
+# artifacts on one host — correct there, absent from this repo, and silently
+# gone after the destroy-and-recreate that LAKE_SKELETON.md makes an acceptance
+# criterion. The failure mode is not a wrong key handed over; it is the right
+# key that no rebuild reproduces.
+EXPLORER_KEY = os.environ.get("EXPLORER_S3_ACCESS_KEY", "")
+EXPLORER_SECRET = os.environ.get("EXPLORER_S3_SECRET_KEY", "")
+
+if not EXPLORER_KEY or not EXPLORER_SECRET:
+    # Reported, not silently skipped. A quiet pass here would read as "the
+    # bound holds" on exactly the hosts where it has not been established.
+    check(
+        "Explorer read-only S3 key is provisioned",
+        False,
+        "EXPLORER_S3_ACCESS_KEY/SECRET absent — run 'lake-skeleton.sh up' to issue them",
+    )
+else:
+    ro = boto3.client(
+        "s3",
+        endpoint_url=f"http://{ENDPOINT}",
+        aws_access_key_id=EXPLORER_KEY,
+        aws_secret_access_key=EXPLORER_SECRET,
+        region_name=REGION,
+    )
+
+    # It must still be able to READ, or "read-only" has become "no access" and
+    # the explorer is broken in a way that looks like security working.
+    try:
+        ro.list_objects_v2(Bucket=BUCKET, MaxKeys=1)
+        can_read = True
+        read_detail = "list_objects_v2 succeeded"
+    except Exception as exc:  # noqa: BLE001 — any failure is a failure to read
+        can_read = False
+        read_detail = f"{type(exc).__name__}: {exc}"
+    check("Explorer key can READ the bronze bucket", can_read, read_detail)
+
+    try:
+        ro.put_object(Bucket=BUCKET, Key=".readonly-probe", Body=b"probe")
+        denied = False
+        write_detail = "PUT SUCCEEDED — the key is read-write, the bridge is not bounded"
+        try:
+            ro.delete_object(Bucket=BUCKET, Key=".readonly-probe")
+        except Exception:  # noqa: BLE001 — cleanup is best-effort
+            pass
+    except Exception as exc:  # noqa: BLE001
+        code = getattr(exc, "response", {}).get("Error", {}).get("Code", type(exc).__name__)
+        denied = True
+        write_detail = f"PUT denied ({code})"
+    check("Explorer key CANNOT write to the bronze bucket", denied, write_detail)
+
+# The catalog role gets the same treatment: SELECT must work, write must not.
+RO_DSN = os.environ.get("LAKE_CATALOG_RO_DSN", "")
+if not RO_DSN:
+    check(
+        "Explorer read-only catalog role is provisioned",
+        False,
+        "LAKE_CATALOG_RO_DSN absent — run 'lake-skeleton.sh up' to issue it",
+    )
+else:
+    roc = duckdb.connect()
+    roc.execute("LOAD postgres")
+    try:
+        roc.execute(f"ATTACH '{RO_DSN}' AS ro_cat (TYPE postgres)")
+        roc.execute("SELECT 1 FROM ro_cat.information_schema.tables LIMIT 1").fetchone()
+        cat_read = True
+        cat_read_detail = "SELECT through the read-only role succeeded"
+    except Exception as exc:  # noqa: BLE001
+        cat_read = False
+        cat_read_detail = f"{type(exc).__name__}: {exc}"
+    check("Explorer catalog role can SELECT", cat_read, cat_read_detail)
+
+    if cat_read:
+        try:
+            roc.execute("CREATE TABLE ro_cat.public.readonly_probe (x INTEGER)")
+            cat_denied = False
+            cat_detail = "CREATE TABLE SUCCEEDED — the role is not SELECT-only"
+            try:
+                roc.execute("DROP TABLE ro_cat.public.readonly_probe")
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception as exc:  # noqa: BLE001
+            cat_denied = True
+            cat_detail = f"CREATE TABLE denied ({type(exc).__name__})"
+        check("Explorer catalog role CANNOT write", cat_denied, cat_detail)
+
 print()
 if failures:
     print(f"FAILED: {len(failures)} check(s) — {', '.join(failures)}")
