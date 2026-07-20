@@ -233,6 +233,13 @@ SQL
 #
 # Run it with: scripts/lake-skeleton.sh verify
 
+# Test-mode escape hatch: source this file with ASPIRANT_LAKE_SKELETON_LIB=1 to
+# get the pure helpers without dispatching a verb. Mirrors the same hatch in
+# auto-pull.sh so the two test suites read alike.
+if [ "${ASPIRANT_LAKE_SKELETON_LIB:-0}" = "1" ]; then
+  return 0 2>/dev/null || true
+fi
+
 case "${1:-}" in
   up)
     seed_config
