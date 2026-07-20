@@ -96,4 +96,25 @@ networks:
     # Project-local bridge. Not attached to aspirant-online_default: the
     # skeleton must not be reachable from the internet-exposed services (§9
     # threat model), and nothing in production has any business reading it.
+    #
+    # ONE MEDIATED EXCEPTION, since 2026-07-20 (system_3 #2409). The isolation
+    # above still holds for every lake service -- garage and catalog remain
+    # unreachable from the public ingress by any route. What changed is that
+    # `explorer-api` in docker-compose.yml joins THIS bridge as an external
+    # network while also sitting on `default`, so an authenticated user can be
+    # shown the lake's contents without the lake itself being exposed.
+    #
+    # Operator ruling, verbatim: "The lake itself should not be visible to the
+    # public api. However, the explorer should, for a user that has logged in,
+    # be able to reveal a google-drive-like interaction and view of the data in
+    # the data lake." The rule is about REACHABILITY, not network membership:
+    # the public reaches the explorer, the explorer reaches the lake, and those
+    # are different facts. A proxy pass-through to a lake port would violate it
+    # even though it changes no network list.
+    #
+    # THE PERMISSION EXPIRES. It is scoped to the window in which this skeleton
+    # holds only synthetic fixtures on a scratch volume, and must be re-derived
+    # before real data lands -- the same trigger DATA_LAKE_DESIGN.md §11.0
+    # rev 3b defines for encryption. Recorded here rather than in a task thread
+    # because a permission whose expiry nobody wrote down is a permanent one.
     driver: bridge
