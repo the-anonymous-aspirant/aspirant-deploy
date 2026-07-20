@@ -110,6 +110,41 @@ checkout_provenance() {
   echo "ok"
 }
 
+# checkout_freshness DIR -> echoes "current", "behind:N", or "unknown:<reason>".
+#
+# The provenance gate above proves the checkout is on main tracking origin/main.
+# It does NOT prove the checkout is CURRENT, and OPERATIONS.md §Deploy gates
+# states that gate's own intent as "the gate needs to prove provenance, not
+# merely fail to disprove it". A checkout six PRs behind on main is unproven
+# fresh and passes it cleanly.
+#
+# That is not hypothetical: on 2026-07-20 the cell was found at PR #50 while
+# origin/main was at #56 (system_3 #2520). Nothing on the cell has ever pulled
+# this checkout — auto-pull.sh polls IMAGES and contains no git operation, and
+# no other cron does either — so every pull has been a hand action at multi-day
+# intervals. Meanwhile this script drives `docker compose` against the compose
+# file in THIS checkout, so image updates were still being applied every five
+# minutes from six-PR-old config, silently. Stale docs were never the risk.
+#
+# Read-only and best-effort. The fetch touches the network, so a failure here
+# (offline cell, dead uplink — both routine on this host) reports `unknown` and
+# never blocks: a detector that turns a flaky uplink into a deploy outage would
+# be a worse defect than the one it reports.
+checkout_freshness() {
+  local dir="$1" behind
+  if [[ "${ASPIRANT_AUTO_PULL_SKIP_FETCH:-0}" -ne 1 ]]; then
+    git -C "$dir" fetch origin --quiet 2>/dev/null || { echo "unknown:fetch_failed"; return; }
+  fi
+  behind="$(git -C "$dir" rev-list --count HEAD..origin/main 2>/dev/null || true)"
+  if [[ -z "$behind" ]]; then
+    echo "unknown:no_rev_list"; return
+  fi
+  if [[ "$behind" -eq 0 ]]; then
+    echo "current"; return
+  fi
+  echo "behind:${behind}"
+}
+
 is_known_bad() {
   local sha="$1"
   [[ -n "$sha" ]] && grep -Fxq "$sha" "$KNOWN_BAD_FILE"
@@ -240,6 +275,27 @@ if [[ "$PROVENANCE" != "ok" ]]; then
   log_decision "-" "refused_checkout_drift" "" "" "$PROVENANCE"
   exit 1
 fi
+
+# Gate 3 — checkout freshness. REPORTS, does not refuse. The deploy continues,
+# because turning a stale checkout into a hard stop on the image path has its
+# own blast radius and that escalation is an open operator decision (#2534).
+# What this closes is the silence: before this, a merge to aspirant-deploy that
+# never reached the cell produced no signal anywhere, so "shipped" meant
+# nothing and no one could tell. One decision line per tick is enough to make
+# the drift visible to anyone reading the ledger.
+FRESHNESS="$(checkout_freshness "$COMPOSE_DIR")"
+case "$FRESHNESS" in
+  current) ;;
+  behind:*)
+    printf '[%s] auto-pull: CHECKOUT STALE — %s is %s commit(s) behind origin/main. Services will still be recreated, but from THIS checkout'"'"'s docker-compose.yml, which is not the released one. Bring it current with:\n  git -C %s pull --ff-only\n' \
+      "$(iso_now)" "$COMPOSE_DIR" "${FRESHNESS#behind:}" "$COMPOSE_DIR" >&2
+    log_decision "-" "checkout_stale" "" "" "$FRESHNESS"
+    ;;
+  *)
+    # Could not determine freshness. Reported, never fatal — see checkout_freshness.
+    log_decision "-" "checkout_freshness_unknown" "" "" "$FRESHNESS"
+    ;;
+esac
 
 # Main loop.
 SEEN_CLIENT=0

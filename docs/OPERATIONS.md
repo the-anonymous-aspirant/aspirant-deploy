@@ -76,7 +76,17 @@ The filename and contract match the system_3 side (`shared/paths.py::MAINTENANCE
 
 **2. Checkout provenance.** `auto-pull.sh` drives `docker compose` against the `docker-compose.yml` *in this checkout*, so a checkout parked on a feature branch would recreate production services from an unreviewed compose file. The run refuses unless `HEAD` is `main` tracking `origin/main`, exiting 1 with the drift reason and the fix command. A detached HEAD, a missing upstream, and a directory that is not a git checkout at all are all refusals — the gate needs to *prove* provenance, not merely fail to disprove it.
 
-Neither gate inspects the working tree for uncommitted or untracked files. The cell carries stray `.env.bak-*` and `docker-compose.yml.bak-*` files; sweeping those into a cleanliness check would wedge every deploy for a reason that has nothing to do with which compose file is being deployed.
+**3. Checkout freshness.** Gate 2 proves the checkout is release-*tracking*; it does not prove it is release-*current*. A checkout six PRs behind on `main` satisfies it cleanly, which is exactly how the cell sat at PR #50 while `origin/main` was at #56 (system_3 #2520) — nothing on this host has ever pulled the checkout, since `auto-pull.sh` polls images and contains no git operation, and no other cron does either. Because the compose file being deployed comes from this checkout, image updates were still being recreated every five minutes from six-PR-old config, silently. Stale documentation was never the risk.
+
+This gate **reports and continues**; it does not refuse. On drift it warns on stderr and appends one `checkout_stale` decision with the behind-count:
+
+```json
+{"ts":"...","service":"-","action":"checkout_stale","from_sha":"","to_sha":"","reason":"behind:3"}
+```
+
+It is silent when the checkout is current, so the ledger does not fill with a line per tick. The fetch is read-only and best-effort: an unreachable origin logs `checkout_freshness_unknown` rather than blocking, because a detector that turns this host's flaky uplink into a deploy outage would be a worse defect than the one it reports. Whether staleness should *escalate* to a refusal, as gate 2 does, is an open operator decision (system_3 #2534).
+
+Neither of the first two gates inspects the working tree for uncommitted or untracked files. The cell carries stray `.env.bak-*` and `docker-compose.yml.bak-*` files; sweeping those into a cleanliness check would wedge every deploy for a reason that has nothing to do with which compose file is being deployed.
 
 Dry-run from the deploy directory to see what *would* happen without pulling or recreating:
 

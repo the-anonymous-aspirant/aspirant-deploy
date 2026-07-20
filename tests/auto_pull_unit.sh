@@ -180,6 +180,49 @@ git -C "$CLONE" branch --set-upstream-to=origin/release main >/dev/null 2>&1
 got="$(checkout_provenance "$CLONE")"
 assert_eq "upstream_not_origin_main:origin/release" "$got" "checkout_provenance refuses main tracking a non-origin/main upstream"
 
+# --- checkout_freshness (#2534) ---------------------------------------------
+#
+# The provenance gate proves the checkout is on main tracking origin/main. It
+# does NOT prove the checkout is current, which is how the cell sat six PRs
+# behind while passing every gate (#2520). These assert the freshness detector
+# separately, because a checkout can be perfectly provenanced and badly stale.
+
+# A fresh clone is current.
+FRESH="$TMPDIR_TEST/fresh"
+git clone -q "$ORIGIN_REPO" "$FRESH"
+got="$(checkout_freshness "$FRESH")"
+assert_eq "current" "$got" "checkout_freshness reports current on an up-to-date clone"
+
+# Advance origin by two commits without pulling the clone -> behind:2.
+git -C "$SEED" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "one"
+git -C "$SEED" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "two"
+git -C "$SEED" push -q origin main
+got="$(checkout_freshness "$FRESH")"
+assert_eq "behind:2" "$got" "checkout_freshness counts commits behind origin/main"
+
+# The provenance gate still passes on that same stale checkout -- which is the
+# whole point of adding a second gate rather than extending the first.
+got="$(checkout_provenance "$FRESH")"
+assert_eq "ok" "$got" "a STALE checkout still passes the provenance gate"
+
+# Pulling clears it.
+git -C "$FRESH" pull -q --ff-only
+got="$(checkout_freshness "$FRESH")"
+assert_eq "current" "$got" "checkout_freshness clears after a pull"
+
+# A non-git directory cannot be measured, and reports unknown rather than
+# failing: the detector must never turn an unmeasurable state into an outage.
+got="$(ASPIRANT_AUTO_PULL_SKIP_FETCH=1 checkout_freshness "$NOT_A_REPO")"
+assert_eq "unknown:no_rev_list" "$got" "checkout_freshness reports unknown on a non-git directory"
+
+# An unreachable origin reports unknown, not stale. A dead uplink is routine on
+# the cell, and a detector that read it as drift would cry wolf every tick.
+UNREACHABLE="$TMPDIR_TEST/unreachable"
+git clone -q "$ORIGIN_REPO" "$UNREACHABLE"
+git -C "$UNREACHABLE" remote set-url origin "$TMPDIR_TEST/does-not-exist.git"
+got="$(checkout_freshness "$UNREACHABLE")"
+assert_eq "unknown:fetch_failed" "$got" "checkout_freshness reports unknown when origin is unreachable"
+
 echo
 echo "Passed: $PASS  Failed: $FAIL"
 [[ "$FAIL" -eq 0 ]]
