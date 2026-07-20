@@ -291,7 +291,9 @@ AWS S3 was previously used for assets but has been fully replaced by local stora
 | `the-aspirant.com` | A | Yes | Web traffic (HTTP/HTTPS via Cloudflare CDN) |
 | `home.the-aspirant.com` | A | No | Direct access (SSH on port 41922) |
 
-DNS is updated every 5 minutes by a cron job (`~/update-dns.sh`) to handle dynamic IP.
+DNS is updated every 5 minutes by a cron job (`scripts/update-dns.sh`, plus an `@reboot` entry) in the `aspirant` user's crontab, to handle the dynamic IP. Both records are updated on every IP change and each response is checked independently — a failed update of `home.the-aspirant.com` takes SSH to the cell with it, so it is never folded into the root record's result.
+
+The Cloudflare token is read from `~/.config/aspirant/ddns.env` (owner `aspirant`, mode 0600); the script holds no credential and refuses to run without the file. See `docs/OPERATIONS.md` §Cloudflare DDNS credential for installation and rotation.
 
 ### Port Map
 

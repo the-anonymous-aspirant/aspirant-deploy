@@ -106,6 +106,58 @@ docker compose -f docker-compose.dev.yml up -d postgres server
 docker compose -f docker-compose.dev.yml up -d translator
 ```
 
+## Cloudflare DDNS credential
+
+`scripts/update-dns.sh` keeps the `the-aspirant.com` and `home.the-aspirant.com` A records pointed at the cell's current public IP. It runs from the **`aspirant` user's** crontab (`*/5 * * * *` plus `@reboot`) and reads its credential from `~/.config/aspirant/ddns.env`. The script contains no token and exits 1 without making a request when the file is missing, unreadable, or has a blank value.
+
+The env file is `aspirant`-owned, not root-owned: a root-owned `0600` file is unreadable by the job, and the failure is silent to anyone not tailing `~/ddns.log`.
+
+### Install
+
+```bash
+install -D -m 600 scripts/ddns.env.template ~/.config/aspirant/ddns.env
+${EDITOR:-vi} ~/.config/aspirant/ddns.env   # fill in all four values
+```
+
+### Rotate the token
+
+Rotation and the script's cutover must land in the same window: the old token stops working the moment it is revoked, and DDNS is blind until the new one is in place. Budget a few minutes with the cell reachable.
+
+```bash
+# 1. Mint the replacement in the Cloudflare dashboard (dashboard-only — an
+#    API token cannot mint or revoke tokens). Scope it as narrowly as the
+#    dashboard allows for this job: Zone → DNS → Edit, on the-aspirant.com
+#    only. Do NOT revoke the old token yet.
+
+# 2. Put it in place on the cell.
+ssh -p 41922 aspirant@home.the-aspirant.com
+${EDITOR:-vi} ~/.config/aspirant/ddns.env   # replace CF_TOKEN
+
+# 3. Prove the new token works before the old one dies. A successful run is
+#    silent; failures land in ~/ddns.log.
+~/aspirant-deploy/scripts/update-dns.sh; echo "exit=$?"
+tail -5 ~/ddns.log
+
+# 4. Confirm both records answer with the cell's current IP.
+curl -s https://api.ipify.org; echo
+dig +short the-aspirant.com; dig +short home.the-aspirant.com
+
+# 5. Only now revoke the old token in the dashboard, then re-run step 3 to
+#    confirm nothing was still depending on it.
+```
+
+If step 3 fails, the old token is still live — restore the previous `CF_TOKEN` value in the env file and DDNS resumes on the next tick. Nothing else needs undoing.
+
+### Verify
+
+```bash
+# The script never carries a credential of its own.
+grep -nE '^(CF_TOKEN|ZONE_ID|ROOT_RECORD_ID|HOME_RECORD_ID)=' scripts/update-dns.sh   # no output
+
+# The env file is not world-readable.
+ssh -p 41922 aspirant@home.the-aspirant.com 'ls -l ~/.config/aspirant/ddns.env'       # -rw-------
+```
+
 ## Testing
 
 ### Integration test suite
