@@ -250,6 +250,7 @@ services:
   # The lake boundary is identical to production: only explorer-api holds a
   # `lake` interface, and neither service publishes a port.
   explorer-api:
+    profiles: ["explorer"]
     build:
       context: ../aspirant-explorer
       dockerfile: Dockerfile-Explorer
@@ -265,6 +266,7 @@ services:
       - lake
 
   explorer:
+    profiles: ["explorer"]
     build:
       context: ../aspirant-explorer
       dockerfile: Dockerfile-ExplorerFrontend
