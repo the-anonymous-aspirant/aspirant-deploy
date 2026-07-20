@@ -364,11 +364,88 @@ services:
       - penpot
     mem_limit: 256m
 
+  # --- Explorer (system_3 #2409-D2) ----------------------------------------
+  # The authenticated browse surface over the data lake. Two services: a static
+  # SPA and an API. Only the API touches the lake, and it is the ONLY thing in
+  # this project that does.
+  #
+  # THE BOUNDARY, because this is the one place it is crossed.
+  #
+  # Operator ruling 2026-07-20: "The lake itself should not be visible to the
+  # public api. However, the explorer should, for a user that has logged in, be
+  # able to reveal a google-drive-like interaction and view of the data in the
+  # data lake."
+  #
+  # That is a rule about REACHABILITY, not about network membership:
+  #   permitted — the public reaches the explorer API; the explorer API reaches
+  #               the lake. Two different reachability facts.
+  #   forbidden — any lake service (garage, catalog) reachable from the public
+  #               ingress by ANY route. No proxy pass-through, no port publish,
+  #               no temporary debug route. If a request from the internet can
+  #               reach a lake port, this is violated whatever the file says.
+  #
+  # The shape is the one penpot-frontend already uses above: a single mediating
+  # container dual-homed onto `default`, with everything behind it reachable
+  # only from its own bridge. Neither service publishes a port; public ingress
+  # is the client-nginx /admin/explorer/ location behind auth_request (#2409-D3).
+  explorer-api:
+    image: ghcr.io/the-anonymous-aspirant/aspirant-explorer:latest
+    restart: unless-stopped
+    environment:
+      LAKE_CATALOG_DSN: ${LAKE_CATALOG_DSN:?set in .env, read-only catalog role, see task 2542}
+      LAKE_S3_ENDPOINT: garage:3900
+      LAKE_S3_BUCKET: ${LAKE_S3_BUCKET:-lake-skeleton-bronze}
+      LAKE_S3_REGION: garage
+      # Read-only Garage key. The bridge is only bounded if the CREDENTIALS are
+      # bounded — §9's access model says "explorer API and BI hold read-only
+      # keys". A read-write key here would grant a mediated write path where a
+      # mediated read path was authorised. Provisioning is #2409-D4.
+      AWS_ACCESS_KEY_ID: ${EXPLORER_S3_ACCESS_KEY:?set in .env, READ-ONLY key, see task 2542}
+      AWS_SECRET_ACCESS_KEY: ${EXPLORER_S3_SECRET_KEY:?set in .env, READ-ONLY key, see task 2542}
+    networks:
+      - default
+      - lake
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    mem_limit: 512m
+
+  # Static SPA. Deliberately NOT on `lake`: it runs in the browser and talks to
+  # the API over the same authed origin, so giving it a lake interface would
+  # widen the boundary for nothing.
+  explorer:
+    image: ghcr.io/the-anonymous-aspirant/aspirant-explorer-frontend:latest
+    restart: unless-stopped
+    depends_on:
+      explorer-api:
+        condition: service_healthy
+    networks:
+      - default
+    mem_limit: 128m
+
 volumes:
   pgdata:
 
 networks:
   default:
+  # The lake skeleton's bridge, created by docker-compose.lake-skeleton.yml and
+  # joined here as external — it is a separate compose project, so declaring it
+  # rather than defining it is what attaches to the SAME bridge instead of
+  # silently creating a second, empty one named alike.
+  #
+  # This is the ONE mediated exception to the lake's isolation (see the
+  # explorer-api comment above and #2409). It is scoped and it EXPIRES: the
+  # permission holds only while the skeleton carries synthetic fixtures on a
+  # scratch volume, and must be re-derived before real data lands — the same
+  # trigger DATA_LAKE_DESIGN.md §11.0 rev 3b already defines for encryption. A
+  # permission that expires on a condition nobody recorded is a permanent
+  # permission, which is why the condition is written here and not in a thread.
+  lake:
+    external: true
+    name: aspirant-lake-skeleton_lake
   # Internal-only bridge used by monitor to reach docker-socket-proxy.
   # Never mapped to the host. See docker-socket-proxy service comment.
   docker_proxy_net:
