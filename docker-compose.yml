@@ -388,11 +388,32 @@ services:
   # container dual-homed onto `default`, with everything behind it reachable
   # only from its own bridge. Neither service publishes a port; public ingress
   # is the client-nginx /admin/explorer/ location behind auth_request (#2409-D3).
+  #
+  # WHY THESE ARE `:-` AND NOT `:?` (system_3 #2556).
+  #
+  # They were `${VAR:?...}` for one commit. A required-variable failure is not
+  # scoped to its service -- it aborts interpolation of the WHOLE FILE, so on
+  # any host without explorer credentials every `docker compose pull|up|ps`
+  # fails, including the ones auto-pull.sh runs. That takes out the deploy path
+  # for every unrelated service, and the mechanism needed to fix it remotely.
+  # Measured on the cell: `required variable EXPLORER_S3_ACCESS_KEY is missing`.
+  #
+  # `profiles:` alone does NOT save this -- verified, not assumed: interpolation
+  # runs before profile filtering, so a `:?` inside a profiled service still
+  # aborts the file. The inert default is the load-bearing part; the profile is
+  # what stops the services starting where nobody asked for them.
+  #
+  # The failure now lands where it belongs: with no credentials the API starts
+  # and reports `degraded`, one service, visibly, instead of silently wedging
+  # the host.
   explorer-api:
     image: ghcr.io/the-anonymous-aspirant/aspirant-explorer:latest
     restart: unless-stopped
+    # Opt-in: `docker compose --profile explorer up -d`. Until a host is
+    # deliberately running the explorer, these two services are inert.
+    profiles: ["explorer"]
     environment:
-      LAKE_CATALOG_DSN: ${LAKE_CATALOG_DSN:?set in .env, read-only catalog role, see task 2542}
+      LAKE_CATALOG_DSN: ${LAKE_CATALOG_DSN:-}
       LAKE_S3_ENDPOINT: garage:3900
       LAKE_S3_BUCKET: ${LAKE_S3_BUCKET:-lake-skeleton-bronze}
       LAKE_S3_REGION: garage
@@ -400,8 +421,8 @@ services:
       # bounded — §9's access model says "explorer API and BI hold read-only
       # keys". A read-write key here would grant a mediated write path where a
       # mediated read path was authorised. Provisioning is #2409-D4.
-      AWS_ACCESS_KEY_ID: ${EXPLORER_S3_ACCESS_KEY:?set in .env, READ-ONLY key, see task 2542}
-      AWS_SECRET_ACCESS_KEY: ${EXPLORER_S3_SECRET_KEY:?set in .env, READ-ONLY key, see task 2542}
+      AWS_ACCESS_KEY_ID: ${EXPLORER_S3_ACCESS_KEY:-}
+      AWS_SECRET_ACCESS_KEY: ${EXPLORER_S3_SECRET_KEY:-}
     networks:
       - default
       - lake
@@ -419,6 +440,7 @@ services:
   explorer:
     image: ghcr.io/the-anonymous-aspirant/aspirant-explorer-frontend:latest
     restart: unless-stopped
+    profiles: ["explorer"]
     depends_on:
       explorer-api:
         condition: service_healthy
