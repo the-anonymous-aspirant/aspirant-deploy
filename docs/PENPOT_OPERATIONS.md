@@ -286,9 +286,50 @@ over PREPL, as on the dev box:
 
 ```bash
 docker compose exec penpot-backend python3 manage.py create-profile \
-    --fullname "…" --email "…" --password "…"
+    --fullname "…" --email "…"
 docker compose exec penpot-backend python3 manage.py delete-profile --email "…"
 ```
+
+Omit `--password` and let `manage.py` prompt: it reads through `getpass`, so
+the password is not echoed and does not land in shell history or in the
+process list. `docker compose exec` allocates a TTY by default, which the
+prompt needs — do not add `-T`, and note that Compose v2 has no `-i`/`-t`
+flags to add. The same applies to `update-profile` below.
+
+### Password recovery — the only path
+
+**There is no self-service password reset, and the UI does not say so.** No
+mail transport is configured (the backend's environment carries `PENPOT_FLAGS`
+and no `PENPOT_SMTP_*` of any kind), so the forgot-password flow accepts the
+request and silently delivers nothing. Do not send an operator to it.
+
+Reset from the cell instead:
+
+```bash
+docker compose exec penpot-backend python3 manage.py update-profile \
+    --email "…"
+```
+
+`manage.py` — note `.py`, there is no `manage.sh` — reaches the backend over
+PREPL on `:6063`, which works because `enable-prepl-server` is in
+`PENPOT_FLAGS`. Removing that flag disables every command in this section,
+including this one. Full verb set: `create-profile`, `update-profile`,
+`delete-profile`, `search-profile`, `derive-password`.
+
+Confirm which accounts exist before assuming a login is wrong:
+
+```bash
+docker compose exec penpot-postgres \
+    psql -U penpot -d penpot -tAc \
+    "SELECT email, is_active, is_blocked, auth_backend FROM profile;"
+```
+
+`auth_backend = penpot` means password auth. As of 2026-07-21 this returns a
+single row, so a forgotten password on that one account is the difference
+between a working design store and one reachable only by shelling into the
+cell. That is a deliberate posture for a single-operator tool, not an
+oversight — but it means this runbook is the backup, so keep it working
+(system_3 #2606).
 
 ## Backup
 
