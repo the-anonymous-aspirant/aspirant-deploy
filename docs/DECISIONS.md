@@ -219,3 +219,14 @@
 **Rationale:** Decouples "image exists for main HEAD" from *which door the merge went through*; idempotent against the existing hooks; keeps auto-merge throughput; the backstop metric catches the poller's own failure mode.
 
 **Status:** Proposed 2026-07-17 — ratified by merging this PR (system_3 #2281; implementation tasks listed in `docs/IMAGE_PUBLISH_DECISION.md` §Remediation).
+
+### Application-level fail-fast over `depends_on: service_healthy` for reboot-order safety
+
+**Context:** The server has declared `depends_on: postgres: condition: service_healthy` since the initial commit, yet the #2660 DB-init race still fired on a host reboot — the server came up before postgres was ready and crashed on DB init. `depends_on` ordering, including `condition: service_healthy`, is honored only by `docker compose up`. On a **host reboot** the Docker daemon restarts `restart: unless-stopped` containers in parallel and does not replay compose's dependency ordering, so any service can start ahead of a dependency it declared.
+
+**Decision:** Do not rely on `depends_on` for reboot-time startup ordering. Each service guards its own dependencies at the application layer — fail fast (crash) when a required dependency is unavailable, so Docker's `restart: unless-stopped` policy retries until the dependency is up. aspirant-server does this by `log.Fatal`-ing on DB-init failure (aspirant-server PR #58, merged `c84d0b5`).
+
+**Consequences:**
+- `depends_on: condition: service_healthy` stays in compose — it still gives correct startup ordering for `docker compose up` (deploys, manual restarts) and documents the dependency graph.
+- A new service that needs a dependency at startup must fail-fast on its absence rather than assume compose ordering protects it on reboot.
+- The `depends_on` blocks in `docker-compose.yml` carry an inline comment pointing here so the caveat is visible at the point of use.
