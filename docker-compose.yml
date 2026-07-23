@@ -44,6 +44,14 @@ services:
     volumes:
       - /data/aspirant/files:/data/files
       - /data/aspirant/assets:/data/assets
+    # `condition: service_healthy` is honored by `docker compose up` only.
+    # On a HOST REBOOT the Docker daemon restarts unless-stopped containers
+    # in parallel and ignores depends_on ordering, so server can start ahead
+    # of postgres — the #2660 DB-init race, which fired despite this block
+    # being here since the initial commit. The real reboot-race guard is
+    # app-level fail-fast (server log.Fatal's on DB-init failure so the
+    # restart policy retries), NOT depends_on. Same caveat applies to every
+    # service_healthy dependency below. See docs/DECISIONS.md.
     depends_on:
       postgres:
         condition: service_healthy
