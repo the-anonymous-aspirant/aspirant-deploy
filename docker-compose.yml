@@ -61,10 +61,18 @@ services:
   client-blue:
     image: ghcr.io/the-anonymous-aspirant/aspirant-client:latest
     restart: unless-stopped
+    volumes:
+      # system_3 #3019-B5: nginx auth-secret drop-in dir. Both slots mount
+      # the SAME host path so a blue<->green flip keeps the secret. Inert
+      # while the dir carries no *.conf; the secret lands at the operator's
+      # B4 flip. Read-only: the client must never write secrets.
+      - /data/aspirant/nginx-secrets:/etc/nginx/secrets:ro
 
   client-green:
     image: ghcr.io/the-anonymous-aspirant/aspirant-client:latest
     restart: unless-stopped
+    volumes:
+      - /data/aspirant/nginx-secrets:/etc/nginx/secrets:ro
 
   transcriber:
     image: ghcr.io/the-anonymous-aspirant/aspirant-transcriber:latest
