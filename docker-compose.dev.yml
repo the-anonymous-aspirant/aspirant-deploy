@@ -33,7 +33,6 @@ services:
       TRANSLATOR_URL: http://translator:8000
       MONITOR_URL: http://monitor:8000
       KIWIX_URL: http://kiwix:8080
-      REMARKABLE_URL: http://remarkable:8000
       FINANCE_URL: http://finance:8000
       ADVISOR_URL: http://advisor:8000
       ASSET_BASE_PATH: /data/assets
@@ -160,16 +159,6 @@ services:
     volumes:
       - kiwixdata-dev:/data:ro
 
-  remarkable:
-    build:
-      context: ../aspirant-remarkable
-      dockerfile: Dockerfile-Remarkable
-    ports:
-      - "127.0.0.1:8086:8000"
-    volumes:
-      - remarkabledata-dev:/data/remarkable
-    mem_limit: 2g
-
   finance:
     build:
       context: ../aspirant-finance
@@ -286,7 +275,6 @@ volumes:
   audiodata-dev:
   translatordata-dev:
   kiwixdata-dev:
-  remarkabledata-dev:
   advisordata-dev:
   browserdata-dev:
   ollamadata-dev:
