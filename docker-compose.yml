@@ -31,7 +31,6 @@ services:
       TRANSLATOR_URL: http://translator:8000
       MONITOR_URL: http://monitor:8000
       KIWIX_URL: http://kiwix:8080
-      REMARKABLE_URL: http://remarkable:8000
       FINANCE_URL: http://finance:8000
       ADVISOR_URL: http://advisor:8000
       ASSET_BASE_PATH: /data/assets
@@ -179,15 +178,6 @@ services:
     command: --urlRootLocation=/api/wikipedia /data/wikipedia_en_all_maxi_2026-02.zim
     volumes:
       - /data/aspirant/kiwix:/data:ro
-
-  remarkable:
-    image: ghcr.io/the-anonymous-aspirant/aspirant-remarkable:latest
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:8086:8000"
-    volumes:
-      - /data/aspirant/remarkable:/data/remarkable
-    mem_limit: 2g
 
   finance:
     image: ghcr.io/the-anonymous-aspirant/aspirant-finance:latest
