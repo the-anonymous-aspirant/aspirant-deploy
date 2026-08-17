@@ -69,7 +69,6 @@ Full-stack web platform (Go + Vue.js + Python microservices) running on a single
 | **Commander** | aspirant-commander | Python 3.11 + FastAPI + SQLAlchemy + dateparser | `ghcr.io/.../aspirant-commander` | 127.0.0.1:8083 | 8000 | — |
 | **Translator** | aspirant-translator | Python 3.11 + FastAPI + Argos Translate | `ghcr.io/.../aspirant-translator` | 127.0.0.1:8084 | 8000 | 2 GB |
 | **Monitor** | aspirant-monitor | Python 3.11 + FastAPI + Docker SDK | `ghcr.io/.../aspirant-monitor` | 127.0.0.1:8085 | 8000 | — |
-| **Remarkable** | aspirant-remarkable | Python 3.11 + FastAPI + rmscene + rmc + cairosvg | `ghcr.io/.../aspirant-remarkable` | 127.0.0.1:8086 | 8000 | 2 GB |
 | **Finance** | aspirant-finance | Python FastAPI | `ghcr.io/.../aspirant-finance` | 127.0.0.1:8087 | 8000 | — |
 | **Advisor** | aspirant-advisor | Python 3.11 + FastAPI + sentence-transformers + pgvector | `ghcr.io/.../aspirant-advisor` | 127.0.0.1:8088 | 8000 | 2 GB |
 | **Browser** | aspirant-browser | Python 3.11 + FastAPI + Selenium + Chromium | `ghcr.io/.../aspirant-browser` | — (internal) | 8000 | 2 GB |
@@ -251,7 +250,7 @@ Requires JWT authentication (Trusted role or above). All endpoints are user-scop
 | `filedata` | `/data/files` | Server | User uploads (My Files + Shared Files, 50 GB limits) |
 | `audiodata` | `/data/audio` | Transcriber | Voice message audio files |
 | `translatordata` | `/data/models` | Translator | Argos translation language models (re-downloadable) |
-| `remarkabledata` | `/data/remarkable` | Remarkable | Synced reMarkable notebook files + to-device staging |
+| `remarkabledata` | `/data/remarkable` | *(service retired 2026-08-17; host data retained pending operator decision)* | Synced reMarkable notebook files + to-device staging |
 | `advisordata` | `/data/advisor` | Advisor | Uploaded documents (contracts, policies, law) |
 | `browserdata` | `/data/aspirant/browser_flows` | Browser | Per-run browser-flow assets (screenshots, DOM snapshots, HAR files), keyed by `run_id` |
 | `ollamadata` | `/root/.ollama` | Ollama | LLM model weights (re-downloadable) |
@@ -326,7 +325,6 @@ Services communicate by container name. The Go server acts as API gateway, proxy
 - `translator` — text translation (proxied by server via `TRANSLATOR_URL`, default `http://translator:8000`)
 - `monitor` — system metrics (proxied by server via `MONITOR_URL`, default `http://monitor:8000`)
 - `kiwix` — offline Wikipedia (proxied by server via `KIWIX_URL`, default `http://kiwix:8080`)
-- `remarkable` — reMarkable notebook rendering (proxied by server via `REMARKABLE_URL`, default `http://remarkable:8000`)
 - `finance` — financial transaction management (proxied by server via `FINANCE_URL`, default `http://finance:8000`)
 - `advisor` — document RAG assistant (proxied by server via `ADVISOR_URL`, default `http://advisor:8000`)
 - `browser` — agentic browser-automation runner (host port 8089; reachable internally as `http://browser:8000`; egresses via the Tor SOCKS5 sidecar)
@@ -371,7 +369,6 @@ Per-repo: Checkout → Test → Login to GHCR → Build & push Docker image
 | aspirant-commander | `ghcr.io/the-anonymous-aspirant/aspirant-commander:latest` |
 | aspirant-translator | `ghcr.io/the-anonymous-aspirant/aspirant-translator:latest` |
 | aspirant-monitor | `ghcr.io/the-anonymous-aspirant/aspirant-monitor:latest` |
-| aspirant-remarkable | `ghcr.io/the-anonymous-aspirant/aspirant-remarkable:latest` |
 | aspirant-finance | `ghcr.io/the-anonymous-aspirant/aspirant-finance:latest` |
 | aspirant-advisor | `ghcr.io/the-anonymous-aspirant/aspirant-advisor:latest` |
 | aspirant-browser | `ghcr.io/the-anonymous-aspirant/aspirant-browser:latest` |
@@ -441,7 +438,6 @@ No automated deployment — manual pull after CI builds complete.
 | `TRANSLATOR_URL` | Server | Low |
 | `MONITOR_URL` | Server | Low |
 | `KIWIX_URL` | Server | Low |
-| `REMARKABLE_URL` | Server | Low |
 | `FINANCE_URL` | Server | Low |
 | `ADVISOR_URL` | Server | Low |
 | `OLLAMA_URL` | Advisor | Low |
