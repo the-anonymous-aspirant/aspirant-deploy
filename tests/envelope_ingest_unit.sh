@@ -32,10 +32,12 @@ fi
 
 echo "Running the ingest-envelope + KEK-loader self-tests in ${IMAGE} ..."
 docker run --rm \
-  -v "$PWD/scripts/kek:/kek:ro" \
-  -w /kek \
+  -v "$PWD:/repo:ro" \
+  -w /repo \
   "$IMAGE" \
-  sh -c "pip install --quiet --disable-pip-version-check cryptography \
-    && python dek_envelope.py --self-test \
-    && python kek_loader.py --self-test \
-    && python envelope_store.py --self-test"
+  sh -c "pip install --quiet --disable-pip-version-check cryptography boto3 moto \
+    && ( cd scripts/kek \
+         && python dek_envelope.py --self-test \
+         && python kek_loader.py --self-test \
+         && python envelope_store.py --self-test ) \
+    && python tests/envelope_ingest_s3_roundtrip.py"
