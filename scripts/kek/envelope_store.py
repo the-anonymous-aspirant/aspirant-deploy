@@ -58,6 +58,27 @@ def encrypt_for_storage(
     return aobj_bytes, base64.b64encode(wrapped).decode("ascii")
 
 
+def storage_body_and_wrapped_dek(
+    payload: bytes, sensitivity: str, kek: bytes, kek_version: int = 1
+) -> tuple[bytes, str | None]:
+    """The ingest-side sensitivity gate: what to PUT and what to inventory.
+
+    Returns ``(stored_body, wrapped_dek_b64)``:
+
+      * ``sensitivity == "high"`` -> ``(ciphertext, wrapped_dek_b64)`` — the blob
+        is envelope-encrypted before it reaches Garage.
+      * anything else -> ``(payload, None)`` — stored as-is, no wrapped DEK.
+
+    Centralising the gate here (rather than in the ingest script) keeps the rule
+    "only ``high`` is encrypted" testable without standing up Garage, and gives
+    the read path one predicate for "is this row encrypted?" — ``wrapped_dek is
+    not None``.
+    """
+    if sensitivity == "high":
+        return encrypt_for_storage(payload, kek, kek_version)
+    return payload, None
+
+
 def decrypt_from_storage(
     aobj_bytes: bytes,
     wrapped_dek_b64: str,
@@ -114,6 +135,26 @@ def _self_test() -> int:
 
     recovered = decrypt_from_storage(aobj, wrapped_b64, load_kek)
     check("round-trip plaintext matches", recovered == plaintext)
+
+    # Sensitivity gate: high encrypts, normal passes through untouched.
+    gated_body, gated_wrapped = storage_body_and_wrapped_dek(
+        plaintext, "high", kek, kek_version=1
+    )
+    check(
+        "gate encrypts a high blob",
+        gated_wrapped is not None and gated_body[:4] == b"AOBJ" and plaintext not in gated_body,
+    )
+    check(
+        "gate round-trips a high blob",
+        decrypt_from_storage(gated_body, gated_wrapped, load_kek) == plaintext,
+    )
+    normal_body, normal_wrapped = storage_body_and_wrapped_dek(
+        plaintext, "normal", kek, kek_version=1
+    )
+    check(
+        "gate leaves a normal blob as plaintext with no wrapped DEK",
+        normal_body == plaintext and normal_wrapped is None,
+    )
 
     # A wrong KEK from the resolver must fail the tag, not return garbage.
     from dek_envelope import EnvelopeError
