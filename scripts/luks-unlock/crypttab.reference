@@ -1,0 +1,42 @@
+# crypttab.reference — post-boot LUKS unlock entries for the data-lake volumes
+#
+# Task #4132 (#4120-B), child B of the 0b encryption epic #4120.
+# Companion to scripts/luks-unlock/unlock.sh and
+# docs/data-lake-design/POST_BOOT_UNLOCK_PLAYBOOK.md.
+#
+# WHY noauto (non-negotiable — see LUKS_LAYER1_PLAYBOOK.md §3):
+#   None of these three volumes is the OS root `/`. The cell boots to a fully
+#   networked SSH login WITHOUT any unlock. A bare passphrase-prompt crypttab
+#   entry would BLOCK that boot waiting on console input and re-introduce the
+#   "dark cell on a lossy initramfs link" failure mode this design specifically
+#   avoids. Every entry here is therefore `noauto`: boot never waits on them;
+#   the operator unlocks post-boot over the real network via unlock.sh.
+#
+# The keyfile column is `none` on purpose: the unlock passphrase is NEVER
+# written to the cell (§9 threat model — flakiness is answered with patience,
+# never a key on the stolen-hardware). `none` makes cryptsetup prompt for the
+# passphrase interactively, which is what unlock.sh drives over SSH.
+#
+# INSTALL (operator, part of the #4131 layer-1 ceremony, §5.5):
+#   After luksFormat has produced each container, capture its UUID:
+#     cryptsetup luksUUID /dev/sda            # scratch
+#     cryptsetup luksUUID /dev/mapper/ubuntu--vg--1-lake   # lake
+#     cryptsetup luksUUID /dev/md0            # data
+#   Fill the UUID= fields below, append these three lines to /etc/crypttab, and
+#   add matching `noauto` fstab entries for /scratch, /lake, /data.
+#
+# Format:  <mapper-name>  <backing-device>  <keyfile>  <options>
+
+# /scratch — sda, synthetic-only, destroy-on-disposal (§11.0)
+scratch_crypt  UUID=REPLACE_WITH_scratch_luksUUID  none  luks,noauto
+
+# /lake — new LV carved from the SSD's free extents (ubuntu-vg-1/lake)
+lake_crypt     UUID=REPLACE_WITH_lake_luksUUID     none  luks,noauto
+
+# /data — md0 RAID1, holds real production data; unlock LAST, verify checksums
+data_crypt     UUID=REPLACE_WITH_data_luksUUID     none  luks,noauto
+
+# --- matching /etc/fstab entries (also noauto; mounted by unlock.sh) ---
+#   /dev/mapper/scratch_crypt  /scratch  ext4  defaults,noauto  0  2
+#   /dev/mapper/lake_crypt     /lake     ext4  defaults,noauto  0  2
+#   /dev/mapper/data_crypt     /data     ext4  defaults,noauto  0  2
