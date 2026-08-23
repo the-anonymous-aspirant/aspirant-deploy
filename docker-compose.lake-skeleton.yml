@@ -93,9 +93,20 @@ services:
       EXPLORER_S3_ACCESS_KEY: ${EXPLORER_S3_ACCESS_KEY:-}
       EXPLORER_S3_SECRET_KEY: ${EXPLORER_S3_SECRET_KEY:-}
       LAKE_CATALOG_RO_DSN: ${LAKE_CATALOG_RO_DSN:-}
+      # KEK for layer-2 envelope encryption of sensitivity=high blobs (§9, #4134).
+      # One-shot, off-cell hex — never on disk. Defaulted rather than `:?` so a
+      # skeleton with no high-sensitivity data still seeds; the fixtures loader
+      # fails closed only when it actually reaches a high blob without a KEK. For
+      # the synthetic skeleton a throwaway synthetic KEK is fine.
+      LAKE_KEK_HEX: ${LAKE_KEK_HEX:-}
+      LAKE_KEK_FINGERPRINT: ${LAKE_KEK_FINGERPRINT:-}
+      LAKE_KEK_VERSION: ${LAKE_KEK_VERSION:-1}
     volumes:
       - ./scripts/lake_skeleton_verify.py:/work/verify.py:ro
       - ./scripts/lake_skeleton_fixtures.py:/work/fixtures.py:ro
+      # The envelope machinery (dek_envelope, envelope_store, kek_loader) imported
+      # by the fixtures loader; mounted read-only beside it at /work/kek.
+      - ./scripts/kek:/work/kek:ro
     networks:
       - lake
 
