@@ -34,10 +34,49 @@ import zlib
 import boto3
 import duckdb
 
+# Layer-2 envelope encryption (DATA_LAKE_DESIGN.md §9, task #4134 / #4120-D). The
+# format + object crypto (dek_envelope), the storage gate (envelope_store), and
+# the fail-closed KEK loader (kek_loader) live in scripts/kek/ — mounted at
+# ./kek beside this script both on disk and in the client container (/work/kek).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "kek"))
+from envelope_store import storage_body_and_wrapped_dek  # noqa: E402
+from kek_loader import ENV_KEK_FINGERPRINT, ENV_KEK_HEX, load_kek_from_env  # noqa: E402
+
 BUCKET = os.environ["LAKE_S3_BUCKET"]
 ENDPOINT = os.environ["LAKE_S3_ENDPOINT"]
 REGION = os.environ["LAKE_S3_REGION"]
 DSN = os.environ["LAKE_CATALOG_DSN"]
+
+# Which KEK version wraps DEKs written this run (the wrapped-DEK header records
+# it, so a future rotation can hold more than one). Phase 0b uses version 1.
+KEK_VERSION = int(os.environ.get("LAKE_KEK_VERSION", "1"))
+
+_kek_cache: dict[str, bytes] = {}
+
+
+def _get_kek():
+    """The KEK for encrypting sensitivity=high blobs — loaded once, fail-closed.
+
+    Env-only: this loader runs non-interactively under `lake-skeleton.sh seed`,
+    so there is no TTY to prompt; the launcher passes the off-cell hex through
+    the one-shot LAKE_KEK_HEX env var (never on disk). If a high-sensitivity blob
+    must be written and no KEK is present, refuse — writing high data unencrypted
+    is exactly what §9 forbids. For the synthetic skeleton, pass a throwaway
+    synthetic KEK; a real KEK is only needed once real high-sensitivity data is
+    ingested (the operator ceremony, #4133).
+    """
+    if "kek" not in _kek_cache:
+        kek = load_kek_from_env(
+            expected_fingerprint=os.environ.get(ENV_KEK_FINGERPRINT) or None
+        )
+        if kek is None:
+            raise SystemExit(
+                f"refusing to ingest a sensitivity=high blob without a KEK: set "
+                f"{ENV_KEK_HEX} to the off-cell grouped hex (never on disk). "
+                "Fail-closed per DATA_LAKE_DESIGN.md §9 layer 2."
+            )
+        _kek_cache["kek"] = kek
+    return _kek_cache["kek"]
 
 # The fixture vocabulary. `verify` asserts against these, so anything added here
 # must stay just as unmistakable — this list IS the guardrail's definition of
@@ -120,15 +159,23 @@ s3 = boto3.client(
 )
 
 
-def put_blob(payload):
+def put_blob(payload, stored_body=None):
     """Store a blob at bronze/blobs/sha256/ab/cd/<hash>; return (hash, key, size).
+
+    The content address and reported size are of the *plaintext* ``payload`` — a
+    blob's identity and size are stable across encryption, and keying by the
+    plaintext hash keeps the silver joins (extracted_text, image_metadata) and
+    lets the read path verify the decrypted bytes against the row. ``stored_body``,
+    when given, is the bytes actually PUT (the envelope-encrypted object); §9 says
+    the high-sensitivity marker is an inventory *column*, not a folder convention,
+    so an encrypted blob sits at the same key layout and differs only in its row.
 
     The two-level prefix is not decoration: it keeps any single listing prefix
     small once the real lake holds hundreds of thousands of blobs.
     """
     digest = hashlib.sha256(payload).hexdigest()
     key = f"bronze/blobs/sha256/{digest[:2]}/{digest[2:4]}/{digest}"
-    s3.put_object(Bucket=BUCKET, Key=key, Body=payload)
+    s3.put_object(Bucket=BUCKET, Key=key, Body=payload if stored_body is None else stored_body)
     return digest, key, len(payload)
 
 
@@ -136,7 +183,13 @@ BLOBS = []
 
 
 def blob(kind, source_path, mime, payload, sensitivity="normal"):
-    digest, key, size = put_blob(payload)
+    # §9 layer 2: a sensitivity=high blob is envelope-encrypted before it reaches
+    # Garage; its wrapped DEK rides in the inventory row (base64). Normal blobs
+    # store as-is with no wrapped DEK.
+    stored_body, wrapped_dek = storage_body_and_wrapped_dek(
+        payload, sensitivity, _get_kek() if sensitivity == "high" else b"", KEK_VERSION
+    )
+    digest, key, size = put_blob(payload, stored_body=stored_body if sensitivity == "high" else None)
     BLOBS.append(
         {
             "kind": kind,
@@ -146,6 +199,7 @@ def blob(kind, source_path, mime, payload, sensitivity="normal"):
             "mime": mime,
             "size_bytes": size,
             "sensitivity": sensitivity,
+            "wrapped_dek": wrapped_dek,
         }
     )
     return digest
@@ -247,12 +301,15 @@ replace(
     """
     sha256 VARCHAR, object_key VARCHAR, source_path VARCHAR, mime VARCHAR,
     size_bytes BIGINT, kind VARCHAR, sensitivity VARCHAR,
-    ingested_at DATE, ingest_run_id VARCHAR
+    wrapped_dek VARCHAR, ingested_at DATE, ingest_run_id VARCHAR
     """,
     [
         (
             b["sha256"], b["object_key"], b["source_path"], b["mime"],
             b["size_bytes"], b["kind"], b["sensitivity"],
+            # base64 wrapped DEK for a sensitivity=high blob; NULL otherwise. The
+            # read path (explorer, #4199) keys "is this encrypted?" on this column.
+            b["wrapped_dek"],
             f"{FAKE_YEAR}-01-0{(i % 9) + 1}", f"FAKE-RUN-{(i % 3) + 1:03d}",
         )
         for i, b in enumerate(BLOBS)
