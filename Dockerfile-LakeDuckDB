@@ -10,7 +10,10 @@ FROM python:3.12-slim
 # boto3: DuckDB writes parquet well but cannot PUT arbitrary binary, and §2's
 # bronze layer is content-addressed *blobs*. The real ingest-runner is specified
 # as "Python + rclone + DuckDB" (§5), so an S3 client belongs here regardless.
-RUN pip install --no-cache-dir duckdb==1.5.4 pytz==2025.2 boto3==1.40.47
+# cryptography: the ingest runner envelope-encrypts sensitivity=high blobs before
+# the Garage PUT (§9 layer 2, task #4134) via scripts/kek/dek_envelope.py, which
+# uses AES-256-GCM from `cryptography`.
+RUN pip install --no-cache-dir duckdb==1.5.4 pytz==2025.2 boto3==1.40.47 cryptography==46.0.3
 
 # Pre-install the extensions into the image's duckdb home rather than fetching
 # them at query time — the cell cannot be relied on to reach extensions.duckdb.org.
