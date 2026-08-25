@@ -131,6 +131,47 @@ authenticates holds only fixtures.
    versioning (§7).
 6. Every fixture row is still self-labelling as synthetic (§11.0).
 
+### What `verify-at-rest` proves (#4273)
+
+`verify` above proves the skeleton is a working lake. `verify-at-rest` proves a
+different, narrower thing: that what actually landed on disk is *encrypted*,
+not merely that the pipeline that writes it claims to encrypt. It runs two
+independently-executed checks and combines them into one verdict, because one
+script cannot make both claims — see #4273-B1's task body for why the split is
+by execution context, not tidiness:
+
+**Layer 1 — is the volume itself encrypted?** Run on the **host**, as the
+invoking user, via `cryptsetup`/`findmnt`/`lsblk` against the device backing
+`$LAKE_SKELETON_ROOT` — resolved from the path, not from a hardcoded name
+list, because the three-name list in `scripts/luks-layer1/postcheck.sh`
+answers a different question (are the *real* lake's three ceremony volumes
+mapped) that has no entry for this skeleton's root at all.
+
+**Layer 2 — is what's stored actually ciphertext, and does it agree with the
+catalog?** Run **inside the client container** (`scripts/lake_verify_at_rest.py`,
+#4299), against the catalog and Garage directly — never through the explorer's
+decrypting read path, which would report a plaintext write as encrypted. Five
+checks: every `high` row declares an envelope; the stored object is `AOBJ`
+ciphertext (checked twice — whole object and past the header — so a forged
+five-byte header cannot pass as encrypted); no plaintext hides under a `high`
+row and no `normal` row carries a wrapped DEK; the row's `kek_version` agrees
+with the envelope header; the DEK actually unwraps under the KEK in custody.
+
+**A SKIP is never a PASS, on either layer.** Layer 1 SKIPs (rather than
+failing outright) when the volume resolves but is not a LUKS mapping — the
+expected, correct result for this skeleton, whose root is deliberately plain
+`/scratch` (§11.0). Layer 2 SKIPs check 5 when no KEK is in custody for this
+run. Either SKIP keeps the combined verdict at NOT GREEN: the point of the
+check is exactly to distinguish "provably encrypted" from "nobody looked", and
+folding a SKIP into green would erase that distinction on the one surface that
+exists to preserve it.
+
+**Expected result on this skeleton today: NOT GREEN**, and that is the harness
+working, not a bug to chase — `/scratch` is unencrypted by design (layer 1
+SKIPs), and every `sensitivity=high` fixture is sealed under a throwaway KEK
+that no longer exists anywhere (layer 2's check 5 fails). See #4299's findings
+comment on the task for the live run this predicts.
+
 ---
 
 ## The fixture set

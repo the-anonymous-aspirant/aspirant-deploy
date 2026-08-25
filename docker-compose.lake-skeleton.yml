@@ -104,6 +104,11 @@ services:
     volumes:
       - ./scripts/lake_skeleton_verify.py:/work/verify.py:ro
       - ./scripts/lake_skeleton_fixtures.py:/work/fixtures.py:ro
+      # The at-rest checker (#4299 / #4273-A1), layer 2 of #4273. Mounted at
+      # /work so its own `sys.path.insert(_HERE, "kek"/"lake")` resolves
+      # against the /work/kek and /work/lake mounts already below — it needs
+      # no compose-side path wiring beyond sitting next to them.
+      - ./scripts/lake_verify_at_rest.py:/work/verify_at_rest.py:ro
       # The REAL ingest runner (#4271), a separate writer from the synthetic
       # fixtures loader above and deliberately not a flag on it: the loader's
       # safety rests on being unmistakably fake (§11.0), and a --real switch
