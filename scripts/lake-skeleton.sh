@@ -4,6 +4,7 @@
 #
 #   lake-skeleton.sh up        bring the stack up and bootstrap bucket + key
 #   lake-skeleton.sh seed      generate the obviously-synthetic fixture set
+#   lake-skeleton.sh ingest M  load REAL records from source manifest M (#4271)
 #   lake-skeleton.sh verify    run the acceptance checks (bucket + catalog)
 #   lake-skeleton.sh status    show containers, published ports, and disk use
 #   lake-skeleton.sh down      stop the stack, keep the scratch data
@@ -261,6 +262,30 @@ case "${1:-}" in
     compose --profile client run --rm duckdb /work/fixtures.py
     ;;
 
+  ingest)
+    # The real-data ingest runner (#4271 / #4238-B1). Separate verb, separate
+    # script: `seed` writes obviously-synthetic fixtures and is safe to re-run
+    # anywhere; this one writes the operator's actual bytes and is not.
+    #
+    # The manifest's own directory is mounted read-only at /source, so relative
+    # record paths inside the manifest resolve exactly as they do on the host.
+    # Read-only is not a formality: an ingest that could write to the source
+    # tree could damage the only copy of the data it is reading.
+    manifest="${2:-}"
+    if [ -z "$manifest" ] || [ ! -f "$manifest" ]; then
+      echo "usage: lake-skeleton.sh ingest <manifest.json> [--dry-run]" >&2
+      exit 1
+    fi
+    shift 2
+    manifest_dir="$(cd "$(dirname "$manifest")" && pwd)"
+    # Exported rather than prefixed onto the call: `compose` is a shell
+    # function here, and a prefix assignment on a function is not reliably
+    # exported to the docker process that has to interpolate it.
+    export LAKE_INGEST_SOURCE="$manifest_dir"
+    compose --profile client run --rm duckdb \
+      /work/ingest.py "/source/$(basename "$manifest")" "$@"
+    ;;
+
   verify)
     compose --profile client run --rm duckdb /work/verify.py
     ;;
@@ -288,7 +313,7 @@ case "${1:-}" in
     ;;
 
   *)
-    sed -n '3,15p' "${BASH_SOURCE[0]}"
+    sed -n '3,16p' "${BASH_SOURCE[0]}"
     exit 1
     ;;
 esac
