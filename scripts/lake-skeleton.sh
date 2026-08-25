@@ -6,6 +6,8 @@
 #   lake-skeleton.sh seed      generate the obviously-synthetic fixture set
 #   lake-skeleton.sh ingest M  load REAL records from source manifest M (#4271)
 #   lake-skeleton.sh verify    run the acceptance checks (bucket + catalog)
+#   lake-skeleton.sh verify-at-rest
+#                              prove data on disk is envelope-encrypted (#4273)
 #   lake-skeleton.sh status    show containers, published ports, and disk use
 #   lake-skeleton.sh down      stop the stack, keep the scratch data
 #   lake-skeleton.sh destroy   stop the stack and delete every byte it owns
@@ -234,6 +236,38 @@ SQL
 #
 # Run it with: scripts/lake-skeleton.sh verify
 
+# Layer-1 (LUKS) claim for the volume backing $ROOT (#4273-B1).
+#
+# Resolved FROM THE PATH — `findmnt -T`, which answers "what device is $ROOT
+# actually on" — not from the hardcoded three-name ceremony list in
+# scripts/luks-layer1/postcheck.sh, which answers a different question ("are
+# scratch_crypt/lake_crypt/data_crypt mapped"). Those coincide for the real
+# lake but never for this skeleton, whose root is deliberately plain scratch
+# (§11.0): the postcheck list has no entry for it at all, so asking it here
+# would silently report nothing rather than the true answer.
+#
+# Prints one PASS/FAIL/SKIP line and returns 0 (engaged), 1 (resolution
+# failed) or 2 (resolved but not a LUKS mapping) — SKIP, not FAIL, because an
+# unencrypted scratch volume is not a bug in this script, but the caller must
+# still keep it out of a green verdict (mirrors check 5's SKIP-is-never-green
+# rule in lake_verify_at_rest.py).
+layer1_check() {
+  local target="$1" source type
+  source="$(findmnt -T "$target" -no SOURCE 2>/dev/null || true)"
+  if [ -z "$source" ]; then
+    echo "  [FAIL] layer 1: cannot resolve the device backing $target"
+    return 1
+  fi
+  type="$(lsblk -no TYPE "$source" 2>/dev/null | head -1 || true)"
+  if [ "$type" = "crypt" ]; then
+    echo "  [PASS] layer 1: $target is backed by $source, a LUKS mapping (dm-crypt engaged)"
+    return 0
+  fi
+  echo "  [SKIP] layer 1: $target is backed by $source ($type, not dm-crypt) — NOT ENGAGED." \
+       "Layer 2 over an unlocked, unencrypted volume is a weaker claim than it appears (#4273)."
+  return 2
+}
+
 # Test-mode escape hatch: source this file with ASPIRANT_LAKE_SKELETON_LIB=1 to
 # get the pure helpers without dispatching a verb. Mirrors the same hatch in
 # auto-pull.sh so the two test suites read alike.
@@ -288,6 +322,33 @@ case "${1:-}" in
 
   verify)
     compose --profile client run --rm duckdb /work/verify.py
+    ;;
+
+  verify-at-rest)
+    # One combined verdict over both layers (#4273-B1): layer 1 (LUKS) is
+    # checked HERE, on the host, as this user — cryptsetup/findmnt/lsblk see
+    # the block device and dm-crypt state the client container cannot; layer 2
+    # (the catalog + object-store claims) runs INSIDE the client container,
+    # via the #4299 checker, against LAKE_CATALOG_DSN and Garage. One script
+    # cannot make both claims — see #4273-B1's task body — so this verb runs
+    # both and combines their exit codes rather than picking one.
+    echo "=== layer 1 (LUKS) ==="
+    layer1_rc=0
+    layer1_check "$ROOT" || layer1_rc=$?
+    echo
+    echo "=== layer 2 (catalog + object store, #4299) ==="
+    layer2_rc=0
+    compose --profile client run --rm duckdb /work/verify_at_rest.py || layer2_rc=$?
+    echo
+    echo "=== combined verdict ==="
+    if [ "$layer1_rc" -eq 0 ] && [ "$layer2_rc" -eq 0 ]; then
+      echo "  GREEN — layer 1 engaged and layer 2's five catalog/object-store checks are green."
+      exit 0
+    fi
+    [ "$layer1_rc" -ne 0 ] && echo "  layer 1: NOT GREEN (see above)"
+    [ "$layer2_rc" -ne 0 ] && echo "  layer 2: NOT GREEN (see above)"
+    echo "  NOT GREEN"
+    exit 1
     ;;
 
   status)

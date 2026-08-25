@@ -130,6 +130,49 @@ assert_eq "the read-only key name is the one the bootstrap issues" \
 assert_eq "the read-only catalog role name is the one the bootstrap issues" \
   "explorer_ro" "$CATALOG_RO_ROLE"
 
+
+# --- layer1_check (#4273-B1) --------------------------------------------------
+# Mocked findmnt/lsblk rather than the box's real disk layout: a bash function
+# shadows the PATH binary of the same name when layer1_check calls it bare, so
+# this is deterministic regardless of whether the host running the suite
+# happens to have a LUKS mapping anywhere.
+
+assert_rc() {
+  local label="$1" want="$2" got="$3"
+  if [ "$want" = "$got" ]; then
+    PASS=$((PASS + 1))
+    echo "[PASS] $label"
+  else
+    FAIL=$((FAIL + 1))
+    echo "[FAIL] $label (want rc=$want, got rc=$got)"
+  fi
+}
+
+# `rc=0` default + `|| rc=$?`, not `out=$(...); rc=$?` — under this file's own
+# `set -e`, a plain failing command substitution assignment would abort the
+# suite right here rather than let the next assertion inspect it (the same
+# hazard `layer1_check`'s own caller in lake-skeleton.sh avoids the same way).
+
+findmnt() { echo "/dev/mapper/testcrypt"; }
+lsblk() { echo "crypt"; }
+rc=0; out="$(layer1_check /fake/target)" || rc=$?
+assert_rc "a LUKS-backed volume is PASS (rc 0)" "0" "$rc"
+assert_eq "and the message says engaged" \
+  "1" "$(echo "$out" | grep -c 'PASS.*LUKS mapping')"
+
+findmnt() { echo "/dev/sda"; }
+lsblk() { echo "disk"; }
+rc=0; out="$(layer1_check /fake/target)" || rc=$?
+assert_rc "an unencrypted volume is SKIP (rc 2), not FAIL" "2" "$rc"
+assert_eq "and the message says NOT ENGAGED rather than failing" \
+  "1" "$(echo "$out" | grep -c 'SKIP.*NOT ENGAGED')"
+
+findmnt() { :; }
+rc=0; out="$(layer1_check /fake/target)" || rc=$?
+assert_rc "an unresolvable device is FAIL (rc 1)" "1" "$rc"
+
+unset -f findmnt lsblk
+
 echo
 if [ "$FAIL" -gt 0 ]; then
   echo "FAILED: $FAIL failed, $PASS passed"
