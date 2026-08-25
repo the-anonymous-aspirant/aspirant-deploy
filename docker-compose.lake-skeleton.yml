@@ -104,12 +104,21 @@ services:
     volumes:
       - ./scripts/lake_skeleton_verify.py:/work/verify.py:ro
       - ./scripts/lake_skeleton_fixtures.py:/work/fixtures.py:ro
-      # The envelope machinery (dek_envelope, envelope_store, kek_loader) imported
-      # by the fixtures loader; mounted read-only beside it at /work/kek.
+      # The REAL ingest runner (#4271), a separate writer from the synthetic
+      # fixtures loader above and deliberately not a flag on it: the loader's
+      # safety rests on being unmistakably fake (§11.0), and a --real switch
+      # would put that one flag away from being off.
+      - ./scripts/lake_ingest.py:/work/ingest.py:ro
+      # The manifest and the tree it names, bind-mounted read-only at a fixed
+      # path so `lake-skeleton.sh ingest <path>` needs no per-run compose edit.
+      # Defaulted to the repo itself so `compose config` renders without one.
+      - ${LAKE_INGEST_SOURCE:-./scripts}:/source:ro
+      # The envelope machinery (dek_envelope, envelope_store, kek_loader)
+      # imported by BOTH writers; mounted read-only beside them at /work/kek.
       - ./scripts/kek:/work/kek:ro
       # The catalog schema + sensitivity-intake contract (#4270), imported by
-      # BOTH the loader and the verifier — the loader writes the columns, the
-      # verifier checks them, and neither may carry its own copy of the DDL.
+      # the loader, the verifier and the real ingest runner — they write and
+      # check the same columns, and none may carry its own copy of the DDL.
       - ./scripts/lake:/work/lake:ro
     networks:
       - lake
