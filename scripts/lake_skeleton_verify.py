@@ -22,6 +22,11 @@ import sys
 import boto3
 import duckdb
 
+# The catalog contract (#4270) — imported so the sensitivity-source vocabulary
+# below is the same object the loader writes, not a copy that drifts from it.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lake"))
+import catalog  # noqa: E402
+
 BUCKET = os.environ["LAKE_S3_BUCKET"]
 ENDPOINT = os.environ["LAKE_S3_ENDPOINT"]
 REGION = os.environ["LAKE_S3_REGION"]
@@ -236,6 +241,10 @@ else:
         "document", "image", "audio", "message_export",
         "telegram", "sms", "email", "application/pdf", "image/png",
         "audio/wav", "application/json",
+        # sensitivity_source (#4270): structural vocabulary, not prose. Taken
+        # from the contract module so adding a source there cannot silently
+        # start failing this guardrail.
+        catalog.SOURCE_DECLARED, catalog.SOURCE_DEFAULTED,
     }
     leaks = []
     for table in EXPECTED:
@@ -262,6 +271,43 @@ else:
         "SELECT count(*) FROM asset_inventory WHERE date_part('year', ingested_at) <> 2999"
     ).fetchone()[0]
     check("Fixture dates are all in 2999", dates == 0, f"{dates} row(s) outside 2999")
+
+    # --- the phase-1 catalog contract (#4270 / #4238-A2) --------------------
+    #
+    # The skeleton is synthetic, but the *schema* it writes is the one the real
+    # ingest runner (#4271) and the explorer's real-record views (#4272) code
+    # against. Checking it here means the contract is exercised by the seed on
+    # every run rather than only by catalog.py's own unit self-test.
+    inventory_cols = {c[0] for c in con.execute("DESCRIBE lake.main.asset_inventory").fetchall()}
+    missing_cols = [c for c in catalog.ASSET_INVENTORY_FIELDS if c not in inventory_cols]
+    check("asset_inventory carries the phase-1 provenance columns", not missing_cols,
+          f"missing: {missing_cols}" if missing_cols else f"{len(catalog.ASSET_INVENTORY_FIELDS)} columns")
+
+    run_cols = {c[0] for c in con.execute("DESCRIBE lake.main.ingest_runs").fetchall()}
+    missing_run_cols = [c for c in catalog.INGEST_RUNS_FIELDS if c not in run_cols]
+    check("ingest_runs carries the phase-1 audit columns", not missing_run_cols,
+          f"missing: {missing_run_cols}" if missing_run_cols else f"{len(catalog.INGEST_RUNS_FIELDS)} columns")
+
+    # The invariant that matters, asserted over the data rather than the DDL: a
+    # row's sensitivity and its key material have to agree. A high row missing
+    # either half claims an encryption it does not have; a normal row carrying
+    # either half means the loader's branches disagreed. catalog.asset_row()
+    # refuses both at write time — this proves the refusal actually held.
+    incoherent = con.execute(
+        """
+        SELECT count(*) FROM asset_inventory
+        WHERE (sensitivity = 'high'   AND (wrapped_dek IS NULL OR kek_version IS NULL))
+           OR (sensitivity = 'normal' AND (wrapped_dek IS NOT NULL OR kek_version IS NOT NULL))
+        """
+    ).fetchone()[0]
+    check("Every row's sensitivity agrees with its key material", incoherent == 0,
+          f"{incoherent} row(s) whose sensitivity and wrapped DEK disagree")
+
+    unsourced = con.execute(
+        "SELECT count(*) FROM asset_inventory WHERE sensitivity_source IS NULL"
+    ).fetchone()[0]
+    check("Every row records how its sensitivity was decided", unsourced == 0,
+          f"{unsourced} row(s) with no sensitivity_source")
 
 # --- 4. the explorer's credentials are read-only, PROVEN by being denied -----
 #
