@@ -132,6 +132,30 @@ What is *not* tolerated is a systemic refusal — no KEK — which aborts, becau
 retrying it ten thousand times produces ten thousand identical failures and no
 data.
 
+### 4. The catalog must match the contract before the run starts
+
+`ensure_tables` creates `asset_inventory` and `ingest_runs` when they are absent
+and, when they already exist, **verifies their columns against
+`scripts/lake/catalog.py` and refuses the run if they differ** (exit 4).
+
+It is not paranoia; it is the #4271 dogfood finding. The live skeleton catalog
+still carried a 7-column `ingest_runs` and a 9-column `asset_inventory` — the
+schema from before #4134 and #4270 widened them. `CREATE TABLE IF NOT EXISTS`
+bound to those stale tables without complaint, the run completed its pre-flight
+and its encrypt pass, and then died on the last statement with
+
+```
+Binder Error: table ingest_runs has 7 columns but 12 values were supplied
+```
+
+*after* a `high` blob had already been PUT to Garage. An object in the store
+with no row naming it is precisely the orphan the commit-marker ordering exists
+to bound, and here the runner was manufacturing one. A catalog this runner
+cannot write is a reason not to start, not a reason to fail on the last line.
+
+The refusal names the table, the missing columns and the remedy, because the
+reader is someone whose bulk load just stopped.
+
 ## Idempotence keys on `sha256`, globally
 
 §2 defines `asset_inventory` as one row per content-addressed bronze blob, so
