@@ -121,6 +121,15 @@ class ManifestError(ValueError):
     """
 
 
+class CatalogSchemaError(RuntimeError):
+    """The catalog's tables do not match the contract this runner writes.
+
+    Raised by `DuckDBCatalogStore.ensure_tables` before the run starts, so a
+    catalog left on an older schema stops the ingest at the door instead of
+    after it has already PUT objects it cannot then record.
+    """
+
+
 class MissingKekError(RuntimeError):
     """A `high` record must be written and no KEK is loaded — the §9 refusal.
 
@@ -248,18 +257,62 @@ class DuckDBCatalogStore:
     `CREATE TABLE IF NOT EXISTS`, never `DROP` — the opposite of the synthetic
     loader, which replaces its tables on every seed. A real load appends to a
     catalog that already holds rows it did not write.
+
+    But `IF NOT EXISTS` alone is a trap, and this is how it was found (#4271
+    dogfood, 2026-08-25): the live skeleton catalog still carried a 7-column
+    `ingest_runs` and a 9-column `asset_inventory` — the schema from before
+    #4134 and #4270 widened them. `IF NOT EXISTS` silently bound to those stale
+    tables, the run did its whole pre-flight and encrypt pass, and then died on
+    the last statement with
+
+        Binder Error: table ingest_runs has 7 columns but 12 values were supplied
+
+    after a `high` blob had already been PUT. So `ensure_tables` verifies the
+    columns of a table it did not create, and refuses up front when they do not
+    match the contract. A catalog this runner cannot write is a reason not to
+    start, not a reason to fail on the last line.
     """
 
     def __init__(self, con):
         self.con = con
 
+    def _existing_columns(self, table: str) -> list[str] | None:
+        """Column names of `table` in declared order, or None if absent."""
+        rows = self.con.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = ? ORDER BY ordinal_position",
+            [table],
+        ).fetchall()
+        return [r[0] for r in rows] or None
+
+    def _ensure_table(self, table: str, columns_ddl: str, fields: tuple) -> None:
+        existing = self._existing_columns(table)
+        if existing is None:
+            self.con.execute(f"CREATE TABLE {table} ({columns_ddl})")
+            return
+        if tuple(existing) == tuple(fields):
+            return
+        missing = [f for f in fields if f not in existing]
+        extra = [c for c in existing if c not in fields]
+        raise CatalogSchemaError(
+            f"the catalog's '{table}' does not match the contract in scripts/lake/catalog.py: "
+            f"it has {len(existing)} column(s), the contract declares {len(fields)}"
+            + (f"; missing {missing}" if missing else "")
+            + (f"; unexpected {extra}" if extra else "")
+            + (
+                "; same columns in a different order" if not missing and not extra else ""
+            )
+            + ". This catalog predates the current contract — re-seed the skeleton "
+            "(`lake-skeleton.sh seed`, which replaces its tables) or migrate the table "
+            "before ingesting. Refusing up front rather than failing on the INSERT after "
+            "objects have already been written."
+        )
+
     def ensure_tables(self) -> None:
-        self.con.execute(
-            f"CREATE TABLE IF NOT EXISTS asset_inventory ({catalog.ASSET_INVENTORY_COLUMNS})"
+        self._ensure_table(
+            "asset_inventory", catalog.ASSET_INVENTORY_COLUMNS, catalog.ASSET_INVENTORY_FIELDS
         )
-        self.con.execute(
-            f"CREATE TABLE IF NOT EXISTS ingest_runs ({catalog.INGEST_RUNS_COLUMNS})"
-        )
+        self._ensure_table("ingest_runs", catalog.INGEST_RUNS_COLUMNS, catalog.INGEST_RUNS_FIELDS)
 
     def known_sha256(self) -> set:
         """Every blob already catalogued — the skip set for a re-run.
@@ -603,3 +656,6 @@ if __name__ == "__main__":
     except MissingKekError as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         raise SystemExit(3)
+    except CatalogSchemaError as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        raise SystemExit(4)
