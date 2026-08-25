@@ -107,6 +107,10 @@ services:
       # The envelope machinery (dek_envelope, envelope_store, kek_loader) imported
       # by the fixtures loader; mounted read-only beside it at /work/kek.
       - ./scripts/kek:/work/kek:ro
+      # The catalog schema + sensitivity-intake contract (#4270), imported by
+      # BOTH the loader and the verifier — the loader writes the columns, the
+      # verifier checks them, and neither may carry its own copy of the DDL.
+      - ./scripts/lake:/work/lake:ro
     networks:
       - lake
 
