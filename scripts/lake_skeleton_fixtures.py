@@ -38,9 +38,17 @@ import duckdb
 # format + object crypto (dek_envelope), the storage gate (envelope_store), and
 # the fail-closed KEK loader (kek_loader) live in scripts/kek/ — mounted at
 # ./kek beside this script both on disk and in the client container (/work/kek).
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "kek"))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_HERE, "kek"))
 from envelope_store import storage_body_and_wrapped_dek  # noqa: E402
 from kek_loader import ENV_KEK_FINGERPRINT, ENV_KEK_HEX, load_kek_from_env  # noqa: E402
+
+# The catalog schema + sensitivity-intake contract (#4270 / #4238-A2), shared
+# with the real ingest runner (#4271) so the synthetic seed and the real load
+# write the same columns under the same rules. Mounted at /work/lake in the
+# client container beside /work/kek.
+sys.path.insert(0, os.path.join(_HERE, "lake"))
+import catalog  # noqa: E402
 
 BUCKET = os.environ["LAKE_S3_BUCKET"]
 ENDPOINT = os.environ["LAKE_S3_ENDPOINT"]
@@ -90,6 +98,10 @@ PEOPLE = [
 ]
 # Dates are all in 2999: no real record can plausibly carry them.
 FAKE_YEAR = 2999
+
+# The fixtures' own dataset id. Prefixed like every other fake value so a
+# screenshot of the catalog never raises "wait, is that a real dataset?".
+SYNTHETIC_DATASET_ID = "SYNTHETIC — FAKE-DATASET-000"
 
 
 # --------------------------------------------------------------------------
@@ -182,14 +194,24 @@ def put_blob(payload, stored_body=None):
 BLOBS = []
 
 
-def blob(kind, source_path, mime, payload, sensitivity="normal"):
+def blob(kind, source_path, mime, payload, sensitivity=None):
+    # The declared sensitivity goes through the intake contract rather than
+    # straight into the row (#4270): the fixtures are the contract's first
+    # caller, so the synthetic seed proves the fail-closed rule on every run
+    # instead of leaving it exercised only by unit tests. Note the default is
+    # now None, not "normal" — under the contract an undeclared blob resolves
+    # to high and gets encrypted, so the fixtures below declare "normal"
+    # explicitly wherever they mean it.
+    sensitivity, sensitivity_source = catalog.resolve_sensitivity(sensitivity)
+
     # §9 layer 2: a sensitivity=high blob is envelope-encrypted before it reaches
     # Garage; its wrapped DEK rides in the inventory row (base64). Normal blobs
     # store as-is with no wrapped DEK.
+    is_high = sensitivity == catalog.SENSITIVITY_HIGH
     stored_body, wrapped_dek = storage_body_and_wrapped_dek(
-        payload, sensitivity, _get_kek() if sensitivity == "high" else b"", KEK_VERSION
+        payload, sensitivity, _get_kek() if is_high else b"", KEK_VERSION
     )
-    digest, key, size = put_blob(payload, stored_body=stored_body if sensitivity == "high" else None)
+    digest, key, size = put_blob(payload, stored_body=stored_body if is_high else None)
     BLOBS.append(
         {
             "kind": kind,
@@ -199,7 +221,11 @@ def blob(kind, source_path, mime, payload, sensitivity="normal"):
             "mime": mime,
             "size_bytes": size,
             "sensitivity": sensitivity,
+            "sensitivity_source": sensitivity_source,
             "wrapped_dek": wrapped_dek,
+            # Only a high blob has a DEK to wrap, so only a high row names the
+            # key that wraps it.
+            "kek_version": KEK_VERSION if is_high else None,
         }
     )
     return digest
@@ -213,6 +239,7 @@ pdf_invoice = blob(
     "/synthetic/documents/fake-invoice-2999.pdf",
     "application/pdf",
     make_pdf("SYNTHETIC INVOICE - NOT REAL", "Billed to: SYNTHETIC - Ada Notarealperson"),
+    sensitivity="normal",
 )
 pdf_medical = blob(
     "document",
@@ -225,22 +252,26 @@ pdf_medical = blob(
 # Images plus their thumbnails. The thumbnail is its own blob: §2 puts derived
 # artifacts in silver, and the inventory row points at both.
 img_full = blob(
-    "image", "/synthetic/photos/fake-photo-teal.png", "image/png", make_png(64, 48, (0, 128, 128))
+    "image", "/synthetic/photos/fake-photo-teal.png", "image/png", make_png(64, 48, (0, 128, 128)),
+    sensitivity="normal",
 )
 img_thumb = blob(
     "image",
     "/synthetic/photos/.thumbs/fake-photo-teal.png",
     "image/png",
     make_png(16, 12, (0, 128, 128)),
+    sensitivity="normal",
 )
 img2_full = blob(
-    "image", "/synthetic/photos/fake-photo-amber.png", "image/png", make_png(64, 48, (200, 140, 0))
+    "image", "/synthetic/photos/fake-photo-amber.png", "image/png", make_png(64, 48, (200, 140, 0)),
+    sensitivity="normal",
 )
 img2_thumb = blob(
     "image",
     "/synthetic/photos/.thumbs/fake-photo-amber.png",
     "image/png",
     make_png(16, 12, (200, 140, 0)),
+    sensitivity="normal",
 )
 
 # Audio: a valid-enough WAV header plus silence — the explorer needs a row and a
@@ -248,7 +279,9 @@ img2_thumb = blob(
 wav = b"RIFF" + struct.pack("<I", 36 + 800) + b"WAVEfmt " + struct.pack(
     "<IHHIIHH", 16, 1, 1, 8000, 8000, 1, 8
 ) + b"data" + struct.pack("<I", 800) + b"\x80" * 800
-audio_blob = blob("audio", "/synthetic/audio/fake-voice-memo.wav", "audio/wav", wav)
+audio_blob = blob(
+    "audio", "/synthetic/audio/fake-voice-memo.wav", "audio/wav", wav, sensitivity="normal"
+)
 
 # A raw message export, standing in for the mbox/JSON/XML exports of §2.
 messages_export = blob(
@@ -256,6 +289,7 @@ messages_export = blob(
     "/synthetic/messages/fake-telegram-export.json",
     "application/json",
     b'[{"from":"SYNTHETIC - Carol Placeholder","text":"FAKE-MESSAGE-001"}]',
+    sensitivity="normal",
 )
 
 print(f"bronze: {len(BLOBS)} content-addressed blobs")
@@ -296,21 +330,28 @@ def replace(table, columns, rows):
 
 
 # --- silver: asset inventory (one row per blob, §2's blob catalog) ---------
+# Schema and row order come from scripts/lake/catalog.py (#4270), shared with the
+# real ingest runner. catalog.asset_row() refuses an incoherent row — a high row
+# with no wrapped DEK, a normal row carrying one — so the seed cannot write the
+# very mismatch #4273's verification harness exists to detect.
 replace(
     "asset_inventory",
-    """
-    sha256 VARCHAR, object_key VARCHAR, source_path VARCHAR, mime VARCHAR,
-    size_bytes BIGINT, kind VARCHAR, sensitivity VARCHAR,
-    wrapped_dek VARCHAR, ingested_at DATE, ingest_run_id VARCHAR
-    """,
+    catalog.ASSET_INVENTORY_COLUMNS,
     [
-        (
-            b["sha256"], b["object_key"], b["source_path"], b["mime"],
-            b["size_bytes"], b["kind"], b["sensitivity"],
+        catalog.asset_row(
+            sha256=b["sha256"], object_key=b["object_key"], source_path=b["source_path"],
+            mime=b["mime"], size_bytes=b["size_bytes"], kind=b["kind"],
+            sensitivity=b["sensitivity"], sensitivity_source=b["sensitivity_source"],
             # base64 wrapped DEK for a sensitivity=high blob; NULL otherwise. The
             # read path (explorer, #4199) keys "is this encrypted?" on this column.
-            b["wrapped_dek"],
-            f"{FAKE_YEAR}-01-0{(i % 9) + 1}", f"FAKE-RUN-{(i % 3) + 1:03d}",
+            wrapped_dek=b["wrapped_dek"], kek_version=b["kek_version"],
+            ingested_at=f"{FAKE_YEAR}-01-0{(i % 9) + 1} 0{(i % 9) + 1}:11:11",
+            ingest_run_id=f"FAKE-RUN-{(i % 3) + 1:03d}",
+            # The fixtures are their own dataset, and an obviously fake one — a
+            # real dataset_id points at an operator intake record (#4269).
+            dataset_id=SYNTHETIC_DATASET_ID,
+            retention_class="SYNTHETIC — fake-retention",
+            jurisdiction="SYNTHETIC — fake-jurisdiction",
         )
         for i, b in enumerate(BLOBS)
     ],
@@ -403,16 +444,28 @@ replace(
 )
 
 # --- silver: the connector run ledger (§8's Runs & health page) -----------
+# Schema and row order from scripts/lake/catalog.py (#4270). The ledger gained
+# the audit columns a real load has to answer for — which dataset, which runner,
+# which KEK, and how the objects split by sensitivity.
 replace(
     "ingest_runs",
-    """
-    run_id VARCHAR, source VARCHAR, started_on DATE, duration_seconds DOUBLE,
-    files_seen BIGINT, bytes_ingested BIGINT, status VARCHAR
-    """,
+    catalog.INGEST_RUNS_COLUMNS,
     [
-        ("FAKE-RUN-001", "SYNTHETIC — fake-source-a", f"{FAKE_YEAR}-01-01", 11.11, 3, 1111, "success"),
-        ("FAKE-RUN-002", "SYNTHETIC — fake-source-b", f"{FAKE_YEAR}-01-01", 22.22, 2, 2222, "success"),
-        ("FAKE-RUN-003", "SYNTHETIC — fake-source-c", f"{FAKE_YEAR}-01-01", 33.33, 1, 3333, "failed"),
+        catalog.run_row(
+            run_id=f"FAKE-RUN-{n:03d}", source=f"SYNTHETIC — fake-source-{suffix}",
+            started_on=f"{FAKE_YEAR}-01-01 0{n}:11:11", duration_seconds=duration,
+            files_seen=files, bytes_ingested=written, status=status,
+            dataset_id=SYNTHETIC_DATASET_ID, runner_version="FAKE-skeleton-0.0.0",
+            # Only the run that wrote the one high blob names a KEK; a run with
+            # nothing high to wrap has no key to record.
+            kek_version=KEK_VERSION if high else None,
+            objects_high=high, objects_normal=files - high,
+        )
+        for n, suffix, duration, files, written, status, high in (
+            (1, "a", 11.11, 3, 1111, "success", 1),
+            (2, "b", 22.22, 2, 2222, "success", 0),
+            (3, "c", 33.33, 1, 3333, "failed", 0),
+        )
     ],
 )
 
