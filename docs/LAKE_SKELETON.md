@@ -151,11 +151,20 @@ in pure Python (`zlib` + `struct` for PNG, hand-written object syntax for PDF)
 so the client image needs no image-processing stack for three fixture pictures.
 
 **Silver** — `asset_inventory` (one row per blob: hash, key, source path, mime,
-size, kind, **sensitivity**, ingest date, run id), `extracted_text`,
+size, kind, **sensitivity**, ingest timestamp, run id, plus the phase-1
+provenance columns — dataset id, sensitivity source, retention class,
+jurisdiction, KEK version), `extracted_text`,
 `image_metadata` (dimensions, camera, thumbnail ref), `audio_transcripts`,
 `messages` (unified across telegram/sms/email per §2, with an attachment blob
 ref), `finance_transactions` (a typed table export standing in for a Postgres
 source), and `ingest_runs` (the connector ledger §8.6's page reads).
+
+The schema of `asset_inventory` and `ingest_runs`, and the rule that decides a
+blob's sensitivity at intake, are **not** declared here — they live in
+`scripts/lake/catalog.py` and are shared with the real ingest runner (#4271) and
+the explorer's real-record views (#4272). The seed imports them like every other
+writer, so seeding exercises the real contract rather than a copy of it. See
+[data-lake-design/REAL_DATA_CATALOG.md](data-lake-design/REAL_DATA_CATALOG.md).
 
 **Gold** — `gold_finance_monthly`, `gold_timeline`, `gold_source_freshness`
 (green/amber/red, which is what the Overview page renders).
