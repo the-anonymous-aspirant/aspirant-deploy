@@ -455,6 +455,101 @@ def test_unreadable_record_is_partial(kek):
 
 
 # --------------------------------------------------------------------------
+# Catalog schema drift — found by dogfooding the merged runner, 2026-08-25.
+# --------------------------------------------------------------------------
+
+
+def test_catalog_on_an_older_schema_is_refused_before_anything_is_written(kek):
+    """A catalog predating the contract stops the run at the door.
+
+    This is the defect the #4271 dogfood surfaced. The live skeleton catalog
+    still carried the pre-#4134 / pre-#4270 tables (7-column `ingest_runs`,
+    9-column `asset_inventory`), `CREATE TABLE IF NOT EXISTS` bound to them
+    silently, and the run died on its final INSERT —
+
+        Binder Error: table ingest_runs has 7 columns but 12 values were supplied
+
+    — *after* a high blob had already been PUT to Garage. An object written
+    with no row to name it is precisely the orphan the commit-marker ordering
+    exists to bound, so the check has to happen before the first record.
+    """
+    s3, bucket = fresh_bucket()
+    con = duckdb.connect()
+    # The pre-#4270 shapes, verbatim.
+    con.execute(
+        "CREATE TABLE ingest_runs (run_id VARCHAR, source VARCHAR, started_on DATE, "
+        "duration_seconds DOUBLE, files_seen BIGINT, bytes_ingested BIGINT, status VARCHAR)"
+    )
+    con.execute(
+        "CREATE TABLE asset_inventory (sha256 VARCHAR, object_key VARCHAR, source_path VARCHAR, "
+        "mime VARCHAR, size_bytes BIGINT, kind VARCHAR, sensitivity VARCHAR, "
+        "ingested_at DATE, ingest_run_id VARCHAR)"
+    )
+    store = lake_ingest.DuckDBCatalogStore(con)
+
+    with tempfile.TemporaryDirectory() as root:
+        manifest_path = write_manifest(root, [("note.txt", NOTE, "high")])
+        refused = None
+        try:
+            lake_ingest.ingest(
+                lake_ingest.load_manifest(manifest_path),
+                s3=s3, bucket=bucket, store=store, kek=kek,
+            )
+        except lake_ingest.CatalogSchemaError as exc:
+            refused = str(exc)
+
+    check("an outdated catalog is refused", refused is not None)
+    if refused:
+        # The message has to name the table and the remedy: the reader is
+        # someone whose bulk load just stopped, and 'schema mismatch' alone
+        # sends them to read the source.
+        check("the refusal names the table", "asset_inventory" in refused, refused[:120])
+        check("the refusal names the missing columns", "wrapped_dek" in refused, refused[:200])
+        check("the refusal names the remedy", "seed" in refused, refused[:200])
+
+    check("nothing was PUT before the refusal", stored(s3, bucket) == {}, str(sorted(stored(s3, bucket))))
+    check("no run row was written into the stale table",
+          con.execute("SELECT count(*) FROM ingest_runs").fetchone()[0] == 0)
+
+
+def test_a_contract_shaped_catalog_is_accepted_and_appended_to(kek):
+    """The other half: an existing table that DOES match is reused, not dropped.
+
+    A real load appends to a catalog holding rows it did not write, so the
+    guard must not become a reason to recreate the table.
+    """
+    s3, bucket = fresh_bucket()
+    con = duckdb.connect()
+    con.execute(f"CREATE TABLE asset_inventory ({catalog.ASSET_INVENTORY_COLUMNS})")
+    con.execute(f"CREATE TABLE ingest_runs ({catalog.INGEST_RUNS_COLUMNS})")
+    con.execute(
+        "INSERT INTO asset_inventory VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        list(
+            catalog.asset_row(
+                sha256="f" * 64, object_key="bronze/blobs/sha256/ff/ff/" + "f" * 64,
+                source_path="/pre-existing.txt", mime="text/plain", size_bytes=3,
+                kind="document", sensitivity="normal", sensitivity_source="declared",
+                wrapped_dek=None, ingested_at="2026-08-01 00:00:00",
+                ingest_run_id="EARLIER-RUN", dataset_id="EARLIER-DATASET",
+            )
+        ),
+    )
+    store = lake_ingest.DuckDBCatalogStore(con)
+
+    with tempfile.TemporaryDirectory() as root:
+        manifest_path = write_manifest(root, [("invoice.txt", INVOICE, "normal")])
+        summary = lake_ingest.ingest(
+            lake_ingest.load_manifest(manifest_path),
+            s3=s3, bucket=bucket, store=store, kek=kek,
+        )
+
+    check("a contract-shaped catalog is accepted",
+          summary["status"] == catalog.RUN_STATUS_SUCCESS, summary["status"])
+    check("the pre-existing row survives the run",
+          con.execute("SELECT count(*) FROM asset_inventory").fetchone()[0] == 2)
+
+
+# --------------------------------------------------------------------------
 # Manifest validation — every check here is one the runner would otherwise hit
 # mid-load, which is the expensive place to find a typo.
 # --------------------------------------------------------------------------
@@ -529,6 +624,9 @@ def main():
     test_rerun_is_idempotent(kek)
     print("\npartial run on an unreadable record:")
     test_unreadable_record_is_partial(kek)
+    print("\ncatalog schema drift:")
+    test_catalog_on_an_older_schema_is_refused_before_anything_is_written(kek)
+    test_a_contract_shaped_catalog_is_accepted_and_appended_to(kek)
     print("\nmanifest validation:")
     test_manifest_validation()
 
