@@ -64,7 +64,7 @@ fixtures never faced.
 
 | column | question it answers |
 |---|---|
-| `dataset_id` | Where did this come from? Joins back to the operator's written intake record (#4269). |
+| `dataset_id` | Where did this come from? Joins back to the operator's written intake record (#4269, `DATASET_INTAKE.md`). |
 | `sensitivity_source` | Who decided it was sensitive — a human, or a default? |
 | `retention_class` | May it still be here? |
 | `jurisdiction` | Whose law governs it? |
