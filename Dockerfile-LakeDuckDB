@@ -1,6 +1,14 @@
 # DuckDB client for the phase-0 lake skeleton (DATA_LAKE_DESIGN.md §11.1).
 # Carries the ducklake + httpfs extensions baked in, so the container works on
 # the cell's degraded link without reaching out to the extension repository.
+#
+# EDITING THIS FILE IS NOT ENOUGH. docker-compose.lake-skeleton.yml consumes a
+# published digest, so a change here does nothing until the image is rebuilt,
+# pushed, and that digest updated — in this same PR. #4134 added `cryptography`
+# below without those steps and left `lake-skeleton.sh seed` and `ingest` dying
+# at import for three days. `tests/lake_client_image_unit.sh` now fails when the
+# pin is behind this file; docs/LAKE_SKELETON.md § Republishing the client image
+# carries the four commands.
 FROM python:3.12-slim
 
 # duckdb >= 1.5.2 is the floor for DuckLake v1.0 (ducklake.select stable docs).
