@@ -39,10 +39,19 @@ them):
 | `catalog` | `ghcr.io/the-anonymous-aspirant/lake-catalog-postgres:16-alpine` | DuckLake catalog database (`lake_catalog_skeleton`). |
 | `duckdb` | `ghcr.io/the-anonymous-aspirant/aspirant-lake-duckdb:1.5.4` | On-demand DuckDB client (`client` profile); the query engine, not a server. |
 
-All three are GHCR mirrors of upstream. The cell cannot reach Docker Hub — its
-Wi-Fi dongle TLS-times-out against `registry-1.docker.io` while GHCR answers in
-under a second — so upstream images are mirrored from the dev box and pinned.
-Pinning also keeps the stack off the surprise-upgrade path §4 warns about.
+All three come from GHCR. The cell cannot reach Docker Hub — its Wi-Fi dongle
+TLS-times-out against `registry-1.docker.io` while GHCR answers in under a
+second — so images are staged from the dev box and pinned by digest. Pinning
+also keeps the stack off the surprise-upgrade path §4 warns about.
+
+**Two of the three are mirrors; the third is ours.** `garage` and `catalog` are
+registry-to-registry copies of upstream tags — upgrading either means
+re-mirroring. `aspirant-lake-duckdb` is **built from this repo's
+`Dockerfile-LakeDuckDB`**, which makes it the only image here whose source can
+change under a normal PR. Editing that Dockerfile changes what the repo
+declares; the digest above keeps serving whatever was last pushed, and nothing
+in the deploy path notices the gap. See § Republishing the client image — the
+step is part of the same PR as the Dockerfile edit, not a follow-up.
 
 ### Versions and why these ones
 
@@ -52,6 +61,46 @@ Pinning also keeps the stack off the surprise-upgrade path §4 warns about.
 | DuckDB | `1.5.4` | Current stable. DuckLake v1.0 requires ≥ 1.5.2. |
 | DuckLake | v1.0 | [ducklake.select](https://ducklake.select/) stable. |
 | Catalog Postgres | `16-alpine` | Matches the fleet's existing Postgres major. |
+
+### Republishing the client image
+
+Any change to `Dockerfile-LakeDuckDB` — a pip pin, a baked extension, the base
+tag — takes effect only when the image is rebuilt, pushed, and the digest in
+`docker-compose.lake-skeleton.yml` is updated. All three, in the PR that edits
+the Dockerfile. A Dockerfile edit without them is a no-op that reads like a
+change.
+
+```bash
+# 1. Build, and check the result BEFORE it is anywhere public.
+docker build -f Dockerfile-LakeDuckDB -t aspirant-lake-duckdb:candidate .
+LAKE_CLIENT_IMAGE=aspirant-lake-duckdb:candidate ./tests/lake_client_image_unit.sh
+
+# 2. Publish. Needs a GHCR credential with write:packages — an outward-facing
+#    step, and the one part of this an agent does not do unasked.
+docker tag aspirant-lake-duckdb:candidate \
+  ghcr.io/the-anonymous-aspirant/aspirant-lake-duckdb:<duckdb-version>
+docker push ghcr.io/the-anonymous-aspirant/aspirant-lake-duckdb:<duckdb-version>
+
+# 3. Repin: put the published digest in docker-compose.lake-skeleton.yml.
+docker buildx imagetools inspect \
+  ghcr.io/the-anonymous-aspirant/aspirant-lake-duckdb:<duckdb-version> \
+  --format '{{.Manifest.Digest}}'
+
+# 4. Confirm the pin, not the local build, is what now satisfies the Dockerfile.
+./tests/lake_client_image_unit.sh
+```
+
+The tag tracks the DuckDB version, so a `duckdb==` bump means a new tag as well
+as a new digest — otherwise one tag names two images and step 3 stops being a
+rollback point.
+
+`tests/lake_client_image_unit.sh` is what makes the omission loud: it probes the
+**pinned** digest and fails when the published image is missing something the
+Dockerfile declares. It went in after exactly that omission (#4290) — #4134 added
+`cryptography==46.0.3` on 2026-08-24 and did not repin, so `seed` and `ingest`
+both died at `import` inside the container for three days while every suite in
+`tests/` stayed green. None of them had ever run the pinned image; they all
+pip-install their dependencies into `python:3.11-slim` at test time.
 
 ### Two deliberate divergences from the design spec
 
