@@ -166,6 +166,46 @@ Git-log walk per surface (procedure_investigation.md §3 step 3, run
 publish lane, SHA metric, or updated CI/CD text; no remediation item is
 already fixed.
 
+## Addendum 2026-08-28 — a fourth publish surface the inventory missed (#4441)
+
+`aspirant-lake-duckdb` is a first-party image this document's inventory does
+not list. It predates the decision and does not live in a repo of its own:
+`Dockerfile-LakeDuckDB` sits inside **aspirant-deploy** and publishes to a
+GHCR package of a different name, which `docker-compose.lake-skeleton.yml`
+then consumes **by digest**.
+
+That third element is what makes it a different shape rather than a missing
+row. `scripts/aspirant_publish_poller.py`'s `RepoConfig` (system_3, task
+#2346-A1) assumes *clone name == GHCR package name == build-context root* and
+has no concept of a compose pin to update after a push. Adding the lake client
+to `REPOS` is therefore not a one-line append: either `RepoConfig` grows a
+variant carrying `(context_repo, dockerfile, package, pin_file)`, or the lake
+client gets its own poller arm. That work is system_3-side and is routed
+there; #4441 covers the aspirant-deploy half.
+
+The cost of the omission is measured, not hypothetical: PR #68 (2026-08-24)
+added `cryptography` to the Dockerfile and did not repin, and
+`lake-skeleton.sh seed` and `ingest` died at `import` inside the container for
+three days while every suite in `tests/` stayed green (#4290). PR #51
+(2026-07-18) had done the same edit correctly — nothing failed a procedure,
+because there was no procedure, only a habit.
+
+Two things now exist that did not:
+
+- `tests/lake_client_image_unit.sh` (#4290) — the **detection** half. It
+  compares the pin against the Dockerfile and fails when the published image
+  is behind it.
+- `scripts/publish-lake-client.sh` (#4441) — the **production** half. Build,
+  verify, publish, repin, re-verify as one command, with the push gated on an
+  explicit flag *and* a probed `write:packages` scope, and the repin welded to
+  the push so it cannot be the step that is skipped.
+
+Neither closes the automation gap this document's option (a) describes; they
+make the manual lane correct and loud while the poller question is open. The
+`write:packages` credential remains unprovisioned — measured 2026-08-28,
+`gh auth status` reports scopes `gist`, `read:org`, `repo` — so open question 2
+below is still open, and it now gates a second surface.
+
 ## Open questions for the operator
 
 1. Ratify (a) + backstop (merge this PR), or prefer (b) (comment)?

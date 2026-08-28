@@ -70,6 +70,35 @@ tag — takes effect only when the image is rebuilt, pushed, and the digest in
 the Dockerfile. A Dockerfile edit without them is a no-op that reads like a
 change.
 
+`scripts/publish-lake-client.sh` does all four, in order, as one command
+(#4441). Use it rather than the steps by hand: the repin is not a step you can
+forget in it, because the push and the repin are the same action.
+
+```bash
+# Build a candidate and check it BEFORE it is anywhere public. Needs no
+# credential; safe for anyone, including an agent, to run.
+./scripts/publish-lake-client.sh
+
+# Read the outward-facing half without running any of it.
+./scripts/publish-lake-client.sh --push --dry-run
+
+# Build, verify, publish, repin docker-compose.lake-skeleton.yml, re-verify.
+# Refuses up front unless the gh token carries write:packages.
+./scripts/publish-lake-client.sh --push
+```
+
+Then commit the `docker-compose.lake-skeleton.yml` change the script wrote —
+the push is only half of the landing.
+
+The tag tracks the DuckDB version, and the script **derives** it from the
+`duckdb==` pin in `Dockerfile-LakeDuckDB` rather than taking it as an
+argument, so a `duckdb==` bump automatically means a new tag as well as a new
+digest. A hand-typed tag is how one tag comes to name two images, which is how
+the pin stops being a rollback point.
+
+<details>
+<summary>The same four steps by hand, if the script is unavailable</summary>
+
 ```bash
 # 1. Build, and check the result BEFORE it is anywhere public.
 docker build -f Dockerfile-LakeDuckDB -t aspirant-lake-duckdb:candidate .
@@ -90,9 +119,23 @@ docker buildx imagetools inspect \
 ./tests/lake_client_image_unit.sh
 ```
 
-The tag tracks the DuckDB version, so a `duckdb==` bump means a new tag as well
-as a new digest — otherwise one tag names two images and step 3 stops being a
-rollback point.
+</details>
+
+### Why the publish is gated and the repin is not
+
+Pushing to GHCR is outward-facing, so `--push` needs both an explicit flag and
+a `write:packages` scope on the `gh` token, and it checks for the scope
+*before* it builds — a refusal costs nothing and writes nothing. As of
+2026-08-28 that scope is absent on this box (`gh auth status` reports `gist`,
+`read:org`, `repo`), which is the still-open operator question in
+`docs/IMAGE_PUBLISH_DECISION.md` §2. Until it is provisioned, `--push` refuses
+and says so; `--dry-run` still prints the whole plan.
+
+The repin is deliberately *not* gated behind anything extra: it is the step
+that was skipped, and welding it to the push is the entire point of the
+script. `tests/lake_client_publish_unit.sh` asserts both halves — that a
+credential-less `--push` touches neither docker nor the compose file, and that
+the digest surgery hits only the lake client's line and is idempotent.
 
 `tests/lake_client_image_unit.sh` is what makes the omission loud: it probes the
 **pinned** digest and fails when the published image is missing something the
