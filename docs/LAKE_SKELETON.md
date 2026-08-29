@@ -242,18 +242,31 @@ mapped) that has no entry for this skeleton's root at all.
 **Layer 2 — is what's stored actually ciphertext, and does it agree with the
 catalog?** Run **inside the client container** (`scripts/lake_verify_at_rest.py`,
 #4299), against the catalog and Garage directly — never through the explorer's
-decrypting read path, which would report a plaintext write as encrypted. Five
-checks: every `high` row declares an envelope; the stored object is `AOBJ`
-ciphertext (checked twice — whole object and past the header — so a forged
-five-byte header cannot pass as encrypted); no plaintext hides under a `high`
-row and no `normal` row carries a wrapped DEK; the row's `kek_version` agrees
-with the envelope header; the DEK actually unwraps under the KEK in custody.
+decrypting read path, which would report a plaintext write as encrypted. The
+checks, numbered as the report prints them: **0** the catalog is not empty —
+zero rows is a FAIL, never a vacuous green (#4524); **1** every `high` row
+declares an envelope, and a `sensitivity` outside the catalog vocabulary fails
+here and is checked as `high` from then on, fail closed (#4524); **2** the
+stored object is `AOBJ` ciphertext; **3/3b** no plaintext hides under a `high`
+row, no `normal` row carries a wrapped DEK, and the content address is compared
+twice — whole object and past the header — which catches a forged five-byte
+header over *this row's* plaintext, but not a forged header over other bytes
+(#4301 F3: that is what check 6 is for); **4** the row's `kek_version` agrees
+with the envelope header; **5** the DEK actually unwraps under the KEK in
+custody; **6** with that DEK the stored object decrypts to the row's content
+address — the one exact check, which no forgery shape survives (#4524); **7**
+every object under `bronze/blobs/` has a catalog row, listed from the bucket
+itself, so a blob nobody catalogued cannot hide from the catalog-driven checks
+(#4524). When `LAKE_KEK_FINGERPRINT` is set the supplied KEK is checked against
+it first: a mismatch is reported as an input error and the run is NOT GREEN,
+rather than every `high` row reading as data loss under a mistyped key.
 
 **A SKIP is never a PASS, on either layer.** Layer 1 SKIPs (rather than
 failing outright) when the volume resolves but is not a LUKS mapping — the
 expected, correct result for this skeleton, whose root is deliberately plain
-`/scratch` (§11.0). Layer 2 SKIPs check 5 when no KEK is in custody for this
-run. Either SKIP keeps the combined verdict at NOT GREEN: the point of the
+`/scratch` (§11.0). Layer 2 SKIPs checks 5 and 6 when no KEK is in custody
+for this run, and check 6 alone when a KEK is held but the image cannot
+decrypt (#4290). Either SKIP keeps the combined verdict at NOT GREEN: the point of the
 check is exactly to distinguish "provably encrypted" from "nobody looked", and
 folding a SKIP into green would erase that distinction on the one surface that
 exists to preserve it.
