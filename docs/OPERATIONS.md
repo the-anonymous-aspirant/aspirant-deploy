@@ -78,13 +78,24 @@ The filename and contract match the system_3 side (`shared/paths.py::MAINTENANCE
 
 **3. Checkout freshness.** Gate 2 proves the checkout is release-*tracking*; it does not prove it is release-*current*. A checkout six PRs behind on `main` satisfies it cleanly, which is exactly how the cell sat at PR #50 while `origin/main` was at #56 (system_3 #2520) — nothing on this host has ever pulled the checkout, since `auto-pull.sh` polls images and contains no git operation, and no other cron does either. Because the compose file being deployed comes from this checkout, image updates were still being recreated every five minutes from six-PR-old config, silently. Stale documentation was never the risk.
 
-This gate **reports and continues**; it does not refuse. On drift it warns on stderr and appends one `checkout_stale` decision with the behind-count:
+This gate **self-heals when it can, reports either way, and never refuses.** On drift it fast-forwards the checkout onto `origin/main` when git can prove that loses nothing — no tracked file modified or staged, and `HEAD` an ancestor of `origin/main` — and appends one `checkout_ff` decision carrying the old and new commit:
 
 ```json
-{"ts":"...","service":"-","action":"checkout_stale","from_sha":"","to_sha":"","reason":"behind:3"}
+{"ts":"...","service":"-","action":"checkout_ff","from_sha":"2681d23…","to_sha":"878ef77…","reason":"behind:11"}
 ```
 
-It is silent when the checkout is current, so the ledger does not fill with a line per tick. The fetch is read-only and best-effort: an unreachable origin logs `checkout_freshness_unknown` rather than blocking, because a detector that turns this host's flaky uplink into a deploy outage would be a worse defect than the one it reports. Whether staleness should *escalate* to a refusal, as gate 2 does, is an open operator decision (system_3 #2534).
+The rest of that tick deploys from the released compose file; the next tick runs the released copy of the script (git replaces files by inode, so the copy bash is already executing is unaffected). When it cannot fast-forward it appends `checkout_stale` as before, now **with the reason**, and warns on stderr:
+
+```json
+{"ts":"...","service":"-","action":"checkout_stale","from_sha":"","to_sha":"","reason":"behind:3;refused:tracked_changes"}
+{"ts":"...","service":"-","action":"checkout_stale","from_sha":"","to_sha":"","reason":"behind:3;refused:not_fast_forward"}
+```
+
+`refused:tracked_changes` means someone is mid-edit in the deploy tree (untracked files, including the stray `.bak`s, never count); `refused:not_fast_forward` means `main` carries a local commit and only a person can say whether it is a hotfix or a mistake. Both are the human-action cases, which is why they are the only ones left in the log. Under `--dry-run` the checkout is untouched and the tick logs `would_checkout_ff` with the preflight verdict (`behind:N;ok` or `behind:N;refused:…`). A maintenance pause (gate 1) freezes the checkout too, since it exits before this gate runs.
+
+It is silent when the checkout is current, so the ledger does not fill with a line per tick. The fetch is read-only and best-effort: an unreachable origin logs `checkout_freshness_unknown` rather than blocking, because a detector that turns this host's flaky uplink into a deploy outage would be a worse defect than the one it reports.
+
+History: system_3 #2534 shipped this gate report-only and left "should staleness escalate to a refusal?" open. What happened instead was neither — `checkout_stale` fired on essentially every tick from 2026-07-20 to 2026-08-29, forty days, reaching `behind:11`, and nobody pulled (system_3 #4537). A refusal would have wedged every image deploy over a compose-file lag; the fast-forward is the command the warning was asking a human to run, done by the process that already knows it is needed, only when git proves it is lossless.
 
 Neither of the first two gates inspects the working tree for uncommitted or untracked files. The cell carries stray `.env.bak-*` and `docker-compose.yml.bak-*` files; sweeping those into a cleanliness check would wedge every deploy for a reason that has nothing to do with which compose file is being deployed.
 
