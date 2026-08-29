@@ -233,11 +233,20 @@ script cannot make both claims — see #4273-B1's task body for why the split is
 by execution context, not tidiness:
 
 **Layer 1 — is the volume itself encrypted?** Run on the **host**, as the
-invoking user, via `cryptsetup`/`findmnt`/`lsblk` against the device backing
-`$LAKE_SKELETON_ROOT` — resolved from the path, not from a hardcoded name
+invoking user, via `findmnt`/`lsblk` against the device backing **each of the
+three data directories** the compose file bind-mounts — `garage/data`,
+`garage/meta` and `catalog` under `$LAKE_SKELETON_ROOT` — because they are
+three mounts that can sit on three volumes, and a verdict resolved from the
+root alone would call all three encrypted the day only the root is (#4525,
+from #4301 F7). Each is resolved from its path, not from a hardcoded name
 list, because the three-name list in `scripts/luks-layer1/postcheck.sh`
 answers a different question (are the *real* lake's three ceremony volumes
-mapped) that has no entry for this skeleton's root at all.
+mapped) that has no entry for this skeleton's root at all. The device's whole
+dependency chain is walked (`lsblk -s`), so an LVM volume on a LUKS physical
+volume — the real lake's ceremony shape — reads as engaged; the PASS/SKIP line
+prints the chain it saw. Layer 1 is PASS only when all three directories are
+on dm-crypt; one plain directory is a SKIP for the layer, and a directory that
+does not exist or cannot be resolved is a FAIL.
 
 **Layer 2 — is what's stored actually ciphertext, and does it agree with the
 catalog?** Run **inside the client container** (`scripts/lake_verify_at_rest.py`,
@@ -262,9 +271,9 @@ it first: a mismatch is reported as an input error and the run is NOT GREEN,
 rather than every `high` row reading as data loss under a mistyped key.
 
 **A SKIP is never a PASS, on either layer.** Layer 1 SKIPs (rather than
-failing outright) when the volume resolves but is not a LUKS mapping — the
-expected, correct result for this skeleton, whose root is deliberately plain
-`/scratch` (§11.0). Layer 2 SKIPs checks 5 and 6 when no KEK is in custody
+failing outright) when a data directory resolves but has no dm-crypt in its
+chain — the expected, correct result for this skeleton, whose root is
+deliberately plain `/scratch` (§11.0). Layer 2 SKIPs checks 5 and 6 when no KEK is in custody
 for this run, and check 6 alone when a KEK is held but the image cannot
 decrypt (#4290). Either SKIP keeps the combined verdict at NOT GREEN: the point of the
 check is exactly to distinguish "provably encrypted" from "nobody looked", and
@@ -272,10 +281,19 @@ folding a SKIP into green would erase that distinction on the one surface that
 exists to preserve it.
 
 **Expected result on this skeleton today: NOT GREEN**, and that is the harness
-working, not a bug to chase — `/scratch` is unencrypted by design (layer 1
-SKIPs), and every `sensitivity=high` fixture is sealed under a throwaway KEK
-that no longer exists anywhere (layer 2's check 5 fails). See #4299's findings
-comment on the task for the live run this predicts.
+working, not a bug to chase — all three data directories are on plain
+`/dev/sda` (layer 1: `0 of 3 data directories on dm-crypt`, SKIP), and every
+`sensitivity=high` fixture is sealed under a throwaway KEK that no longer
+exists anywhere: with no KEK supplied layer 2's checks 5 and 6 **SKIP** (not
+fail — nothing was proven either way), and with any KEK supplied on an image
+that can decrypt, check 5 **FAILs** those three rows as data loss. See #4301's
+findings comment on #4273 for the live runs this predicts.
+
+The verb pulls the pinned client image as its own step before layer 2 (#4525,
+#4301 F6): a registry timeout or a vanished digest is reported as "the image
+could not be pulled — the harness did not run", which is NOT GREEN but is not
+a finding about the lake, rather than surfacing as a failed layer 2 with the
+pull noise mixed into the harness's report.
 
 ---
 
