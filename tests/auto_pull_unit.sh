@@ -223,6 +223,68 @@ git -C "$UNREACHABLE" remote set-url origin "$TMPDIR_TEST/does-not-exist.git"
 got="$(checkout_freshness "$UNREACHABLE")"
 assert_eq "unknown:fetch_failed" "$got" "checkout_freshness reports unknown when origin is unreachable"
 
+# --- service enumeration ------------------------------------------------------
+#
+# The sweep enumerates services by the ref each container was CREATED from
+# (.Config.Image), never by the ref `docker compose ps` prints, because the ps
+# column is resolved through the local tag store and turns into a bare
+# `sha256:…` the moment `:latest` moves off the running image — after a hand
+# `docker pull` (system_3 #4184) or after this script's own failed blue/green
+# (#4489: 20 merged aspirant-client PRs undeployed for two days, no decision
+# line). These cases pin the filter to the create-time ref.
+
+if is_polled_image_ref "${IMAGE_PREFIX}client:latest"; then
+  PASS=$((PASS + 1)); printf "  PASS  is_polled_image_ref accepts prefix + :latest\n"
+else
+  FAIL=$((FAIL + 1)); printf "  FAIL  is_polled_image_ref rejected a prefix + :latest ref\n"
+fi
+
+if is_polled_image_ref "ghcr.io/kiwix/kiwix-serve:latest"; then
+  FAIL=$((FAIL + 1)); printf "  FAIL  is_polled_image_ref accepted a foreign-prefix ref\n"
+else
+  PASS=$((PASS + 1)); printf "  PASS  is_polled_image_ref rejects a ref outside the prefix\n"
+fi
+
+if is_polled_image_ref "${IMAGE_PREFIX}penpot-backend:2.16.2@sha256:c322cb8f"; then
+  FAIL=$((FAIL + 1)); printf "  FAIL  is_polled_image_ref accepted a digest-pinned ref\n"
+else
+  PASS=$((PASS + 1)); printf "  PASS  is_polled_image_ref rejects a digest-pinned ref\n"
+fi
+
+# The regression: a bare image ID is what `docker compose ps` prints once the
+# tag has moved. It must never reach the filter as the ref — and if it does,
+# the filter drops it, which is the two-day silence this change removes.
+if is_polled_image_ref "sha256:ab6e35ed5f1ea70e70de7dbbda69bee18038567b2dad82a50252faf7dc4f06b9"; then
+  FAIL=$((FAIL + 1)); printf "  FAIL  is_polled_image_ref accepted a bare image ID\n"
+else
+  PASS=$((PASS + 1)); printf "  PASS  is_polled_image_ref rejects a bare image ID\n"
+fi
+
+# select_polled_services keys on column 3 (the create-time ref) and passes
+# the row through intact; rows without a ref or outside the prefix are dropped.
+got="$(printf '%s\n' \
+  "client-green|aspirant-online-client-green-1|${IMAGE_PREFIX}client:latest" \
+  "client-blue|aspirant-online-client-blue-1|${IMAGE_PREFIX}client:latest" \
+  "postgres|aspirant-online-postgres-1|pgvector/pgvector:pg16" \
+  "penpot-redis|aspirant-online-penpot-redis-1|${IMAGE_PREFIX}penpot-redis:7@sha256:33d3a320" \
+  "orphan|aspirant-online-orphan-1|" \
+  "server|aspirant-online-server-1|${IMAGE_PREFIX}server:latest" \
+  | select_polled_services | tr '\n' ';')"
+assert_eq "client-green|aspirant-online-client-green-1|${IMAGE_PREFIX}client:latest;client-blue|aspirant-online-client-blue-1|${IMAGE_PREFIX}client:latest;server|aspirant-online-server-1|${IMAGE_PREFIX}server:latest;" \
+  "$got" "select_polled_services keeps :latest rows under the prefix, in order, and drops the rest"
+
+# Both client slots stay in the sweep with the same ref; the main loop's
+# SEEN_CLIENT guard, not the filter, is what collapses them to one deploy.
+got="$(printf '%s\n' \
+  "client-green|aspirant-online-client-green-1|${IMAGE_PREFIX}client:latest" \
+  "client-blue|aspirant-online-client-blue-1|${IMAGE_PREFIX}client:latest" \
+  | select_polled_services | wc -l)"
+assert_eq "2" "$got" "select_polled_services does not dedupe the two client slots"
+
+# Empty input is an empty sweep, not an error.
+got="$(printf '' | select_polled_services | wc -l)"
+assert_eq "0" "$got" "select_polled_services is empty on empty input"
+
 echo
 echo "Passed: $PASS  Failed: $FAIL"
 [[ "$FAIL" -eq 0 ]]

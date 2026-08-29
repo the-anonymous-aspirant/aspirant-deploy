@@ -180,10 +180,48 @@ container_healthy_after_wait() {
   [[ "$status" == "running" ]]
 }
 
+# is_polled_image_ref IMAGE_REF -> true when the ref is one this sweep owns:
+# under $IMAGE_PREFIX and floating on :latest (digest-pinned refs are not).
+is_polled_image_ref() {
+  local ref="$1"
+  [[ "$ref" == "$IMAGE_PREFIX"* && "$ref" == *:latest ]]
+}
+
+# select_polled_services reads SERVICE|CONTAINER|IMAGE_REF lines on stdin and
+# echoes the ones whose IMAGE_REF is_polled_image_ref. Pure; unit-tested.
+select_polled_services() {
+  local svc container ref
+  while IFS='|' read -r svc container ref; do
+    [[ -z "$svc" || -z "$container" ]] && continue
+    if is_polled_image_ref "$ref"; then
+      printf '%s|%s|%s\n' "$svc" "$container" "$ref"
+    fi
+  done
+}
+
 list_aspirant_services() {
   # Format: SERVICE|CONTAINER|IMAGE_REF
-  docker compose ps --format '{{.Service}}|{{.Name}}|{{.Image}}' 2>/dev/null \
-    | awk -F'|' -v p="$IMAGE_PREFIX" '$3 ~ "^"p && $3 ~ ":latest$" { print }'
+  #
+  # IMAGE_REF is the ref the container was CREATED from (.Config.Image — the
+  # compose file's `image:` string), not the ref `docker compose ps` prints for
+  # it. The ps column is resolved through the local tag store: it reads
+  # `…:latest` only while that tag still points at the running image, and a
+  # bare `sha256:…` once the tag has moved on. Two things move it: a hand
+  # `docker pull` (system_3 #4184, 2026-08-23) and this script's own failed
+  # blue/green deploy (#4489, 2026-08-26) — `docker compose pull` re-points
+  # `:latest` at the candidate before deploy-client.sh health-checks it, and
+  # a rollback leaves the tag on the rejected image. Filtering on the ps
+  # column then dropped client-* from every later tick, and 20 merged
+  # aspirant-client PRs sat undeployed for two days with no decision line
+  # saying so. The create-time ref does not move, so a service stays in the
+  # sweep for as long as its compose entry says :latest.
+  local svc container ref
+  while IFS='|' read -r svc container; do
+    [[ -z "$svc" ]] && continue
+    ref="$(docker inspect "$container" --format '{{.Config.Image}}' 2>/dev/null || true)"
+    printf '%s|%s|%s\n' "$svc" "$container" "$ref"
+  done < <(docker compose ps --format '{{.Service}}|{{.Name}}' 2>/dev/null) \
+    | select_polled_services
 }
 
 # Per-service handler. Echoes the action taken; non-zero exit on hard failure.
@@ -252,8 +290,8 @@ deploy_service() {
 }
 
 # Test-mode escape hatch: source the script with ASPIRANT_AUTO_PULL_LIB=1
-# to expose decide / log_decision / is_known_bad / mark_known_bad without
-# running the main loop.
+# to expose decide / log_decision / is_known_bad / mark_known_bad /
+# is_polled_image_ref / select_polled_services without running the main loop.
 if [[ "${ASPIRANT_AUTO_PULL_LIB:-0}" -eq 1 ]]; then
   return 0
 fi
