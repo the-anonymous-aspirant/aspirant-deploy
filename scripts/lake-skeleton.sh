@@ -236,36 +236,79 @@ SQL
 #
 # Run it with: scripts/lake-skeleton.sh verify
 
-# Layer-1 (LUKS) claim for the volume backing $ROOT (#4273-B1).
+# Layer-1 (LUKS) claim, per data directory (#4273-B1, #4525 from #4301 F7).
 #
-# Resolved FROM THE PATH — `findmnt -T`, which answers "what device is $ROOT
-# actually on" — not from the hardcoded three-name ceremony list in
+# Resolved FROM THE PATH — `findmnt -T`, which answers "what device is this
+# directory actually on" — not from the hardcoded three-name ceremony list in
 # scripts/luks-layer1/postcheck.sh, which answers a different question ("are
 # scratch_crypt/lake_crypt/data_crypt mapped"). Those coincide for the real
 # lake but never for this skeleton, whose root is deliberately plain scratch
 # (§11.0): the postcheck list has no entry for it at all, so asking it here
 # would silently report nothing rather than the true answer.
 #
-# Prints one PASS/FAIL/SKIP line and returns 0 (engaged), 1 (resolution
-# failed) or 2 (resolved but not a LUKS mapping) — SKIP, not FAIL, because an
-# unencrypted scratch volume is not a bug in this script, but the caller must
-# still keep it out of a green verdict (mirrors check 5's SKIP-is-never-green
-# rule in lake_verify_at_rest.py).
+# Two things #4301 F7 found and this now does:
+#   * one directory is not the lake. garage/data, garage/meta and catalog are
+#     three separate compose bind mounts and can sit on three different
+#     volumes; a verdict resolved from $ROOT alone would call all three
+#     encrypted the day only the root is. layer1_check_all resolves each.
+#   * `lsblk -no TYPE <dev>` names the device itself, so LUKS beneath LVM
+#     (a `lvm` LV on a `crypt` PV — the real lake's ceremony shape) read as
+#     NOT ENGAGED. `lsblk -s` walks the dependency chain upward; dm-crypt
+#     anywhere in it is an engaged layer 1 for the bytes on top.
+#
+# layer1_check prints one PASS/FAIL/SKIP line and returns 0 (engaged), 1
+# (resolution failed) or 2 (resolved but no dm-crypt in the chain) — SKIP, not
+# FAIL, because an unencrypted scratch volume is not a bug in this script, but
+# the caller must still keep it out of a green verdict (mirrors check 5's
+# SKIP-is-never-green rule in lake_verify_at_rest.py).
 layer1_check() {
-  local target="$1" source type
+  local target="$1" source chain
   source="$(findmnt -T "$target" -no SOURCE 2>/dev/null || true)"
   if [ -z "$source" ]; then
     echo "  [FAIL] layer 1: cannot resolve the device backing $target"
     return 1
   fi
-  type="$(lsblk -no TYPE "$source" 2>/dev/null | head -1 || true)"
-  if [ "$type" = "crypt" ]; then
-    echo "  [PASS] layer 1: $target is backed by $source, a LUKS mapping (dm-crypt engaged)"
-    return 0
-  fi
-  echo "  [SKIP] layer 1: $target is backed by $source ($type, not dm-crypt) — NOT ENGAGED." \
+  # The device and everything beneath it, top-down (e.g. "lvm crypt part disk").
+  chain="$(lsblk -sno TYPE "$source" 2>/dev/null | tr '\n' ' ' | sed 's/ *$//' || true)"
+  chain="${chain:-unknown}"
+  case " $chain " in
+    *" crypt "*)
+      echo "  [PASS] layer 1: $target is backed by $source [$chain] — dm-crypt engaged in the chain"
+      return 0
+      ;;
+  esac
+  echo "  [SKIP] layer 1: $target is backed by $source [$chain], no dm-crypt in the chain — NOT ENGAGED." \
        "Layer 2 over an unlocked, unencrypted volume is a weaker claim than it appears (#4273)."
   return 2
+}
+
+# The directories the lake's bytes actually land in — the compose file's three
+# bind mounts under $ROOT. Kept as one list so the check and the compose file
+# are read together when either changes.
+LAYER1_DATA_DIRS=(garage/data garage/meta catalog)
+
+# Resolve layer 1 for every data directory; return the WORST result: 1 if any
+# directory failed to resolve or does not exist, else 2 if any is not
+# encrypted, else 0. Three PASS lines are the claim; anything less is not.
+layer1_check_all() {
+  local root="$1" rel dir rc worst=0 engaged=0
+  for rel in "${LAYER1_DATA_DIRS[@]}"; do
+    dir="$root/$rel"
+    if [ ! -d "$dir" ]; then
+      echo "  [FAIL] layer 1: $dir does not exist — the stack has not been bootstrapped, nothing to resolve"
+      worst=1
+      continue
+    fi
+    rc=0
+    layer1_check "$dir" || rc=$?
+    case "$rc" in
+      0) engaged=$((engaged + 1)) ;;
+      1) worst=1 ;;
+      2) [ "$worst" -eq 0 ] && worst=2 ;;
+    esac
+  done
+  echo "  layer 1: $engaged of ${#LAYER1_DATA_DIRS[@]} data directories on dm-crypt"
+  return "$worst"
 }
 
 # Test-mode escape hatch: source this file with ASPIRANT_LAKE_SKELETON_LIB=1 to
@@ -334,11 +377,23 @@ case "${1:-}" in
     # both and combines their exit codes rather than picking one.
     echo "=== layer 1 (LUKS) ==="
     layer1_rc=0
-    layer1_check "$ROOT" || layer1_rc=$?
+    layer1_check_all "$ROOT" || layer1_rc=$?
     echo
     echo "=== layer 2 (catalog + object store, #4299) ==="
     layer2_rc=0
-    compose --profile client run --rm duckdb /work/verify_at_rest.py || layer2_rc=$?
+    # Pull the pinned client image as its own step (#4525, #4301 F6): when the
+    # digest is absent locally, `compose run` pulls it inline and a registry
+    # timeout surfaces as "layer 2 failed" with the pull noise mixed into the
+    # harness's report. Pulling first makes "the image could not be fetched"
+    # its own sentence, distinct from "the harness ran and said NOT GREEN" —
+    # both are NOT GREEN, but only one of them is a finding about the lake.
+    if compose --profile client pull -q duckdb; then
+      compose --profile client run --rm duckdb /work/verify_at_rest.py || layer2_rc=$?
+    else
+      echo "  [FAIL] layer 2: the pinned client image could not be pulled (registry unreachable," \
+           "or the digest is gone) — the harness did not run, so nothing about the lake was verified"
+      layer2_rc=1
+    fi
     echo
     echo "=== combined verdict ==="
     if [ "$layer1_rc" -eq 0 ] && [ "$layer2_rc" -eq 0 ]; then
