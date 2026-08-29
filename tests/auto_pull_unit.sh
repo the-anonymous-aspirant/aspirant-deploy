@@ -2,7 +2,10 @@
 set -euo pipefail
 
 # Unit tests for scripts/auto-pull.sh's pure logic — decide(),
-# log_decision(), and the known-bad cache helpers. No docker required.
+# log_decision(), the known-bad cache helpers, the checkout gates and the
+# checkout fast-forward. No docker required: the last section runs the whole
+# script in cron shape inside a scratch clone, where `docker compose ps` finds
+# no project and the sweep is empty.
 #
 # Usage: ./tests/auto_pull_unit.sh
 
@@ -284,6 +287,153 @@ assert_eq "2" "$got" "select_polled_services does not dedupe the two client slot
 # Empty input is an empty sweep, not an error.
 got="$(printf '' | select_polled_services | wc -l)"
 assert_eq "0" "$got" "select_polled_services is empty on empty input"
+
+# --- checkout_ff (#4537) -----------------------------------------------------
+#
+# Gate 3 reported `checkout_stale` on every tick for forty days and nothing
+# pulled. These pin the self-heal: a fast-forward happens exactly when git can
+# prove it loses nothing, and every refusal names its reason so the log line
+# a human eventually reads says what to do.
+
+# A stale clone with a clean tracked tree fast-forwards to origin/main.
+STALE="$TMPDIR_TEST/stale"
+git clone -q "$ORIGIN_REPO" "$STALE"
+git -C "$SEED" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "three"
+git -C "$SEED" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "four"
+git -C "$SEED" push -q origin main
+got="$(checkout_freshness "$STALE")"
+assert_eq "behind:2" "$got" "checkout_ff fixture starts two behind"
+before="$(git -C "$STALE" rev-parse HEAD)"
+target="$(git -C "$STALE" rev-parse origin/main)"
+got="$(checkout_ff_preflight "$STALE")"
+assert_eq "ok" "$got" "checkout_ff_preflight passes on a clean stale clone"
+got="$(checkout_ff "$STALE")"
+assert_eq "ff:${before}..${target}" "$got" "checkout_ff fast-forwards and reports old..new"
+assert_eq "$target" "$(git -C "$STALE" rev-parse HEAD)" "checkout_ff leaves HEAD at origin/main"
+got="$(ASPIRANT_AUTO_PULL_SKIP_FETCH=1 checkout_freshness "$STALE")"
+assert_eq "current" "$got" "checkout_ff clears the freshness gate"
+
+# Untracked files do not block the fast-forward — the cell carries stray .bak
+# files and a fast-forward never touches an untracked path.
+git -C "$SEED" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "five"
+git -C "$SEED" push -q origin main
+git -C "$STALE" fetch -q origin
+touch "$STALE/docker-compose.yml.bak-20260710-044340"
+before="$(git -C "$STALE" rev-parse HEAD)"
+target="$(git -C "$STALE" rev-parse origin/main)"
+got="$(checkout_ff "$STALE")"
+assert_eq "ff:${before}..${target}" "$got" "checkout_ff ignores untracked files"
+
+# A modified tracked file is someone's work in flight: refuse, touch nothing.
+git -C "$SEED" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "six"
+git -C "$SEED" push -q origin main
+git -C "$STALE" fetch -q origin
+echo "edit" > "$STALE/tracked-change.txt"
+git -C "$STALE" add tracked-change.txt
+before="$(git -C "$STALE" rev-parse HEAD)"
+got="$(checkout_ff "$STALE")"
+assert_eq "refused:tracked_changes" "$got" "checkout_ff refuses when a tracked file is staged"
+assert_eq "$before" "$(git -C "$STALE" rev-parse HEAD)" "checkout_ff leaves HEAD alone on refusal"
+git -C "$STALE" reset -q --hard HEAD
+
+# A local commit on main means HEAD is not an ancestor of origin/main: a
+# fast-forward is impossible and only a human can say whether the local
+# commit is a hotfix or a mistake. Refuse, and say which.
+DIVERGED="$TMPDIR_TEST/diverged"
+git clone -q "$ORIGIN_REPO" "$DIVERGED"
+git -C "$DIVERGED" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "local-only"
+git -C "$SEED" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "seven"
+git -C "$SEED" push -q origin main
+git -C "$DIVERGED" fetch -q origin
+before="$(git -C "$DIVERGED" rev-parse HEAD)"
+got="$(checkout_ff "$DIVERGED")"
+assert_eq "refused:not_fast_forward" "$got" "checkout_ff refuses a diverged main"
+assert_eq "$before" "$(git -C "$DIVERGED" rev-parse HEAD)" "checkout_ff leaves a diverged HEAD alone"
+
+# --- gate 3 in cron shape ----------------------------------------------------
+#
+# Run the real script, from a clone that carries it, as cron would: gates run,
+# `docker compose ps` finds no project here so the sweep is empty, and the
+# decisions ledger shows what gate 3 did. A separate log/state dir per run so
+# the assertions read only this run's lines.
+
+CRON_ORIGIN="$TMPDIR_TEST/cron-origin.git"
+git init -q --bare --initial-branch=main "$CRON_ORIGIN"
+CRON_SEED="$TMPDIR_TEST/cron-seed"
+git init -q --initial-branch=main "$CRON_SEED"
+mkdir -p "$CRON_SEED/scripts"
+cp scripts/auto-pull.sh "$CRON_SEED/scripts/auto-pull.sh"
+git -C "$CRON_SEED" add scripts/auto-pull.sh
+git -C "$CRON_SEED" -c user.email=t@t -c user.name=t commit -q -m "seed script"
+git -C "$CRON_SEED" remote add origin "$CRON_ORIGIN"
+git -C "$CRON_SEED" push -q origin main
+CRON_CLONE="$TMPDIR_TEST/cron-clone"
+git clone -q "$CRON_ORIGIN" "$CRON_CLONE"
+git -C "$CRON_SEED" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "released"
+git -C "$CRON_SEED" push -q origin main
+cron_target="$(git -C "$CRON_SEED" rev-parse HEAD)"
+cron_before="$(git -C "$CRON_CLONE" rev-parse HEAD)"
+
+run_cron_shape() {
+  # $1 = log dir; remaining args go to the script. Runs in a subshell with the
+  # library flag cleared so the main loop executes.
+  local logdir="$1"; shift
+  (
+    unset ASPIRANT_AUTO_PULL_LIB
+    ASPIRANT_AUTO_PULL_LOG_DIR="$logdir" \
+    ASPIRANT_AUTO_PULL_STATE_DIR="$logdir/state" \
+      "$CRON_CLONE/scripts/auto-pull.sh" "$@" >/dev/null 2>&1
+  )
+}
+
+# --dry-run: reports what it would do, touches nothing.
+DRY_LOG="$TMPDIR_TEST/dry-log"
+run_cron_shape "$DRY_LOG" --dry-run
+line="$(grep -F '"service":"-"' "$DRY_LOG/decisions.jsonl" | tail -1)"
+if [[ "$line" == *'"action":"would_checkout_ff"'* && "$line" == *'"reason":"behind:1;ok"'* ]]; then
+  PASS=$((PASS + 1)); printf "  PASS  dry-run logs would_checkout_ff with the preflight verdict\n"
+else
+  FAIL=$((FAIL + 1)); printf "  FAIL  dry-run gate line unexpected — got %s\n" "$line"
+fi
+assert_eq "$cron_before" "$(git -C "$CRON_CLONE" rev-parse HEAD)" "dry-run does not move the checkout"
+
+# Live: fast-forwards, logs checkout_ff with from/to SHAs, exits 0.
+LIVE_LOG="$TMPDIR_TEST/live-log"
+if run_cron_shape "$LIVE_LOG"; then
+  PASS=$((PASS + 1)); printf "  PASS  cron-shape run exits 0 after fast-forwarding\n"
+else
+  FAIL=$((FAIL + 1)); printf "  FAIL  cron-shape run exited non-zero\n"
+fi
+line="$(grep -F '"action":"checkout_ff"' "$LIVE_LOG/decisions.jsonl" | tail -1)"
+if [[ "$line" == *"\"from_sha\":\"$cron_before\""* && "$line" == *"\"to_sha\":\"$cron_target\""* && "$line" == *'"reason":"behind:1"'* ]]; then
+  PASS=$((PASS + 1)); printf "  PASS  live run logs checkout_ff with from/to SHAs and the behind-count\n"
+else
+  FAIL=$((FAIL + 1)); printf "  FAIL  live checkout_ff line unexpected — got %s\n" "$line"
+fi
+assert_eq "$cron_target" "$(git -C "$CRON_CLONE" rev-parse HEAD)" "live run leaves the clone at origin/main"
+if grep -qF '"action":"checkout_stale"' "$LIVE_LOG/decisions.jsonl"; then
+  FAIL=$((FAIL + 1)); printf "  FAIL  live run still logged checkout_stale\n"
+else
+  PASS=$((PASS + 1)); printf "  PASS  live run logs no checkout_stale\n"
+fi
+
+# Live, with a tracked edit in flight: refuses, names the reason, exits 0.
+git -C "$CRON_SEED" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "released-2"
+git -C "$CRON_SEED" push -q origin main
+echo "# local edit" >> "$CRON_CLONE/scripts/auto-pull.sh"
+REFUSE_LOG="$TMPDIR_TEST/refuse-log"
+if run_cron_shape "$REFUSE_LOG"; then
+  PASS=$((PASS + 1)); printf "  PASS  cron-shape run exits 0 when it refuses to fast-forward\n"
+else
+  FAIL=$((FAIL + 1)); printf "  FAIL  refused run exited non-zero\n"
+fi
+line="$(grep -F '"action":"checkout_stale"' "$REFUSE_LOG/decisions.jsonl" | tail -1)"
+if [[ "$line" == *'"reason":"behind:1;refused:tracked_changes"'* ]]; then
+  PASS=$((PASS + 1)); printf "  PASS  refused run logs checkout_stale with the refusal reason\n"
+else
+  FAIL=$((FAIL + 1)); printf "  FAIL  refused checkout_stale line unexpected — got %s\n" "$line"
+fi
+assert_eq "$cron_target" "$(git -C "$CRON_CLONE" rev-parse HEAD)" "refused run does not move the checkout"
 
 echo
 echo "Passed: $PASS  Failed: $FAIL"

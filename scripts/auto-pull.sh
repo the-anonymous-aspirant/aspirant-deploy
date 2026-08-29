@@ -26,8 +26,15 @@ set -euo pipefail
 #      docker-compose.yml in THIS checkout, so a checkout parked on a feature
 #      branch would recreate production services from the wrong compose file.
 #      Refuses to act unless HEAD is `main` tracking `origin/main`. Exits 1.
-#   Neither gate inspects the working tree for uncommitted or untracked files;
-#   the cell carries stray .bak files and they are not a provenance signal.
+#   3. Checkout freshness — fetches origin and, when HEAD is behind origin/main,
+#      fast-forwards the checkout if git can prove that loses nothing (no
+#      tracked changes, HEAD an ancestor of origin/main). Logs `checkout_ff`
+#      on success and `checkout_stale` with the refusal reason otherwise;
+#      never blocks the image sweep either way.
+#   Gates 1 and 2 do not inspect the working tree for uncommitted or untracked
+#   files; the cell carries stray .bak files and they are not a provenance
+#   signal. Gate 3 looks at TRACKED changes only, and only to decide whether a
+#   fast-forward is lossless — untracked files never block it either.
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 COMPOSE_DIR="$(pwd)"
@@ -50,6 +57,13 @@ MAINTENANCE_MARKER="${ASPIRANT_MAINTENANCE_MARKER:-${COMPOSE_DIR}/.maintenance-p
 DRY_RUN=0
 TARGET_SERVICE=""
 
+# Keep the original argv for the lock re-exec below: the parse loop consumes
+# "$@" with shift, and re-execing with the emptied "$@" silently dropped every
+# flag on the locked path — `--dry-run` deployed for real and `--service`
+# swept everything (found by the cron-shape test in tests/auto_pull_unit.sh,
+# system_3 #4537).
+ORIG_ARGS=("$@")
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run)       DRY_RUN=1; shift ;;
@@ -71,7 +85,7 @@ touch "$KNOWN_BAD_FILE"
 # sourcing skips the lock (no main loop runs).
 LOCK_FILE="${STATE_DIR}/auto-pull.lock"
 if [[ "${ASPIRANT_AUTO_PULL_LIB:-0}" -ne 1 && -z "${ASPIRANT_AUTO_PULL_LOCKED:-}" ]]; then
-  exec env ASPIRANT_AUTO_PULL_LOCKED=1 flock -n "$LOCK_FILE" "$0" "$@"
+  exec env ASPIRANT_AUTO_PULL_LOCKED=1 flock -n "$LOCK_FILE" "$0" "${ORIG_ARGS[@]}"
 fi
 
 iso_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
@@ -143,6 +157,53 @@ checkout_freshness() {
     echo "current"; return
   fi
   echo "behind:${behind}"
+}
+
+# checkout_ff_preflight DIR -> echoes "ok" when a fast-forward of DIR onto
+# origin/main is provably lossless, else a reason token:
+#   refused:tracked_changes    a tracked file is modified or staged — someone is
+#                              mid-edit in the deploy tree; a merge would touch
+#                              their work. Untracked files are ignored, for the
+#                              same reason gates 1 and 2 ignore them.
+#   refused:not_fast_forward   HEAD is not an ancestor of origin/main — there is
+#                              a local commit on main. Only a human can say
+#                              whether it is a hotfix or a mistake.
+# Assumes origin/main was fetched just before (checkout_freshness does that);
+# this function itself touches no network.
+checkout_ff_preflight() {
+  local dir="$1"
+  if [[ -n "$(git -C "$dir" status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+    echo "refused:tracked_changes"; return
+  fi
+  if ! git -C "$dir" merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
+    echo "refused:not_fast_forward"; return
+  fi
+  echo "ok"
+}
+
+# checkout_ff DIR -> fast-forwards DIR onto origin/main when the preflight
+# passes. Echoes "ff:<old-sha>..<new-sha>" on success, the preflight's refusal
+# token when it does not run, or "failed:merge" when git itself declined.
+#
+# Why a fast-forward is safe to run from a cron tick: `--ff-only` creates no
+# commit and rewrites no history — the checkout ends at exactly the commit
+# origin/main already is, the one every PR merge reviewed. And git replaces
+# files by writing a new inode, so the copy of THIS script that bash is
+# executing keeps reading the old inode to the end of the tick; the next tick
+# runs the new one. (Verified 2026-08-29 on git 2.43: a running script whose
+# file was fast-forwarded underneath it printed its old tail unchanged.)
+checkout_ff() {
+  local dir="$1" pre old new
+  pre="$(checkout_ff_preflight "$dir")"
+  if [[ "$pre" != "ok" ]]; then
+    echo "$pre"; return
+  fi
+  old="$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)"
+  if ! git -C "$dir" merge --ff-only --quiet origin/main >/dev/null 2>&1; then
+    echo "failed:merge"; return
+  fi
+  new="$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)"
+  echo "ff:${old}..${new}"
 }
 
 is_known_bad() {
@@ -291,7 +352,8 @@ deploy_service() {
 
 # Test-mode escape hatch: source the script with ASPIRANT_AUTO_PULL_LIB=1
 # to expose decide / log_decision / is_known_bad / mark_known_bad /
-# is_polled_image_ref / select_polled_services without running the main loop.
+# is_polled_image_ref / select_polled_services / checkout_ff_preflight /
+# checkout_ff without running the main loop.
 if [[ "${ASPIRANT_AUTO_PULL_LIB:-0}" -eq 1 ]]; then
   return 0
 fi
@@ -314,20 +376,47 @@ if [[ "$PROVENANCE" != "ok" ]]; then
   exit 1
 fi
 
-# Gate 3 — checkout freshness. REPORTS, does not refuse. The deploy continues,
-# because turning a stale checkout into a hard stop on the image path has its
-# own blast radius and that escalation is an open operator decision (#2534).
-# What this closes is the silence: before this, a merge to aspirant-deploy that
-# never reached the cell produced no signal anywhere, so "shipped" meant
-# nothing and no one could tell. One decision line per tick is enough to make
-# the drift visible to anyone reading the ledger.
+# Gate 3 — checkout freshness. On drift, FAST-FORWARDS the checkout when git
+# can prove that loses nothing, and reports either way. The image sweep
+# continues in both cases: a config lag must not become an image-deploy outage.
+#
+# History. #2534 shipped this gate report-only and left "should staleness
+# escalate to a refusal?" as an open operator decision. The answer that
+# actually happened was neither: `checkout_stale` fired on essentially every
+# tick from 2026-07-20 to 2026-08-29 — 40 days, behind:11 by the end (system_3
+# #4537) — and nobody pulled, because a log line that never changes what the
+# next tick does is furniture, not a signal. A refusal was the wrong
+# escalation (it would wedge every image deploy over a compose-file lag), but
+# the fast-forward was never an escalation at all: it is the exact command the
+# warning was asking a human to run, done by the process that already knows
+# it is needed, restricted to the case where git proves it is lossless. Every
+# other case still logs `checkout_stale`, now WITH the reason it could not
+# self-heal, which is the part a human has to act on.
+#
+# Under --dry-run the checkout is not touched; the tick logs what it would do.
 FRESHNESS="$(checkout_freshness "$COMPOSE_DIR")"
 case "$FRESHNESS" in
   current) ;;
   behind:*)
-    printf '[%s] auto-pull: CHECKOUT STALE — %s is %s commit(s) behind origin/main. Services will still be recreated, but from THIS checkout'"'"'s docker-compose.yml, which is not the released one. Bring it current with:\n  git -C %s pull --ff-only\n' \
-      "$(iso_now)" "$COMPOSE_DIR" "${FRESHNESS#behind:}" "$COMPOSE_DIR" >&2
-    log_decision "-" "checkout_stale" "" "" "$FRESHNESS"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      # One line, carrying the preflight verdict: `behind:N;ok` or `behind:N;refused:…`.
+      log_decision "-" "would_checkout_ff" "" "" "${FRESHNESS};$(checkout_ff_preflight "$COMPOSE_DIR")"
+    else
+      FF="$(checkout_ff "$COMPOSE_DIR")"
+      case "$FF" in
+        ff:*)
+          FF_RANGE="${FF#ff:}"
+          printf '[%s] auto-pull: CHECKOUT FAST-FORWARDED — %s was %s commit(s) behind origin/main, now at %s. The rest of this tick deploys from the released docker-compose.yml; the next tick runs the released copy of this script.\n' \
+            "$(iso_now)" "$COMPOSE_DIR" "${FRESHNESS#behind:}" "${FF_RANGE#*..}" >&2
+          log_decision "-" "checkout_ff" "${FF_RANGE%..*}" "${FF_RANGE#*..}" "$FRESHNESS"
+          ;;
+        *)
+          printf '[%s] auto-pull: CHECKOUT STALE — %s is %s commit(s) behind origin/main and was NOT fast-forwarded (%s). Services will still be recreated, but from THIS checkout'"'"'s docker-compose.yml, which is not the released one. Resolve the reason, or bring it current by hand:\n  git -C %s pull --ff-only\n' \
+            "$(iso_now)" "$COMPOSE_DIR" "${FRESHNESS#behind:}" "$FF" "$COMPOSE_DIR" >&2
+          log_decision "-" "checkout_stale" "" "" "${FRESHNESS};${FF}"
+          ;;
+      esac
+    fi
     ;;
   *)
     # Could not determine freshness. Reported, never fatal — see checkout_freshness.
