@@ -342,7 +342,7 @@ case "${1:-}" in
     echo
     echo "=== combined verdict ==="
     if [ "$layer1_rc" -eq 0 ] && [ "$layer2_rc" -eq 0 ]; then
-      echo "  GREEN — layer 1 engaged and layer 2's five catalog/object-store checks are green."
+      echo "  GREEN — layer 1 engaged and layer 2's catalog/object-store checks (0-7, #4299/#4524) are green."
       exit 0
     fi
     [ "$layer1_rc" -ne 0 ] && echo "  layer 1: NOT GREEN (see above)"
