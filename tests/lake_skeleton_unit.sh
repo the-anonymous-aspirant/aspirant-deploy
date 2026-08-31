@@ -158,7 +158,7 @@ lsblk() { echo "crypt"; }
 rc=0; out="$(layer1_check /fake/target)" || rc=$?
 assert_rc "a LUKS-backed volume is PASS (rc 0)" "0" "$rc"
 assert_eq "and the message says engaged" \
-  "1" "$(echo "$out" | grep -c 'PASS.*LUKS mapping')"
+  "1" "$(echo "$out" | grep -c 'PASS.*dm-crypt engaged in the chain')"
 
 findmnt() { echo "/dev/sda"; }
 lsblk() { echo "disk"; }
