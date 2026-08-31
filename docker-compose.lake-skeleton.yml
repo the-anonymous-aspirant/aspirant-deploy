@@ -68,7 +68,17 @@ services:
       start_period: 10s
 
   duckdb:
-    image: ghcr.io/the-anonymous-aspirant/aspirant-lake-duckdb:1.5.4@sha256:9dcd7396d2875f9a133ed18611f1e4d76bf4d45554cdcca22f92332177fc251a
+    # Built locally from our own Dockerfile rather than pulled from a pinned
+    # GHCR digest (#4475). This is the one image in the skeleton we author; the
+    # upstream images we merely consume (garage, catalog-postgres) stay
+    # digest-pinned above. Building locally means a change to Dockerfile-LakeDuckDB
+    # takes effect on the next `lake-skeleton.sh` run — no push-to-GHCR-and-repin
+    # step, which is the class of stall #4134/#4290 hit (seed/ingest dead for
+    # three days behind an un-republished digest).
+    build:
+      context: .
+      dockerfile: Dockerfile-LakeDuckDB
+    image: aspirant-lake-duckdb:local
     container_name: lake-skeleton-duckdb
     # A client, not a server: it runs on demand via `lake-skeleton.sh verify`
     # and exits. Nothing depends on it staying up.
