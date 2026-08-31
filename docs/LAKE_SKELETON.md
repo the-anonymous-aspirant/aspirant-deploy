@@ -37,21 +37,23 @@ them):
 |---|---|---|
 | `garage` | `ghcr.io/the-anonymous-aspirant/garage:v2.3.0` | S3 object store. Data + metadata both on scratch. |
 | `catalog` | `ghcr.io/the-anonymous-aspirant/lake-catalog-postgres:16-alpine` | DuckLake catalog database (`lake_catalog_skeleton`). |
-| `duckdb` | `ghcr.io/the-anonymous-aspirant/aspirant-lake-duckdb:1.5.4` | On-demand DuckDB client (`client` profile); the query engine, not a server. |
+| `duckdb` | built locally from `Dockerfile-LakeDuckDB` → `aspirant-lake-duckdb:local` | On-demand DuckDB client (`client` profile); the query engine, not a server. |
 
-All three come from GHCR. The cell cannot reach Docker Hub — its Wi-Fi dongle
-TLS-times-out against `registry-1.docker.io` while GHCR answers in under a
-second — so images are staged from the dev box and pinned by digest. Pinning
-also keeps the stack off the surprise-upgrade path §4 warns about.
+**Two are mirrors we pull; the third is ours, so we build it.** `garage` and
+`catalog` come from GHCR pinned by digest — the cell cannot reach Docker Hub
+(its Wi-Fi dongle TLS-times-out against `registry-1.docker.io` while GHCR answers
+in under a second), so those upstream images are staged from the dev box and
+pinned, which also keeps the stack off the surprise-upgrade path §4 warns about.
+Upgrading either means re-mirroring.
 
-**Two of the three are mirrors; the third is ours.** `garage` and `catalog` are
-registry-to-registry copies of upstream tags — upgrading either means
-re-mirroring. `aspirant-lake-duckdb` is **built from this repo's
-`Dockerfile-LakeDuckDB`**, which makes it the only image here whose source can
-change under a normal PR. Editing that Dockerfile changes what the repo
-declares; the digest above keeps serving whatever was last pushed, and nothing
-in the deploy path notices the gap. See § Republishing the client image — the
-step is part of the same PR as the Dockerfile edit, not a follow-up.
+`aspirant-lake-duckdb` is **built from this repo's `Dockerfile-LakeDuckDB`** on
+the next `lake-skeleton.sh` run (#4475) — the one image here whose source can
+change under a normal PR, so it is the one we build rather than pin. Editing that
+Dockerfile takes effect immediately, with no push-to-GHCR-and-repin step: the
+running image is always the current Dockerfile. That closes the gap that made
+`seed`/`ingest` die for three days behind an un-republished digest (#4134/#4290).
+Publishing the image to GHCR is now needed only if a consumer *outside* this
+skeleton wants it — see § Republishing the client image.
 
 ### Versions and why these ones
 
@@ -64,11 +66,11 @@ step is part of the same PR as the Dockerfile edit, not a follow-up.
 
 ### Republishing the client image
 
-Any change to `Dockerfile-LakeDuckDB` — a pip pin, a baked extension, the base
-tag — takes effect only when the image is rebuilt, pushed, and the digest in
-`docker-compose.lake-skeleton.yml` is updated. All three, in the PR that edits
-the Dockerfile. A Dockerfile edit without them is a no-op that reads like a
-change.
+**The skeleton no longer needs this (#4475).** `docker-compose.lake-skeleton.yml`
+builds `Dockerfile-LakeDuckDB` locally, so a change to the Dockerfile — a pip
+pin, a baked extension, the base tag — takes effect on the next
+`lake-skeleton.sh` run with no republish. This section covers the *separate*
+case where the image is wanted on GHCR for a consumer outside this skeleton.
 
 `scripts/publish-lake-client.sh` does all four, in order, as one command
 (#4441). Use it rather than the steps by hand: the repin is not a step you can
@@ -137,9 +139,9 @@ script. `tests/lake_client_publish_unit.sh` asserts both halves — that a
 credential-less `--push` touches neither docker nor the compose file, and that
 the digest surgery hits only the lake client's line and is idempotent.
 
-`tests/lake_client_image_unit.sh` is what makes the omission loud: it probes the
-**pinned** digest and fails when the published image is missing something the
-Dockerfile declares. It went in after exactly that omission (#4290) — #4134 added
+`tests/lake_client_image_unit.sh` builds the client image and probes it, failing
+when the built image is missing something the Dockerfile declares. It went in
+after the omission that motivated all this (#4290) — #4134 added
 `cryptography==46.0.3` on 2026-08-24 and did not repin, so `seed` and `ingest`
 both died at `import` inside the container for three days while every suite in
 `tests/` stayed green. None of them had ever run the pinned image; they all
@@ -289,11 +291,11 @@ fail — nothing was proven either way), and with any KEK supplied on an image
 that can decrypt, check 5 **FAILs** those three rows as data loss. See #4301's
 findings comment on #4273 for the live runs this predicts.
 
-The verb pulls the pinned client image as its own step before layer 2 (#4525,
-#4301 F6): a registry timeout or a vanished digest is reported as "the image
-could not be pulled — the harness did not run", which is NOT GREEN but is not
-a finding about the lake, rather than surfacing as a failed layer 2 with the
-pull noise mixed into the harness's report.
+The verb builds the client image as its own step before layer 2 (#4475, was a
+pinned-digest pull per #4525/#4301 F6): a build failure is reported as "the
+image could not be built — the harness did not run", which is NOT GREEN but is
+not a finding about the lake, rather than surfacing as a failed layer 2 with the
+build noise mixed into the harness's report.
 
 ---
 

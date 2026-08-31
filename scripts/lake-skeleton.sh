@@ -381,17 +381,18 @@ case "${1:-}" in
     echo
     echo "=== layer 2 (catalog + object store, #4299) ==="
     layer2_rc=0
-    # Pull the pinned client image as its own step (#4525, #4301 F6): when the
-    # digest is absent locally, `compose run` pulls it inline and a registry
-    # timeout surfaces as "layer 2 failed" with the pull noise mixed into the
-    # harness's report. Pulling first makes "the image could not be fetched"
+    # Build the client image as its own step (#4475, was a pinned-digest pull
+    # per #4525/#4301 F6): the duckdb service builds locally from
+    # Dockerfile-LakeDuckDB, so `compose run` would build it inline and a build
+    # failure would surface as "layer 2 failed" with the build noise mixed into
+    # the harness's report. Building first makes "the image could not be built"
     # its own sentence, distinct from "the harness ran and said NOT GREEN" —
     # both are NOT GREEN, but only one of them is a finding about the lake.
-    if compose --profile client pull -q duckdb; then
+    if compose --profile client build -q duckdb; then
       compose --profile client run --rm duckdb /work/verify_at_rest.py || layer2_rc=$?
     else
-      echo "  [FAIL] layer 2: the pinned client image could not be pulled (registry unreachable," \
-           "or the digest is gone) — the harness did not run, so nothing about the lake was verified"
+      echo "  [FAIL] layer 2: the client image could not be built from Dockerfile-LakeDuckDB" \
+           "— the harness did not run, so nothing about the lake was verified"
       layer2_rc=1
     fi
     echo
