@@ -23,7 +23,6 @@ COMMANDER_PORT="${COMMANDER_PORT:-8083}"
 TRANSLATOR_PORT="${TRANSLATOR_PORT:-8084}"
 MONITOR_PORT="${MONITOR_PORT:-8085}"
 REMARKABLE_PORT="${REMARKABLE_PORT:-8086}"
-FINANCE_PORT="${FINANCE_PORT:-8087}"
 ADVISOR_PORT="${ADVISOR_PORT:-8088}"
 OLLAMA_PORT="${OLLAMA_PORT:-11434}"
 NGINX_PORT="${NGINX_PORT:-80}"
@@ -72,7 +71,6 @@ Environment variables (defaults in parentheses):
     TRANSLATOR_PORT  Translator port (8084)
     MONITOR_PORT     Monitor port (8085)
     REMARKABLE_PORT  Remarkable port (8086)
-    FINANCE_PORT     Finance port (8087)
     ADVISOR_PORT     Advisor port (8088)
     OLLAMA_PORT      Ollama port (11434, internal — only tested if exposed)
     NGINX_PORT       Nginx port (80)
@@ -144,12 +142,11 @@ declare -A HEALTH_ENDPOINTS=(
     ["translator"]="${BASE_URL}:${TRANSLATOR_PORT}/health"
     ["monitor"]="${BASE_URL}:${MONITOR_PORT}/health"
     ["remarkable"]="${BASE_URL}:${REMARKABLE_PORT}/health"
-    ["finance"]="${BASE_URL}:${FINANCE_PORT}/health"
     ["advisor"]="${BASE_URL}:${ADVISOR_PORT}/health"
 )
 
 PHASE1_OK=true
-for svc in server transcriber commander translator monitor remarkable finance advisor; do
+for svc in server transcriber commander translator monitor remarkable advisor; do
     url="${HEALTH_ENDPOINTS[$svc]}"
     if wait_for_health "$url" "$svc"; then
         pass "$svc health (${url})"
@@ -240,16 +237,6 @@ else
         fail "GET /remarkable/health (proxy, HTTP ${http_code})"
     fi
 
-    # Finance health through proxy (Admin route)
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time "$REQUEST_TIMEOUT" \
-        -H "$AUTH_HEADER" \
-        "${BASE_URL}:${SERVER_PORT}/finance/health" 2>/dev/null || true)
-    if [[ "$http_code" =~ ^2 ]]; then
-        pass "GET /finance/health (proxy, HTTP ${http_code})"
-    else
-        fail "GET /finance/health (proxy, HTTP ${http_code})"
-    fi
-
     # Advisor health through proxy (Trusted route)
     http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time "$REQUEST_TIMEOUT" \
         -H "$AUTH_HEADER" \
@@ -304,25 +291,7 @@ else
     fail "GET /sync/status from remarkable (HTTP ${http_code})"
 fi
 
-# 3e. GET sources from finance (verify parser registry works)
-sources_resp=$(curl -s --max-time "$REQUEST_TIMEOUT" \
-    "${BASE_URL}:${FINANCE_PORT}/sources" 2>/dev/null || true)
-if echo "$sources_resp" | grep -q '"bank"'; then
-    pass "GET /sources from finance (parser registry)"
-else
-    fail "GET /sources from finance — unexpected response"
-fi
-
-# 3f. GET overview from finance (verify DB aggregation)
-overview_resp=$(curl -s --max-time "$REQUEST_TIMEOUT" \
-    "${BASE_URL}:${FINANCE_PORT}/summary/overview" 2>/dev/null || true)
-if echo "$overview_resp" | grep -q '"total_transactions"'; then
-    pass "GET /summary/overview from finance (DB aggregation)"
-else
-    fail "GET /summary/overview from finance — unexpected response"
-fi
-
-# 3g. GET sources from advisor (verify domain seeding and pgvector)
+# 3e. GET sources from advisor (verify domain seeding and pgvector)
 advisor_sources_resp=$(curl -s --max-time "$REQUEST_TIMEOUT" \
     "${BASE_URL}:${ADVISOR_PORT}/sources" 2>/dev/null || true)
 if echo "$advisor_sources_resp" | grep -q '"total_documents"'; then
@@ -374,15 +343,6 @@ if [[ -n "$TOKEN" ]]; then
         fail "GET /remarkable/tree (proxy, HTTP ${proxy_tree_code})"
     fi
 
-    # Finance sources through proxy
-    proxy_sources_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time "$REQUEST_TIMEOUT" \
-        -H "$AUTH_HEADER" \
-        "${BASE_URL}:${SERVER_PORT}/finance/sources" 2>/dev/null || true)
-    if [[ "$proxy_sources_code" =~ ^2 ]]; then
-        pass "GET /finance/sources (proxy, HTTP ${proxy_sources_code})"
-    else
-        fail "GET /finance/sources (proxy, HTTP ${proxy_sources_code})"
-    fi
     # Advisor sources through proxy
     proxy_advisor_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time "$REQUEST_TIMEOUT" \
         -H "$AUTH_HEADER" \
@@ -396,7 +356,6 @@ else
     skip "GET /commander/tasks (proxy) — no token"
     skip "GET /translator/languages (proxy) — no token"
     skip "GET /remarkable/tree (proxy) — no token"
-    skip "GET /finance/sources (proxy) — no token"
     skip "GET /advisor/sources (proxy) — no token"
 fi
 

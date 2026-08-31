@@ -41,7 +41,6 @@ Read these in order:
 | Translator | `../aspirant-translator` | 8084→8000 | Python/FastAPI |
 | Monitor | `../aspirant-monitor` | 8085→8000 | Python/FastAPI |
 | Remarkable | `../aspirant-remarkable` | 8086→8000 | Python/FastAPI |
-| Finance | `../aspirant-finance` | 8087→8000 | Python/FastAPI |
 | Advisor | `../aspirant-advisor` | 8088→8000 | Python/FastAPI |
 | Ollama | (3rd party image) | internal 11434 | ollama |
 | Kiwix | (3rd party image) | internal 8080 | kiwix-serve |
@@ -83,7 +82,6 @@ curl localhost:8083/health   # commander
 curl localhost:8084/health   # translator
 curl localhost:8085/health   # monitor
 curl localhost:8086/health   # remarkable
-curl localhost:8087/health   # finance
 
 # Integration tests
 ./tests/integration.sh
