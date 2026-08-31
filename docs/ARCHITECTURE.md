@@ -128,7 +128,6 @@ Production uses bind mounts to the RAID1 array at `/data/aspirant/`:
 ├── models/          → /data/models              (translator: Argos language models)
 ├── kiwix/           → /data                     (kiwix: Wikipedia .zim files)
 ├── remarkable/      → /data/remarkable          (remarkable: tablet sync data)
-├── finance/         → /app/seed_data            (finance: seed CSV data)
 ├── advisor/         → /data/advisor             (advisor: RAG knowledge base)
 └── ollama/          → /root/.ollama             (ollama: LLM model weights)
 ```
@@ -148,7 +147,6 @@ All services share a single Docker Compose bridge network. Service names resolve
 - `monitor` → System monitoring sidecar
 - `kiwix` → Offline Wikipedia (kiwix-serve)
 - `remarkable` → reMarkable tablet integration
-- `finance` → Budget/finance tracker
 - `advisor` → RAG knowledge base
 - `ollama` → Local LLM runtime
 - `browser` → aspirant-browser (agentic browser flows). Internal-only:

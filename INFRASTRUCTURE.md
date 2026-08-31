@@ -46,11 +46,11 @@ Full-stack web platform (Go + Vue.js + Python microservices) running on a single
   │  │ :8085  │  │ :8086  │  └──┬───────────┬───────┘  │ (intern) │ │
   │  └────────┘  └────────┘     │           │          └──────────┘ │
   │                              │           │                       │
-  │  ┌────────┐  ┌────────┐     │    ┌──────┴───┐                   │
-  │  │Finance │  │Advisor │─────┘    │  Ollama  │                   │
-  │  │ FastAPI│  │ FastAPI│──────────│  :11434  │                   │
-  │  │ :8087  │  │ :8088  │          │ (intern) │                   │
-  │  └────────┘  └────────┘          └──────────┘                   │
+  │              ┌────────┐     │    ┌──────┴───┐                   │
+  │              │Advisor │─────┘    │  Ollama  │                   │
+  │              │ FastAPI│──────────│  :11434  │                   │
+  │              │ :8088  │          │ (intern) │                   │
+  │              └────────┘          └──────────┘                   │
   │                                                                  │
   │  Storage: /data/aspirant/ (RAID1 bind mounts)                    │
   └──────────────────────────────────────────────────────────────────┘
@@ -69,7 +69,6 @@ Full-stack web platform (Go + Vue.js + Python microservices) running on a single
 | **Commander** | aspirant-commander | Python 3.11 + FastAPI + SQLAlchemy + dateparser | `ghcr.io/.../aspirant-commander` | 127.0.0.1:8083 | 8000 | — |
 | **Translator** | aspirant-translator | Python 3.11 + FastAPI + Argos Translate | `ghcr.io/.../aspirant-translator` | 127.0.0.1:8084 | 8000 | 2 GB |
 | **Monitor** | aspirant-monitor | Python 3.11 + FastAPI + Docker SDK | `ghcr.io/.../aspirant-monitor` | 127.0.0.1:8085 | 8000 | — |
-| **Finance** | aspirant-finance | Python FastAPI | `ghcr.io/.../aspirant-finance` | 127.0.0.1:8087 | 8000 | — |
 | **Advisor** | aspirant-advisor | Python 3.11 + FastAPI + sentence-transformers + pgvector | `ghcr.io/.../aspirant-advisor` | 127.0.0.1:8088 | 8000 | 2 GB |
 | **Browser** | aspirant-browser | Python 3.11 + FastAPI + Selenium + Chromium | `ghcr.io/.../aspirant-browser` | — (internal) | 8000 | 2 GB |
 | **Tor** | — | Tor SOCKS5 proxy (egress anonymisation for Browser) | `dperson/torproxy` | — (internal) | 9050 | 256 MB |
@@ -84,7 +83,7 @@ Full-stack web platform (Go + Vue.js + Python microservices) running on a single
 Client (blue/green) ──(standalone, no backend dependency; port 80 via override)
 
 Server ──depends on──▶ PostgreSQL (health check)
-       ──proxies to──▶ Transcriber, Commander, Translator, Monitor, Kiwix, Remarkable, Finance
+       ──proxies to──▶ Transcriber, Commander, Translator, Monitor, Kiwix, Remarkable
 
 Transcriber ──depends on──▶ PostgreSQL (health check)
 
@@ -107,8 +106,6 @@ docker-socket-proxy ──bind-mounts (read-only)──▶ /var/run/docker.sock
 
 Remarkable ──(standalone, no database)
            ──connects to──▶ reMarkable Paper Pro (SSH/rsync over LAN)
-
-Finance ──depends on──▶ PostgreSQL (health check)
 
 Advisor ──depends on──▶ PostgreSQL (health check)
         ──connects to──▶ Ollama (LLM generation)
@@ -161,7 +158,10 @@ Kiwix ──(standalone, serves ZIM files)
 | `commander_tasks` | `id` (UUID) | Parsed task commands | title, due_date, status, source_message_id |
 | `commander_processed` | `id` (UUID) | Tracking of processed transcriptions | voice_message_id, processed_at |
 
-#### Owned by Finance (Python/SQLAlchemy)
+#### Owned by Finance (RETIRED — pending data deletion, system_3 #4613)
+
+> The Finance service was retired by system_3 #4612. These tables still exist
+> and are scheduled for deletion by #4613 (#4508-D1). Removed here once dropped.
 
 | Table | Primary Key | Description | Key Columns |
 |-------|------------|-------------|-------------|
@@ -307,7 +307,6 @@ The Cloudflare token is read from `~/.config/aspirant/ddns.env` (owner `aspirant
 | 8084 | Translator API | Local network only |
 | 8085 | Monitor API | Local network only |
 | 8086 | Remarkable API | Local network only |
-| 8087 | Finance API | Local network only |
 | 8088 | Advisor API | Local network only |
 | 8089 | Browser API | Local network only |
 | 8999 | Client alt (blue/green) | Alternate frontend port |
@@ -325,7 +324,6 @@ Services communicate by container name. The Go server acts as API gateway, proxy
 - `translator` — text translation (proxied by server via `TRANSLATOR_URL`, default `http://translator:8000`)
 - `monitor` — system metrics (proxied by server via `MONITOR_URL`, default `http://monitor:8000`)
 - `kiwix` — offline Wikipedia (proxied by server via `KIWIX_URL`, default `http://kiwix:8080`)
-- `finance` — financial transaction management (proxied by server via `FINANCE_URL`, default `http://finance:8000`)
 - `advisor` — document RAG assistant (proxied by server via `ADVISOR_URL`, default `http://advisor:8000`)
 - `browser` — agentic browser-automation runner (host port 8089; reachable internally as `http://browser:8000`; egresses via the Tor SOCKS5 sidecar)
 - `tor` — Tor SOCKS5 sidecar (internal only; reachable from `browser` as `socks5://tor:9050` via `TOR_SOCKS_URL`; no host port exposed)
@@ -369,7 +367,6 @@ Per-repo: Checkout → Test → Login to GHCR → Build & push Docker image
 | aspirant-commander | `ghcr.io/the-anonymous-aspirant/aspirant-commander:latest` |
 | aspirant-translator | `ghcr.io/the-anonymous-aspirant/aspirant-translator:latest` |
 | aspirant-monitor | `ghcr.io/the-anonymous-aspirant/aspirant-monitor:latest` |
-| aspirant-finance | `ghcr.io/the-anonymous-aspirant/aspirant-finance:latest` |
 | aspirant-advisor | `ghcr.io/the-anonymous-aspirant/aspirant-advisor:latest` |
 | aspirant-browser | `ghcr.io/the-anonymous-aspirant/aspirant-browser:latest` |
 
@@ -408,7 +405,6 @@ No automated deployment — manual pull after CI builds complete.
 | Translator API | None (v1) | Local network only, no auth |
 | Monitor API | None (v1) | Local network only, no auth |
 | Remarkable API | None (v1) | Local network only, no auth |
-| Finance API | None (v1) | Local network only, no auth |
 | Advisor API | None (v1) | Local network only, no auth |
 | Browser API | None (v1) | Local network only, no auth |
 | Ollama API | None | Internal only, accessed by advisor |
@@ -438,7 +434,6 @@ No automated deployment — manual pull after CI builds complete.
 | `TRANSLATOR_URL` | Server | Low |
 | `MONITOR_URL` | Server | Low |
 | `KIWIX_URL` | Server | Low |
-| `FINANCE_URL` | Server | Low |
 | `ADVISOR_URL` | Server | Low |
 | `OLLAMA_URL` | Advisor | Low |
 | `OLLAMA_MODEL` | Advisor | Low |
@@ -473,7 +468,6 @@ The **monitor** service provides container status, disk usage, and system metric
 | Translator health | `curl http://localhost:8084/health` |
 | Monitor health | `curl http://localhost:8085/health` |
 | Remarkable health | `curl http://localhost:8086/health` |
-| Finance health | `curl http://localhost:8087/health` |
 | Advisor health | `curl http://localhost:8088/health` |
 | Browser health | `curl http://localhost:8089/health` |
 | DB connectivity | `pg_isready -U $DB_USER -d $DB_NAME` |

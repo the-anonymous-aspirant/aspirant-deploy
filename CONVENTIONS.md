@@ -106,7 +106,6 @@ Ports are assigned sequentially. Reserve the next available port when adding a s
 | 8084 | 8000 | Translator (FastAPI) | HTTP |
 | 8085 | 8000 | Monitor (FastAPI) | HTTP |
 | 8086 | 8000 | Remarkable (FastAPI) | HTTP |
-| 8087 | 8000 | Finance (FastAPI) | HTTP |
 | 8088 | 8000 | Advisor (FastAPI) | HTTP |
 | — | 11434 | Ollama (internal only) | HTTP |
 | — | 8080 | Kiwix (internal only) | HTTP |
@@ -754,7 +753,7 @@ test → build-and-push (main only)
 
 The test job differs by service type. Pick the variant that matches your service.
 
-#### Python + Database (transcriber, commander, finance)
+#### Python + Database (transcriber, commander)
 
 Services that depend on PostgreSQL use a GitHub Actions service container:
 
