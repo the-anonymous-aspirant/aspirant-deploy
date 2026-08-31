@@ -287,4 +287,3 @@ See [`_template/README.md`](_template/README.md) for the full pre/post-implement
 - [aspirant-commander](https://github.com/the-anonymous-aspirant/aspirant-commander) — Voice command parser
 - [aspirant-translator](https://github.com/the-anonymous-aspirant/aspirant-translator) — Argos Translate service
 - [aspirant-monitor](https://github.com/the-anonymous-aspirant/aspirant-monitor) — System metrics service
-- [aspirant-finance](https://github.com/the-anonymous-aspirant/aspirant-finance) — Financial transaction management

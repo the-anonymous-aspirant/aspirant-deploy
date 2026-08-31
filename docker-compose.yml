@@ -31,7 +31,6 @@ services:
       TRANSLATOR_URL: http://translator:8000
       MONITOR_URL: http://monitor:8000
       KIWIX_URL: http://kiwix:8080
-      FINANCE_URL: http://finance:8000
       ADVISOR_URL: http://advisor:8000
       ASSET_BASE_PATH: /data/assets
       # Refuse to boot on unset JWT_SECRET. The aspirant-server binary
@@ -178,22 +177,6 @@ services:
     command: --urlRootLocation=/api/wikipedia /data/wikipedia_en_all_maxi_2026-02.zim
     volumes:
       - /data/aspirant/kiwix:/data:ro
-
-  finance:
-    image: ghcr.io/the-anonymous-aspirant/aspirant-finance:latest
-    platform: linux/amd64
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:8087:8000"
-    env_file:
-      - .env
-    environment:
-      DB_HOST: postgres
-    volumes:
-      - /data/aspirant/finance/seed_data:/app/seed_data:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
 
   advisor:
     image: ghcr.io/the-anonymous-aspirant/aspirant-advisor:latest
