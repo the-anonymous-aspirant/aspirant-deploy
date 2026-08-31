@@ -39,7 +39,26 @@ Read the numbering as five separate claims, because they fail separately:
 
   5. the wrapped DEK actually unwraps under the KEK in custody. A row encrypted
      under a key nobody holds is not secure, it is lost; #4273 says so in as
-     many words. This is the only check that needs key material.
+     many words. This check needs key material.
+
+  6. with that DEK, the stored object **decrypts to the row's content address**
+     (task #4524, #4301 F3). Unwrapping proves the *key* is held; only a
+     decrypt-and-compare proves the *bytes* are this row's ciphertext. A valid
+     envelope of some other plaintext, or a forged ``AOBJ`` header over sixteen
+     junk bytes and a short plaintext, passes checks 2–5 and fails here. SKIP,
+     never green, when no KEK is supplied or the image cannot decrypt (#4290).
+
+  7. every object under ``bronze/blobs/`` has a catalog row (#4524, F4). The
+     catalog is what the checks iterate, so a blob nobody catalogued — an
+     ``aws s3 cp`` with the RW key, a half-failed loader — was invisible to
+     all of the above. Listed straight from the bucket and FAILed by key.
+
+  0. and before any of them: **zero catalog rows is a FAIL, not a green**
+     (#4524, F1). An empty catalog, the wrong DSN, or an ingest that catalogued
+     nothing must not report "encrypted at rest" on the strength of having
+     checked nothing. Likewise a ``sensitivity`` outside the catalog vocabulary
+     (F2) fails check 1 and is otherwise treated as ``high`` — fail closed —
+     because the harness exists to check the writer, not to trust its column.
 
 And one that is not in #4273's list
 -----------------------------------
@@ -61,7 +80,10 @@ Against a live lake, through the compose client profile::
 
 Env: ``LAKE_CATALOG_DSN``, ``LAKE_S3_ENDPOINT``, ``LAKE_S3_BUCKET``,
 ``LAKE_S3_REGION``, ``AWS_ACCESS_KEY_ID``, ``AWS_SECRET_ACCESS_KEY``, and
-optionally ``LAKE_KEK_HEX`` (+ ``LAKE_KEK_FINGERPRINT``) for check 5.
+optionally ``LAKE_KEK_HEX`` (+ ``LAKE_KEK_FINGERPRINT``) for checks 5 and 6.
+The fingerprint is honoured (#4524, F5): a KEK that does not match it is
+rejected as an input error before anything is verified, instead of every
+``high`` row being reported as data loss under a mistyped key.
 
 Without a lake at all::
 
@@ -233,36 +255,65 @@ class Finding:
         return f"<Finding {self.check} {self.status} {self.source_path}>"
 
 
+CHECK_POPULATION = "0-population"
 CHECK_DECLARES_ENVELOPE = "1-declares-envelope"
 CHECK_STORED_IS_CIPHERTEXT = "2-stored-is-ciphertext"
 CHECK_NO_PLAINTEXT_UNDER_HIGH = "3-no-plaintext-under-high"
 CHECK_CONTENT_ADDRESS = "3b-content-address"
 CHECK_KEK_VERSION_AGREES = "4-kek-version-agrees"
 CHECK_UNWRAPS_UNDER_CUSTODY = "5-unwraps-under-custody"
+CHECK_DECRYPTS_TO_CONTENT = "6-decrypts-to-content-address"
+CHECK_UNCATALOGUED = "7-uncatalogued-object"
+
+#: Where catalogued object bodies live; check 7 lists this prefix.
+BLOB_PREFIX = "bronze/blobs/"
 
 
-def verify(rows, fetch_object, unwrap=None):
+def verify(rows, fetch_object, unwrap=None, decrypt=None, stored_keys=None):
     """Run every check over `rows`, returning a list of Findings.
 
     `rows` are asset_inventory dicts; `fetch_object(object_key) -> bytes` reads
     the object **as stored**; `unwrap(wrapped_bytes) -> dek` is the custody seam
-    and is None when no KEK is available.
+    and is None when no KEK is available; `decrypt(body, dek) -> plaintext` is
+    the decrypt seam for check 6 and is None when the image cannot decrypt;
+    `stored_keys` is every object key under ``bronze/blobs/`` as listed from the
+    bucket, for check 7 — None means "not listed", and then check 7 is not run
+    (the self-test's per-row plants), which is different from an empty list.
 
-    Pure apart from the two callables, which is what lets the self-test plant
+    Pure apart from the callables, which is what lets the self-test plant
     failures without a lake.
     """
     findings: list[Finding] = []
+    rows = list(rows)
 
     def record(check, status, row, detail=""):
         findings.append(Finding(check, status, row.get("source_path", "?"), detail))
 
+    # --- check 0: something was actually checked ---------------------------
+    if not rows:
+        findings.append(Finding(
+            CHECK_POPULATION, FAIL, "(catalog)",
+            "zero catalog rows: nothing was verified. An empty or wrong catalog "
+            "(fresh DB, the skeleton instead of the real lake, a DSN typo) or an "
+            "ingest that catalogued nothing cannot be reported as encrypted at rest "
+            "on the strength of having checked nothing"))
+
     for row in rows:
         path = row.get("source_path", "?")
         wrapped_b64 = row.get("wrapped_dek")
-        is_high = row.get("sensitivity") == catalog.SENSITIVITY_HIGH
+        sensitivity = row.get("sensitivity")
+        in_vocabulary = sensitivity in catalog.SENSITIVITIES
+        # Off-vocabulary is checked AS high — fail closed — so a plaintext object
+        # under a row whose class nobody recognises still fails checks 2 and 3.
+        is_high = sensitivity == catalog.SENSITIVITY_HIGH or not in_vocabulary
 
         # --- check 1: the row declares what it claims --------------------
-        if is_high:
+        if not in_vocabulary:
+            record(CHECK_DECLARES_ENVELOPE, FAIL, row,
+                   f"sensitivity={sensitivity!r} is not in the catalog vocabulary "
+                   f"{catalog.SENSITIVITIES}: the row's class is unknown, so nothing "
+                   "below can be trusted about it; checked as high (fail closed)")
+        elif is_high:
             if not wrapped_b64:
                 record(CHECK_DECLARES_ENVELOPE, FAIL, row,
                        "sensitivity=high with no wrapped_dek: the row claims encryption "
@@ -377,6 +428,8 @@ def verify(rows, fetch_object, unwrap=None):
             record(CHECK_UNWRAPS_UNDER_CUSTODY, SKIP, row,
                    "no KEK available to this run — NOT a pass: whether this row can still "
                    "be opened is unknown")
+            record(CHECK_DECRYPTS_TO_CONTENT, SKIP, row,
+                   "no KEK, so the stored bytes were not proven to be this row's ciphertext")
             continue
         try:
             dek = unwrap(wrapped)
@@ -390,8 +443,56 @@ def verify(rows, fetch_object, unwrap=None):
             record(CHECK_UNWRAPS_UNDER_CUSTODY, FAIL, row,
                    f"unwrapped to {len(dek) if hasattr(dek, '__len__') else '?'} bytes, "
                    "not a 32-byte AES-256 DEK")
+            continue
+        record(CHECK_UNWRAPS_UNDER_CUSTODY, PASS, row)
+
+        # --- check 6: the bytes are THIS row's ciphertext (#4524, F3) ------
+        # Unwrapping proves the key is held. Only decrypting and comparing the
+        # result to the row's content address proves the object is the
+        # ciphertext of this plaintext: a valid envelope of another document,
+        # or a forged header over junk and a short plaintext, gets this far.
+        if decrypt is None:
+            record(CHECK_DECRYPTS_TO_CONTENT, SKIP, row,
+                   "KEK in custody but this image cannot decrypt (cryptography missing, "
+                   "#4290) — the stored bytes were not proven to be this row's ciphertext")
+            continue
+        try:
+            recovered = decrypt(body, dek)
+        except Exception as exc:
+            record(CHECK_DECRYPTS_TO_CONTENT, FAIL, row,
+                   f"the stored object does not decrypt under this row's DEK "
+                   f"({type(exc).__name__}) — whatever its header says, it is not this "
+                   "row's ciphertext: a forged envelope, a tampered object, or the "
+                   "wrong object under this key")
+            continue
+        recovered_digest = hashlib.sha256(recovered).hexdigest()
+        if plaintext_digest is None:
+            record(CHECK_DECRYPTS_TO_CONTENT, SKIP, row,
+                   "decrypts, but the row carries no sha256 to compare against")
+        elif recovered_digest == plaintext_digest:
+            record(CHECK_DECRYPTS_TO_CONTENT, PASS, row)
         else:
-            record(CHECK_UNWRAPS_UNDER_CUSTODY, PASS, row)
+            record(CHECK_DECRYPTS_TO_CONTENT, FAIL, row,
+                   "decrypts cleanly, but to bytes whose digest is not this row's content "
+                   "address — a valid envelope of some OTHER plaintext is stored under "
+                   "this row")
+
+    # --- check 7: the bucket holds nothing the catalog does not know (F4) ---
+    if stored_keys is not None:
+        catalogued = {row.get("object_key") for row in rows}
+        stored = sorted(set(stored_keys))
+        orphans = [key for key in stored if key not in catalogued]
+        for key in orphans:
+            findings.append(Finding(
+                CHECK_UNCATALOGUED, FAIL, key,
+                "an object in the blob store with no catalog row: none of the checks "
+                "above looked at it. Anything holding the RW key (an `aws s3 cp`, a "
+                "half-failed loader) can put plaintext where the catalog-driven "
+                "checks never reach"))
+        if not orphans:
+            findings.append(Finding(
+                CHECK_UNCATALOGUED, PASS, "(bucket)",
+                f"{len(stored)} stored object(s) under {BLOB_PREFIX}, every one catalogued"))
 
     return findings
 
@@ -490,15 +591,30 @@ def _custody_unwrap():
 
     None means "this run holds no key", which surfaces as SKIP on check 5 and
     keeps the verdict off green. It never means "assume fine".
+
+    The ceremony fingerprint (``LAKE_KEK_FINGERPRINT``) is honoured (#4524, F5):
+    when it is set and the supplied KEK does not match it, ``kek_loader``
+    raises ``KekLoadError`` and this propagates — a mistyped key is an input
+    error to be reported as such, not a run in which every ``high`` row is
+    "sealed under a key nobody holds".
     """
     if not CRYPTO_AVAILABLE:
         return None
     if not os.environ.get("LAKE_KEK_HEX"):
         return None
-    from kek_loader import load_kek_from_env
+    from kek_loader import ENV_KEK_FINGERPRINT, load_kek_from_env
 
-    kek = load_kek_from_env()
+    kek = load_kek_from_env(expected_fingerprint=os.environ.get(ENV_KEK_FINGERPRINT) or None)
+    if kek is None:  # pragma: no cover - LAKE_KEK_HEX was checked above
+        return None
     return lambda wrapped: dek_envelope.unwrap_dek(wrapped, kek)
+
+
+def _custody_decrypt():
+    """The `decrypt(body, dek) -> plaintext` seam for check 6, or None (#4290)."""
+    if not CRYPTO_AVAILABLE:
+        return None
+    return dek_envelope.decrypt_object
 
 
 def run_live(argv_json=False) -> int:
@@ -517,28 +633,73 @@ def run_live(argv_json=False) -> int:
     def fetch_object(key):
         return s3.get_object(Bucket=bucket, Key=key)["Body"].read()
 
-    unwrap = _custody_unwrap()
-    findings = verify(rows, fetch_object, unwrap)
-    green, counts = verdict(findings)
+    # Check 7 reads the bucket itself, not the catalog: every key under the
+    # blob prefix, paginated. A listing that fails is a FAIL finding, not an
+    # empty list — "could not look" must never read as "nothing there".
+    listing_error = None
+    try:
+        stored_keys = []
+        for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket,
+                                                                  Prefix=BLOB_PREFIX):
+            stored_keys.extend(obj["Key"] for obj in page.get("Contents", []))
+    except Exception as exc:
+        stored_keys = None
+        listing_error = f"{type(exc).__name__}: {exc}"
 
+    kek_error = None
+    try:
+        unwrap = _custody_unwrap()
+    except Exception as exc:  # KekLoadError: malformed hex or fingerprint mismatch
+        unwrap = None
+        kek_error = f"{type(exc).__name__}: {exc}"
+    decrypt = _custody_decrypt() if unwrap is not None else None
+
+    findings = verify(rows, fetch_object, unwrap, decrypt=decrypt, stored_keys=stored_keys)
+    if listing_error is not None:
+        findings.append(Finding(CHECK_UNCATALOGUED, FAIL, "(bucket)",
+                                f"could not list {BLOB_PREFIX}: {listing_error} — "
+                                "uncatalogued objects were not checked"))
+    green, counts = verdict(findings)
+    if kek_error is not None:
+        green = False
+
+    kek_supplied = bool(os.environ.get("LAKE_KEK_HEX"))
     if argv_json:
         print(json.dumps({
             "green": green,
             "counts": counts,
             "crypto_available": CRYPTO_AVAILABLE,
+            "kek_supplied": kek_supplied,
             "kek_in_custody": unwrap is not None,
+            "kek_error": kek_error,
+            "kek_fingerprint_checked": bool(os.environ.get("LAKE_KEK_FINGERPRINT")),
             "rows": len(rows),
+            "stored_objects": None if stored_keys is None else len(stored_keys),
             "findings": [f.as_dict() for f in findings],
         }, indent=2))
         return 0 if green else 1
 
-    print(f"lake at-rest verification — {len(rows)} catalog row(s) in {bucket}")
+    print(f"lake at-rest verification — {len(rows)} catalog row(s) in {bucket}, "
+          f"{'?' if stored_keys is None else len(stored_keys)} stored object(s) under "
+          f"{BLOB_PREFIX}")
     print(f"envelope format read from: "
           f"{'dek_envelope (canonical)' if CRYPTO_AVAILABLE else 'the mirrored header constants'}")
-    if unwrap is None:
-        print("KEK in custody: NO — check 5 cannot run and the verdict cannot be green")
+    if kek_error is not None:
+        print(f"KEK REJECTED: {kek_error}")
+        print("  an input error, not data loss — nothing about the rows was proven; "
+              "the verdict cannot be green")
+    elif unwrap is None and kek_supplied:
+        print("KEK supplied, but this image cannot import cryptography (#4290) — checks 5 "
+              "and 6 cannot run and the verdict cannot be green")
+    elif unwrap is None:
+        print("KEK in custody: NO — checks 5 and 6 cannot run and the verdict cannot be green")
+    elif decrypt is None:
+        print("KEK in custody: yes, but this image cannot decrypt (#4290) — check 6 is SKIP")
     else:
-        print("KEK in custody: yes")
+        print("KEK in custody: yes"
+              + (" (fingerprint verified)" if os.environ.get("LAKE_KEK_FINGERPRINT") else
+                 " (no LAKE_KEK_FINGERPRINT supplied — the key was not checked against "
+                 "the ceremony record)"))
     print()
     render(findings)
     print()
@@ -603,12 +764,40 @@ def _self_test() -> bool:
     def good_unwrap(_wrapped):
         return b"\x00" * 32
 
+    def fake_decrypt(stored, _dek):
+        """The inverse of sealed(): structurally an AOBJ decrypt, no crypto."""
+        if stored[:_AOBJ_HEADER_LEN] != _MIRROR_AOBJ_HEADER.pack(_MIRROR_AOBJ_MAGIC, 1):
+            raise ValueError("bad magic")
+        return stored[_AOBJ_HEADER_LEN + 16:][::-1]
+
     # --- the happy path, so the plants below are not trivially red --------
     healthy = row()
     store[healthy["object_key"]] = body
-    findings = verify([healthy], fetch, good_unwrap)
+    findings = verify([healthy], fetch, good_unwrap, decrypt=fake_decrypt,
+                      stored_keys=[healthy["object_key"]])
     green, counts = verdict(findings)
-    check("a correctly encrypted high row is green", green, str(counts))
+    check("a correctly encrypted, catalogued high row is green", green, str(counts))
+    check("and check 6 decrypted it to its own content address",
+          statuses(findings, CHECK_DECRYPTS_TO_CONTENT) == [PASS])
+
+    # --- plant 0: nothing to check is not a pass (#4524 F1) --------------
+    findings = verify([], fetch, good_unwrap, decrypt=fake_decrypt)
+    green, counts = verdict(findings)
+    check("zero catalog rows is a FAIL, not a vacuous green",
+          not green and FAIL in statuses(findings, CHECK_POPULATION), str(counts))
+
+    # --- plant 0b: a sensitivity the vocabulary does not know (#4524 F2) --
+    # Plaintext stored, no DEK: under 'normal' semantics every check passes.
+    for bad in (None, "HIGH", "confidential", "high "):
+        store[healthy["object_key"]] = plaintext
+        findings = verify([row(sensitivity=bad, wrapped_dek=None, kek_version=None)],
+                          fetch, good_unwrap, decrypt=fake_decrypt)
+        green, _ = verdict(findings)
+        check(f"sensitivity={bad!r} is refused on check 1 and checked as high",
+              not green
+              and FAIL in statuses(findings, CHECK_DECLARES_ENVELOPE)
+              and FAIL in statuses(findings, CHECK_STORED_IS_CIPHERTEXT))
+    store[healthy["object_key"]] = body
 
     # --- plant 1: plaintext sitting under a high row ----------------------
     store[healthy["object_key"]] = plaintext
@@ -679,11 +868,65 @@ def _self_test() -> bool:
           any("data loss" in f.detail for f in findings
               if f.check == CHECK_UNWRAPS_UNDER_CUSTODY))
 
+    # --- plant 7: the bytes unwrap but are not THIS row's ciphertext (F3) --
+    other_body, _ = sealed(b"SYNTHETIC some other document entirely")
+    store[healthy["object_key"]] = other_body
+    findings = verify([healthy], fetch, good_unwrap, decrypt=fake_decrypt)
+    check("a valid envelope of a DIFFERENT plaintext passes checks 2-5",
+          FAIL not in statuses(findings, CHECK_STORED_IS_CIPHERTEXT)
+          and FAIL not in statuses(findings, CHECK_CONTENT_ADDRESS)
+          and statuses(findings, CHECK_UNWRAPS_UNDER_CUSTODY) == [PASS])
+    check("but check 6 sees it does not decrypt to this row's content address",
+          FAIL in statuses(findings, CHECK_DECRYPTS_TO_CONTENT))
+    check("and the sentence says it is another plaintext",
+          any("OTHER plaintext" in f.detail for f in findings
+              if f.check == CHECK_DECRYPTS_TO_CONTENT))
+
+    short_forgery = _MIRROR_AOBJ_HEADER.pack(_MIRROR_AOBJ_MAGIC, 1) + b"\x00" * 16 + b"hi"
+    store[healthy["object_key"]] = short_forgery
+    findings = verify([healthy], fetch, good_unwrap, decrypt=fake_decrypt)
+    check("a forged header over junk and a short plaintext is caught by check 6",
+          FAIL in statuses(findings, CHECK_DECRYPTS_TO_CONTENT))
+
+    def exploding_decrypt(_stored, _dek):
+        raise ValueError("object decryption failed the authentication tag")
+
+    store[healthy["object_key"]] = body
+    findings = verify([healthy], fetch, good_unwrap, decrypt=exploding_decrypt)
+    check("an object that will not decrypt under its own DEK is a FAIL, named as such",
+          FAIL in statuses(findings, CHECK_DECRYPTS_TO_CONTENT)
+          and any("not this row's ciphertext" in f.detail for f in findings
+                  if f.check == CHECK_DECRYPTS_TO_CONTENT))
+
+    findings = verify([healthy], fetch, good_unwrap, decrypt=None)
+    green, counts = verdict(findings)
+    check("a KEK without a decryptor (#4290) leaves check 6 SKIP and the verdict off green",
+          statuses(findings, CHECK_DECRYPTS_TO_CONTENT) == [SKIP] and not green, str(counts))
+
+    # --- plant 8: an object the catalog does not know about (F4) ----------
+    orphan = "bronze/blobs/sha256/43/01/gate-4301-orphan"
+    store[orphan] = b"%PDF-1.4 SYNTHETIC uncatalogued plaintext"
+    findings = verify([healthy], fetch, good_unwrap, decrypt=fake_decrypt,
+                      stored_keys=[healthy["object_key"], orphan])
+    green, _ = verdict(findings)
+    check("an object in the bucket with no catalog row is a FAIL that names the key",
+          not green and any(f.status == FAIL and f.source_path == orphan
+                            for f in findings if f.check == CHECK_UNCATALOGUED))
+    findings = verify([healthy], fetch, good_unwrap, decrypt=fake_decrypt, stored_keys=[])
+    check("an empty listing against a populated catalog is not an orphan",
+          FAIL not in statuses(findings, CHECK_UNCATALOGUED))
+    findings = verify([], fetch, good_unwrap, decrypt=fake_decrypt, stored_keys=[orphan])
+    check("with an empty catalog, every stored object is an orphan",
+          FAIL in statuses(findings, CHECK_UNCATALOGUED)
+          and FAIL in statuses(findings, CHECK_POPULATION))
+
     # --- the rule that makes the whole thing worth anything ---------------
     findings = verify([healthy], fetch, None)
     green, counts = verdict(findings)
     check("with no KEK, check 5 is SKIP and not PASS",
           statuses(findings, CHECK_UNWRAPS_UNDER_CUSTODY) == [SKIP])
+    check("and check 6 is SKIP too, not silently absent",
+          statuses(findings, CHECK_DECRYPTS_TO_CONTENT) == [SKIP])
     check("and a skipped check keeps the verdict off green", not green, str(counts))
 
     # --- an unreadable object is a failure, not an absence ----------------
