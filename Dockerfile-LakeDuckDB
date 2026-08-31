@@ -2,13 +2,15 @@
 # Carries the ducklake + httpfs extensions baked in, so the container works on
 # the cell's degraded link without reaching out to the extension repository.
 #
-# EDITING THIS FILE IS NOT ENOUGH. docker-compose.lake-skeleton.yml consumes a
-# published digest, so a change here does nothing until the image is rebuilt,
-# pushed, and that digest updated — in this same PR. #4134 added `cryptography`
-# below without those steps and left `lake-skeleton.sh seed` and `ingest` dying
-# at import for three days. `tests/lake_client_image_unit.sh` now fails when the
-# pin is behind this file; docs/LAKE_SKELETON.md § Republishing the client image
-# carries the four commands.
+# docker-compose.lake-skeleton.yml BUILDS this file locally (#4475) — a change
+# here takes effect on the next `lake-skeleton.sh` run, with no push-to-GHCR or
+# digest-repin step. This is the image we author; the upstream images the
+# skeleton merely consumes (garage, catalog-postgres) stay digest-pinned.
+# The three-day stall #4134 caused (adding `cryptography` below without
+# republishing the pinned digest, so `lake-skeleton.sh seed` and `ingest` died
+# at import) is structurally impossible now: the running image is always this
+# file. `tests/lake_client_image_unit.sh` builds and probes it to confirm every
+# pinned dependency and baked extension resolves.
 FROM python:3.12-slim
 
 # duckdb >= 1.5.2 is the floor for DuckLake v1.0 (ducklake.select stable docs).
