@@ -30,7 +30,6 @@ services:
       COMMANDER_URL: http://commander:8000
       TRANSLATOR_URL: http://translator:8000
       MONITOR_URL: http://monitor:8000
-      KIWIX_URL: http://kiwix:8080
       ADVISOR_URL: http://advisor:8000
       ASSET_BASE_PATH: /data/assets
       # Refuse to boot on unset JWT_SECRET. The aspirant-server binary
@@ -168,15 +167,6 @@ services:
       - docker_proxy_net
     depends_on:
       - docker-socket-proxy
-
-  kiwix:
-    image: ghcr.io/kiwix/kiwix-serve:latest
-    restart: unless-stopped
-    environment:
-      PORT: 8080
-    command: --urlRootLocation=/api/wikipedia /data/wikipedia_en_all_maxi_2026-02.zim
-    volumes:
-      - /data/aspirant/kiwix:/data:ro
 
   advisor:
     image: ghcr.io/the-anonymous-aspirant/aspirant-advisor:latest
