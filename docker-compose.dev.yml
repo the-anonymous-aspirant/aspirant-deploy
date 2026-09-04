@@ -32,7 +32,6 @@ services:
       COMMANDER_URL: http://commander:8000
       TRANSLATOR_URL: http://translator:8000
       MONITOR_URL: http://monitor:8000
-      KIWIX_URL: http://kiwix:8080
       ADVISOR_URL: http://advisor:8000
       ASSET_BASE_PATH: /data/assets
     env_file:
@@ -152,12 +151,6 @@ services:
     ports:
       - "127.0.0.1:8090:80"
 
-  kiwix:
-    image: ghcr.io/kiwix/kiwix-serve:latest
-    command: --port 8080 --urlRootLocation /api/wikipedia /data/wikipedia_en_all_maxi_2026-02.zim
-    volumes:
-      - kiwixdata-dev:/data:ro
-
   advisor:
     build:
       context: ../aspirant-advisor
@@ -257,7 +250,6 @@ volumes:
   assetdata-dev:
   audiodata-dev:
   translatordata-dev:
-  kiwixdata-dev:
   advisordata-dev:
   browserdata-dev:
   ollamadata-dev:

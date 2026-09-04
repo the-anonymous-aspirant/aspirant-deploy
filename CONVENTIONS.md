@@ -108,7 +108,6 @@ Ports are assigned sequentially. Reserve the next available port when adding a s
 | 8086 | 8000 | Remarkable (FastAPI) | HTTP |
 | 8088 | 8000 | Advisor (FastAPI) | HTTP |
 | — | 11434 | Ollama (internal only) | HTTP |
-| — | 8080 | Kiwix (internal only) | HTTP |
 | 8089 | — | *Next service* | — |
 | 8999 | 80 | Client (alt) | HTTP |
 | 41922 | 22 | SSH | TCP |
@@ -126,7 +125,6 @@ Named volumes use short, descriptive names:
 | `remarkabledata` | `/data/remarkable` | reMarkable sync data |
 | `advisordata` | `/data/advisor` | RAG knowledge base documents |
 | `ollamadata` | `/root/.ollama` | LLM model weights |
-| `kiwixdata` | `/data` | Wikipedia ZIM files |
 
 Pattern for new volumes: `{contenttype}data` (e.g., `imagedata`, `cachedata`)
 
