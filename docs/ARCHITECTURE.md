@@ -126,7 +126,6 @@ Production uses bind mounts to the RAID1 array at `/data/aspirant/`:
 ├── assets/          → /data/assets              (server: static assets — images, audio, dictionary)
 ├── audio/           → /data/audio               (transcriber: voice recordings)
 ├── models/          → /data/models              (translator: Argos language models)
-├── kiwix/           → /data                     (kiwix: Wikipedia .zim files)
 ├── remarkable/      → /data/remarkable          (remarkable: tablet sync data)
 ├── advisor/         → /data/advisor             (advisor: RAG knowledge base)
 └── ollama/          → /root/.ollama             (ollama: LLM model weights)
@@ -145,7 +144,6 @@ All services share a single Docker Compose bridge network. Service names resolve
 - `commander` → Command parser
 - `translator` → Translation service
 - `monitor` → System monitoring sidecar
-- `kiwix` → Offline Wikipedia (kiwix-serve)
 - `remarkable` → reMarkable tablet integration
 - `advisor` → RAG knowledge base
 - `ollama` → Local LLM runtime

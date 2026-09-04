@@ -43,7 +43,6 @@ Read these in order:
 | Remarkable | `../aspirant-remarkable` | 8086→8000 | Python/FastAPI |
 | Advisor | `../aspirant-advisor` | 8088→8000 | Python/FastAPI |
 | Ollama | (3rd party image) | internal 11434 | ollama |
-| Kiwix | (3rd party image) | internal 8080 | kiwix-serve |
 
 ## Adding a New Service
 
