@@ -40,11 +40,11 @@ Full-stack web platform (Go + Vue.js + Python microservices) running on a single
   │  │ :80    │  │ :8081  │  │ :8082    │  │ :8083   │  │ :8084  │ │
   │  └────────┘  └───┬────┘  └────┬─────┘  └────┬────┘  └────────┘ │
   │                  │            │              │                   │
-  │  ┌────────┐  ┌───┴────┐  ┌───┴──────────────┴──┐  ┌──────────┐ │
-  │  │Monitor │  │Remarkab│  │     PostgreSQL       │  │  Kiwix   │ │
-  │  │ FastAPI│  │ FastAPI│  │       :5432          │  │ :8080    │ │
-  │  │ :8085  │  │ :8086  │  └──┬───────────┬───────┘  │ (intern) │ │
-  │  └────────┘  └────────┘     │           │          └──────────┘ │
+  │  ┌────────┐  ┌───┴────┐  ┌───┴──────────────┴──┐               │
+  │  │Monitor │  │Remarkab│  │     PostgreSQL       │               │
+  │  │ FastAPI│  │ FastAPI│  │       :5432          │               │
+  │  │ :8085  │  │ :8086  │  └──┬───────────┬───────┘               │
+  │  └────────┘  └────────┘     │           │                       │
   │                              │           │                       │
   │              ┌────────┐     │    ┌──────┴───┐                   │
   │              │Advisor │─────┘    │  Ollama  │                   │
@@ -73,7 +73,6 @@ Full-stack web platform (Go + Vue.js + Python microservices) running on a single
 | **Browser** | aspirant-browser | Python 3.11 + FastAPI + Selenium + Chromium | `ghcr.io/.../aspirant-browser` | — (internal) | 8000 | 2 GB |
 | **Tor** | — | Tor SOCKS5 proxy (egress anonymisation for Browser) | `dperson/torproxy` | — (internal) | 9050 | 256 MB |
 | **Ollama** | — | Ollama (LLM inference) | `ollama/ollama` | — (internal) | 11434 | 6 GB |
-| **Kiwix** | — | kiwix-serve (3rd party) | `ghcr.io/kiwix/kiwix-serve` | — (internal) | 8080 | — |
 
 **Host-port bindings.** Only ports 80/8999 (client) and 8081 (server, the sole authenticated web tier) are published on `0.0.0.0`. Every other listed host port is bound to `127.0.0.1` so it is reachable to on-cell debug shells (localhost) and to compose peers via internal DNS, but never from the LAN or WAN. See system_3 #1379 for the container-escape / weak-DB-credential attack chain this closes; the aspirant-server `/api/*` proxy remains the single authenticated ingress for downstream microservices. `browser` is un-published entirely per #1375.
 
@@ -83,7 +82,7 @@ Full-stack web platform (Go + Vue.js + Python microservices) running on a single
 Client (blue/green) ──(standalone, no backend dependency; port 80 via override)
 
 Server ──depends on──▶ PostgreSQL (health check)
-       ──proxies to──▶ Transcriber, Commander, Translator, Monitor, Kiwix, Remarkable
+       ──proxies to──▶ Transcriber, Commander, Translator, Monitor, Remarkable
 
 Transcriber ──depends on──▶ PostgreSQL (health check)
 
@@ -117,7 +116,6 @@ Browser ──depends on──▶ PostgreSQL (health check)
 
 Ollama ──(standalone, serves LLM models)
 
-Kiwix ──(standalone, serves ZIM files)
 ```
 
 ---
@@ -254,7 +252,6 @@ Requires JWT authentication (Trusted role or above). All endpoints are user-scop
 | `advisordata` | `/data/advisor` | Advisor | Uploaded documents (contracts, policies, law) |
 | `browserdata` | `/data/aspirant/browser_flows` | Browser | Per-run browser-flow assets (screenshots, DOM snapshots, HAR files), keyed by `run_id` |
 | `ollamadata` | `/root/.ollama` | Ollama | LLM model weights (re-downloadable) |
-| `kiwixdata` | `/data` | Kiwix | Wikipedia ZIM files (re-downloadable) |
 
 ### Lake Skeleton (phase 0, disposable)
 
@@ -323,7 +320,6 @@ Services communicate by container name. The Go server acts as API gateway, proxy
 - `commander` — voice command parser (proxied by server via `COMMANDER_URL`, default `http://commander:8000`)
 - `translator` — text translation (proxied by server via `TRANSLATOR_URL`, default `http://translator:8000`)
 - `monitor` — system metrics (proxied by server via `MONITOR_URL`, default `http://monitor:8000`)
-- `kiwix` — offline Wikipedia (proxied by server via `KIWIX_URL`, default `http://kiwix:8080`)
 - `advisor` — document RAG assistant (proxied by server via `ADVISOR_URL`, default `http://advisor:8000`)
 - `browser` — agentic browser-automation runner (host port 8089; reachable internally as `http://browser:8000`; egresses via the Tor SOCKS5 sidecar)
 - `tor` — Tor SOCKS5 sidecar (internal only; reachable from `browser` as `socks5://tor:9050` via `TOR_SOCKS_URL`; no host port exposed)
@@ -433,7 +429,6 @@ No automated deployment — manual pull after CI builds complete.
 | `COMMANDER_URL` | Server | Low |
 | `TRANSLATOR_URL` | Server | Low |
 | `MONITOR_URL` | Server | Low |
-| `KIWIX_URL` | Server | Low |
 | `ADVISOR_URL` | Server | Low |
 | `OLLAMA_URL` | Advisor | Low |
 | `OLLAMA_MODEL` | Advisor | Low |

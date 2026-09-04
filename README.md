@@ -31,11 +31,11 @@ Central hub for the Aspirant platform — deployment configuration, development 
 └─────┬─────┘ └────┬─────┘ └─────────────┘ └──────────┘ └──────────┘
       │            │
       ▼            ▼
-┌──────────────────────────────────────────┐   ┌──────────────────┐
-│              PostgreSQL 16               │   │     Kiwix        │
-│              Port 5432                   │   │  Wikipedia serve  │
-│              Volume: pgdata              │   │  (no proxy)      │
-│                                          │   └──────────────────┘
+┌──────────────────────────────────────────┐
+│              PostgreSQL 16               │
+│              Port 5432                   │
+│              Volume: pgdata              │
+│                                          │
 │  Tables:                                 │
 │  ├─ users, roles (server)                │   ┌──────────────────┐
 │  ├─ messages, game_scores (server)       │   │     AWS S3       │
@@ -56,7 +56,6 @@ Central hub for the Aspirant platform — deployment configuration, development 
 | **translator** | [aspirant-translator](https://github.com/the-anonymous-aspirant/aspirant-translator) | 8084→8000 | Python, FastAPI, Argos Translate | - | translatordata |
 | **monitor** | [aspirant-monitor](https://github.com/the-anonymous-aspirant/aspirant-monitor) | 8085→8000 | Python, FastAPI | - | docker.sock (ro), /data (ro) |
 | **remarkable** | [aspirant-remarkable](https://github.com/the-anonymous-aspirant/aspirant-remarkable) | 8086→8000 | Python, FastAPI, rmscene, rmc, cairosvg | - | remarkabledata |
-| **kiwix** | [kiwix-serve](https://github.com/kiwix/kiwix-serve) (3rd party) | internal 8080 | C++, libzim | - | kiwixdata (ro) |
 | **postgres** | (standard image) | 5432 | PostgreSQL 16 | all tables | pgdata |
 
 ## How Services Connect
@@ -71,7 +70,6 @@ The Go server acts as an API gateway. It proxies requests to microservices using
 | `COMMANDER_URL` | `http://commander:8000` | Command parsing |
 | `TRANSLATOR_URL` | `http://translator:8000` | Text translation |
 | `MONITOR_URL` | `http://monitor:8000` | System monitoring |
-| `KIWIX_URL` | `http://kiwix:8080` | Wikipedia offline |
 | `REMARKABLE_URL` | `http://remarkable:8000` | reMarkable notebooks |
 
 Docker Compose networking resolves service names (e.g., `transcriber`) to container IPs automatically.
@@ -91,7 +89,7 @@ Each service owns its tables and manages its own schema (auto-migrate on startup
 - **Server (GORM):** users, roles, messages, game_scores, ludde_feeding_times
 - **Transcriber (SQLAlchemy):** voice_messages
 - **Commander (SQLAlchemy):** tasks, notes
-- **Translator, Monitor, Remarkable, Kiwix:** no database (stateless)
+- **Translator, Monitor, Remarkable:** no database (stateless)
 
 ### Data Flow: Voice → Command
 
@@ -186,7 +184,6 @@ Creates two fresh test users, exercises the full goal mapper user flow (tree CRU
 | `audiodata` | `/data/audio` | Voice message recordings | Medium |
 | `remarkabledata` | `/data/remarkable` | Synced reMarkable notebooks + to-device staging | Medium |
 | `translatordata` | `/data/models` | Argos Translate language models (re-downloadable) | Low |
-| `kiwixdata` | `/data` | Wikipedia ZIM files (re-downloadable) | Low |
 
 ## Port Allocation
 
@@ -251,7 +248,6 @@ docker compose logs -f  # verify startup
 
 4. **Monitor needs Docker socket access.** The monitor service mounts `/var/run/docker.sock` read-only to inspect container status and `/data` read-only for disk usage reporting.
 
-5. **Kiwix serves through the Go proxy, not directly.** Kiwix doesn't expose a host port. It's accessed via the Go server's proxy at `/api/wikipedia/...`.
 
 ## Conventions & Standards
 
