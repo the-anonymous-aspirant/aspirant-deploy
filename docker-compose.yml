@@ -1,5 +1,22 @@
+# Bound every container's log file. The daemon default is json-file with NO
+# rotation, so each container's log grows without limit and is discarded only
+# when the container is recreated — an unbounded file on the root disk, which
+# docker has filled here before, and (since the server logs the client IP of
+# every request) an unbounded record of visitor addresses. system_3 #5244.
+#
+# 10m x 3 bounds each container to 30 MB. That is days of history for a quiet
+# service and hours for the server under crawler traffic; rotation DISCARDS
+# what falls out of the window, so forensics beyond it needs logs shipped
+# somewhere rather than a bigger file here.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   postgres:
+    logging: *default-logging
     image: pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
@@ -20,6 +37,7 @@ services:
       retries: 5
 
   server:
+    logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-server:latest
     restart: unless-stopped
     ports:
@@ -56,6 +74,7 @@ services:
   # Blue-green client: port 80 assigned via docker-compose.override.yml
   # Deploy with: ./scripts/deploy-client.sh
   client-blue:
+    logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-client:latest
     restart: unless-stopped
     volumes:
@@ -66,12 +85,14 @@ services:
       - /data/aspirant/nginx-secrets:/etc/nginx/secrets:ro
 
   client-green:
+    logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-client:latest
     restart: unless-stopped
     volumes:
       - /data/aspirant/nginx-secrets:/etc/nginx/secrets:ro
 
   transcriber:
+    logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-transcriber:latest
     restart: unless-stopped
     ports:
@@ -92,6 +113,7 @@ services:
     mem_limit: 2g
 
   commander:
+    logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-commander:latest
     restart: unless-stopped
     ports:
@@ -103,6 +125,7 @@ services:
         condition: service_healthy
 
   translator:
+    logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-translator:latest
     restart: unless-stopped
     ports:
@@ -120,6 +143,7 @@ services:
   # POST=0 (default) blocks every write verb, so the socket cannot be
   # used to launch a privileged container. See system_3 #1378.
   docker-socket-proxy:
+    logging: *default-logging
     # Pinned to a specific tag (not :latest) because this container runs
     # read_only:true — an upstream manifest change that writes to a path
     # not listed under `tmpfs:` crash-loops the sidecar (cell hit
@@ -145,6 +169,7 @@ services:
     mem_limit: 64m
 
   monitor:
+    logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-monitor:latest
     restart: unless-stopped
     ports:
@@ -169,6 +194,7 @@ services:
       - docker-socket-proxy
 
   advisor:
+    logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-advisor:latest
     restart: unless-stopped
     ports:
@@ -186,6 +212,7 @@ services:
     mem_limit: 2g
 
   browser:
+    logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-browser:latest
     restart: unless-stopped
     # Intentionally no host `ports:` mapping. aspirant-browser is reached
@@ -216,11 +243,13 @@ services:
     mem_limit: 2g
 
   tor:
+    logging: *default-logging
     image: dperson/torproxy:latest
     restart: unless-stopped
     mem_limit: 256m
 
   ollama:
+    logging: *default-logging
     image: ollama/ollama:latest
     restart: unless-stopped
     volumes:
@@ -235,6 +264,7 @@ services:
   # unattended. No ports: reached only via client-nginx (auth_request-
   # gated) on the default network; /health per the service contract.
   histoire:
+    logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-histoire:latest
     restart: unless-stopped
     mem_limit: 128m
@@ -253,6 +283,7 @@ services:
   # frontend is therefore on `default` as well, and only loopback-published
   # for on-cell debug.
   penpot-frontend:
+    logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/penpot-frontend:2.16.2@sha256:7bcd6d8ffa333054906cde55f6e9da9936a19b2ab30d2b50cb263d44e7740c7b
     restart: unless-stopped
     ports:
@@ -271,6 +302,7 @@ services:
     mem_limit: 512m
 
   penpot-backend:
+    logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/penpot-backend:2.16.2@sha256:c322cb8f864dc8c23ab033883c22e8b2e11ffb03cb63bede249b21ca6d56f6b4
     restart: unless-stopped
     volumes:
@@ -304,6 +336,7 @@ services:
     mem_limit: 2g
 
   penpot-exporter:
+    logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/penpot-exporter:2.16.2@sha256:7f4cc034d9366627d7c8e222a70fbbeacc88ad4ee8dd5bc2302ad83b77c2d148
     restart: unless-stopped
     environment:
@@ -318,6 +351,7 @@ services:
     mem_limit: 2g
 
   penpot-postgres:
+    logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/penpot-postgres:15@sha256:1439cab601c7157f909d6e85b096adc81264bba698b40ad163c15cf4bcad74bb
     restart: unless-stopped
     stop_signal: SIGINT
@@ -337,6 +371,7 @@ services:
     mem_limit: 1g
 
   penpot-redis:
+    logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/penpot-redis:7@sha256:33d3a320585c78a71f509c68284a3423a0d790380931829e8abac44aaa31b8c0
     restart: unless-stopped
     networks:
@@ -386,6 +421,7 @@ services:
   # and reports `degraded`, one service, visibly, instead of silently wedging
   # the host.
   explorer-api:
+    logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-explorer:latest
     restart: unless-stopped
     # Opt-in: `docker compose --profile explorer up -d`. Until a host is
@@ -417,6 +453,7 @@ services:
   # the API over the same authed origin, so giving it a lake interface would
   # widen the boundary for nothing.
   explorer:
+    logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-explorer-frontend:latest
     restart: unless-stopped
     profiles: ["explorer"]
