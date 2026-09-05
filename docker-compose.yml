@@ -36,6 +36,29 @@ services:
       # additionally rejects known-placeholder / short values at start.
       # See system_3 #1374.
       JWT_SECRET: "${JWT_SECRET:?JWT_SECRET must be set in .env — generate with: openssl rand -base64 32}"
+      # Mask the monitor's mail credentials from this service.
+      #
+      # `env_file: .env` below hands the server EVERY variable in that file,
+      # including the SMTP_* block that exists for `monitor`'s alert mail (see
+      # that service further down). That was harmless while nothing in
+      # aspirant-server read them, and stopped being harmless on 2026-09-05
+      # when the server gained a mail sender: it read a partial match of those
+      # names as a half-configured relay, treated it as fatal, and crash-looped
+      # — every page on the-aspirant.com returned 502 (system_3 #5235).
+      #
+      # aspirant-server#105 fixes the code side, so a mail misconfiguration now
+      # logs loudly instead of killing the process. This is the other half: the
+      # server has no business seeing the monitor's credentials, and masking
+      # them per service scopes the fix without touching .env, so `monitor`
+      # keeps its configuration unchanged.
+      #
+      # These stay empty until a relay is chosen for sign-up mail (system_3
+      # #5119). Setting them is what switches outbound mail on, and the
+      # credentials in .env are a personal Gmail account, so that is the
+      # operator's decision to make.
+      SMTP_HOST: ""
+      SMTP_USER: ""
+      SMTP_PASSWORD: ""
     env_file:
       - .env
     volumes:
