@@ -1,16 +1,31 @@
 # DuckDB client for the phase-0 lake skeleton (DATA_LAKE_DESIGN.md §11.1).
-# Carries the ducklake + httpfs extensions baked in, so the container works on
-# the cell's degraded link without reaching out to the extension repository.
+# The ducklake + httpfs + postgres extensions are supplied at RUN time from the
+# host's duckdb extension cache, mounted read-only by
+# docker-compose.lake-skeleton.yml — the container never reaches out to
+# extensions.duckdb.org, and neither does the BUILD.
+#
+# Why not `install_extension` at build time (the pre-#5366 shape): that RUN
+# fetched the extensions from extensions.duckdb.org, which the cell cannot
+# reach. #4475 made this image build locally on the cell, so the moment the
+# reaper reclaims `aspirant-lake-duckdb:local` (root-disk docker reclaim), the
+# next `lake-skeleton.sh` rebuild died at that RUN with
+# `IOException: Failed to download extension` — `ingest`/`verify-at-rest` dead
+# until the box regained the link (the #4134/#4290 stall class recurring
+# through the #4475 local-build door, #5366).
+#
+# The scripts LOAD (never INSTALL) the extensions, so a pre-populated extension
+# directory is all they need. The host cache
+# (`$HOME/.duckdb/extensions/<version>/<platform>/`) survives image reaps, so
+# mounting it read-only decouples the image from the ext repo at BOTH build and
+# run time. The compose service binds it to /root/.duckdb/extensions (the
+# container's default duckdb extension home for HOME=/root).
 #
 # docker-compose.lake-skeleton.yml BUILDS this file locally (#4475) — a change
 # here takes effect on the next `lake-skeleton.sh` run, with no push-to-GHCR or
 # digest-repin step. This is the image we author; the upstream images the
 # skeleton merely consumes (garage, catalog-postgres) stay digest-pinned.
-# The three-day stall #4134 caused (adding `cryptography` below without
-# republishing the pinned digest, so `lake-skeleton.sh seed` and `ingest` died
-# at import) is structurally impossible now: the running image is always this
-# file. `tests/lake_client_image_unit.sh` builds and probes it to confirm every
-# pinned dependency and baked extension resolves.
+# `tests/lake_client_image_unit.sh` builds and probes it to confirm every
+# pinned dependency imports and every extension LOADs from the mounted cache.
 FROM python:3.12-slim
 
 # duckdb >= 1.5.2 is the floor for DuckLake v1.0 (ducklake.select stable docs).
@@ -25,9 +40,20 @@ FROM python:3.12-slim
 # uses AES-256-GCM from `cryptography`.
 RUN pip install --no-cache-dir duckdb==1.5.4 pytz==2025.2 boto3==1.40.47 cryptography==46.0.3
 
-# Pre-install the extensions into the image's duckdb home rather than fetching
-# them at query time — the cell cannot be relied on to reach extensions.duckdb.org.
-RUN python -c "import duckdb; c = duckdb.connect(); c.install_extension('ducklake'); c.install_extension('httpfs'); c.install_extension('postgres')"
+# The extensions are NOT installed at build time (that reached
+# extensions.duckdb.org, which the cell cannot; see the header, #5366). They are
+# mounted read-only at /root/.duckdb/extensions by the compose service from the
+# host cache, and the scripts LOAD them from there. Create the mountpoint so a
+# run that forgets the mount fails with an obvious empty dir rather than a
+# confusing default-path miss.
+RUN mkdir -p /root/.duckdb/extensions
+
+# The extensions the scripts LOAD, declared here so the image carries the
+# contract and tests/lake_client_image_probe.py can assert each one LOADs
+# offline from the mounted cache. Keep in sync with the LOAD calls in
+# scripts/lake_ingest.py and scripts/lake_skeleton_verify.py.
+# LAKE_EXTENSIONS: ducklake httpfs postgres
+LABEL lake.extensions="ducklake httpfs postgres"
 
 WORKDIR /work
 ENTRYPOINT ["python"]
