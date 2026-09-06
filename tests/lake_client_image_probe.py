@@ -22,12 +22,16 @@ back and edit this file.
 Nothing here reaches the network — the probe is expected to be run with
 `--network none`. That is load-bearing for the extension checks: DuckDB will
 happily fetch a missing extension from extensions.duckdb.org and report success,
-which on the cell's link is precisely the failure the image bakes them in to
-avoid.
+which on the cell's link is precisely the failure this checks against. Since
+#5366 the extensions are supplied by a read-only mount of the host duckdb cache
+at /root/.duckdb/extensions (not baked at build time), so the entry point mounts
+that cache alongside --network none; a LOAD that succeeds here proves the mount
+supplies them without any fetch.
 
 Usage (see tests/lake_client_image_unit.sh, which is the entry point):
-    docker run --rm --network none -v "$PWD:/repo:ro" --entrypoint python \\
-        <pinned-image> /repo/tests/lake_client_image_probe.py
+    docker run --rm --network none -v "$PWD:/repo:ro" \\
+        -v "$HOME/.duckdb/extensions:/root/.duckdb/extensions:ro" \\
+        --entrypoint python <image> /repo/tests/lake_client_image_probe.py
 """
 
 import re
@@ -69,8 +73,18 @@ def parse_requirements(text):
 
 
 def parse_extensions(text):
-    """Every extension the Dockerfile bakes into the image's duckdb home."""
-    return sorted(set(re.findall(r"install_extension\(\s*['\"]([A-Za-z0-9_]+)['\"]", text)))
+    """Every extension the image declares, LOADed from the mounted host cache.
+
+    Since #5366 the extensions are no longer `install_extension`-ed at build
+    time (that reached extensions.duckdb.org, which the cell cannot) — they are
+    mounted read-only from the host duckdb cache and LOADed at run time. The
+    Dockerfile declares the set on a `# LAKE_EXTENSIONS: ...` marker line so the
+    probe still checks each one LOADs offline from that mount.
+    """
+    exts = set()
+    for m in re.finditer(r"^\s*#\s*LAKE_EXTENSIONS:\s*(.+)$", text, re.MULTILINE):
+        exts.update(m.group(1).split())
+    return sorted(exts)
 
 
 def parse_base_python(text):
@@ -95,8 +109,8 @@ def main():
         )
     if "ducklake" not in extensions:
         sys.exit(
-            f"probe is broken, not the image: parsed {len(extensions)} baked extension(s) "
-            f"from {DOCKERFILE} and ducklake was not among them"
+            f"probe is broken, not the image: parsed {len(extensions)} declared extension(s) "
+            f"from {DOCKERFILE}'s `# LAKE_EXTENSIONS:` marker and ducklake was not among them"
         )
     if base is None:
         sys.exit(f"probe is broken, not the image: no `FROM python:X.Y` line in {DOCKERFILE}")
@@ -135,7 +149,7 @@ def main():
             fail(f"{name} is {got} in the pinned image, Dockerfile pins {want}",
                  "the published image predates the Dockerfile")
 
-    # --- the baked duckdb extensions ----------------------------------------
+    # --- the duckdb extensions (mounted from the host cache, #5366) ----------
     # Only reachable if duckdb itself imported; skipping is honest here, a
     # cascade of confusing extension failures is not.
     try:
