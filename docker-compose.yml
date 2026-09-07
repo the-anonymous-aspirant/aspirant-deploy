@@ -39,6 +39,12 @@ services:
   server:
     logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-server:latest
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
     ports:
       - "8081:8080"
@@ -99,6 +105,12 @@ services:
   client-blue:
     logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-client:latest
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1/ >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
     volumes:
       # system_3 #3019-B5: nginx auth-secret drop-in dir. Both slots mount
@@ -110,6 +122,12 @@ services:
   client-green:
     logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-client:latest
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1/ >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
     volumes:
       - /data/aspirant/nginx-secrets:/etc/nginx/secrets:ro
@@ -117,6 +135,12 @@ services:
   transcriber:
     logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-transcriber:latest
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
     ports:
       # Loopback publish only. Ingress runs through aspirant-server's
@@ -138,6 +162,12 @@ services:
   commander:
     logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-commander:latest
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
     ports:
       - "127.0.0.1:8083:8000"
@@ -150,6 +180,12 @@ services:
   translator:
     logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-translator:latest
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
     ports:
       - "127.0.0.1:8084:8000"
@@ -194,6 +230,12 @@ services:
   monitor:
     logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-monitor:latest
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
     ports:
       - "127.0.0.1:8085:8000"
@@ -219,6 +261,12 @@ services:
   advisor:
     logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-advisor:latest
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
     ports:
       - "127.0.0.1:8088:8000"
@@ -237,6 +285,12 @@ services:
   browser:
     logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-browser:latest
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
     # Intentionally no host `ports:` mapping. aspirant-browser is reached
     # only through aspirant-server on the internal compose network:
@@ -274,6 +328,12 @@ services:
   ollama:
     logging: *default-logging
     image: ollama/ollama:latest
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
     volumes:
       - /data/aspirant/ollama:/root/.ollama
@@ -289,6 +349,12 @@ services:
   histoire:
     logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-histoire:latest
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
     mem_limit: 128m
 
@@ -308,6 +374,12 @@ services:
   penpot-frontend:
     logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/penpot-frontend:2.16.2@sha256:7bcd6d8ffa333054906cde55f6e9da9936a19b2ab30d2b50cb263d44e7740c7b
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8080/ >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
     ports:
       # Loopback publish only, for on-cell debug/verification. Public
@@ -396,6 +468,12 @@ services:
   penpot-redis:
     logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/penpot-redis:7@sha256:33d3a320585c78a71f509c68284a3423a0d790380931829e8abac44aaa31b8c0
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
     networks:
       - penpot
