@@ -67,6 +67,27 @@ else
   pass "no stale ghcr aspirant-lake-duckdb pin remains"
 fi
 
+# The extensions are supplied at run time from the host duckdb cache, mounted
+# read-only by the compose service (#5366) — not installed at build time, which
+# reached extensions.duckdb.org and died on the offline cell. The mount is the
+# load-bearing wiring: without it the client LOADs nothing and ingest/verify die.
+if grep -qE ':/root/\.duckdb/extensions:ro' "$COMPOSE"; then
+  pass "compose mounts the host duckdb extension cache read-only into the client"
+else
+  fail "compose does not mount the duckdb extension cache into the client" \
+       "the duckdb service must bind \${LAKE_DUCKDB_EXT_DIR:-\${HOME}/.duckdb/extensions} to /root/.duckdb/extensions:ro (#5366)"
+fi
+
+# The build must NOT reach extensions.duckdb.org — an install_extension on a RUN
+# line is exactly the offline-build regression #5366 removes. Anchored to RUN so
+# the word in a comment (this Dockerfile explains why it is gone) is not a match.
+if grep -qE '^[[:space:]]*RUN\b.*install_extension' "$DOCKERFILE"; then
+  fail "Dockerfile installs extensions at build time" \
+       "that fetches from extensions.duckdb.org, unreachable on the cell — supply them via the compose mount instead (#5366)"
+else
+  pass "Dockerfile does not fetch extensions at build time"
+fi
+
 # The Dockerfile must still pin duckdb — the probe checks the built image
 # against it; a missing pin means the parser or the Dockerfile drifted.
 DUCKDB_VERSION="$(grep -oE 'duckdb==[0-9][0-9A-Za-z.]*' "$DOCKERFILE" | head -1 | cut -d= -f3 || true)"
@@ -93,8 +114,17 @@ else
   fi
   if [ -n "$IMAGE" ]; then
     echo "Probing ${IMAGE} ..."
+    # The extensions live in the host duckdb cache and are mounted read-only,
+    # exactly as docker-compose.lake-skeleton.yml mounts them at run time
+    # (#5366). --network none stays: a LOAD that succeeds here proves the mount
+    # supplies the extension without any fetch from extensions.duckdb.org.
+    EXT_DIR="${LAKE_DUCKDB_EXT_DIR:-$HOME/.duckdb/extensions}"
+    if [ ! -d "$EXT_DIR" ]; then
+      skip "host duckdb extension cache ${EXT_DIR} absent; extension LOAD was NOT checked"
+    fi
     docker run --rm --network none \
       -v "$PWD:/repo:ro" \
+      -v "${EXT_DIR}:/root/.duckdb/extensions:ro" \
       --entrypoint python \
       "$IMAGE" \
       /repo/tests/lake_client_image_probe.py || fails=$((fails + 1))

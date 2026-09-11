@@ -135,6 +135,15 @@ services:
       # the loader, the verifier and the real ingest runner — they write and
       # check the same columns, and none may carry its own copy of the DDL.
       - ./scripts/lake:/work/lake:ro
+      # The duckdb extensions (ducklake/httpfs/postgres), supplied from the
+      # host cache rather than fetched from extensions.duckdb.org, which the
+      # cell cannot reach (#5366). The image no longer installs them at build
+      # time; the scripts LOAD them from /root/.duckdb/extensions (the
+      # container's default duckdb extension home for HOME=/root). Read-only,
+      # and the host path survives image reaps, so a reclaimed image rebuilds
+      # and runs offline. Override LAKE_DUCKDB_EXT_DIR only if the operator's
+      # duckdb cache is not at the default $HOME/.duckdb/extensions.
+      - ${LAKE_DUCKDB_EXT_DIR:-${HOME}/.duckdb/extensions}:/root/.duckdb/extensions:ro
     networks:
       - lake
 
