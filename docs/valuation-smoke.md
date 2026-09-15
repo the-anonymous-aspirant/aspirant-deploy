@@ -35,8 +35,17 @@ never leave the cell and are never committed or logged.
   after the traffic swap. A failure warns loudly and logs a fleet signal but does
   not auto-rollback (the cause may be the server or commander, which a client
   rollback would not fix). Opt out with `SMOKE_SKIP=1`.
-- **On a cadence:** a system_3 cron runs `post-deploy-smoke.sh` to catch drift
-  between deploys (a commander redeploy, a dropped route, an OCR regression).
+- **On a cadence:** a host crontab entry runs `post-deploy-smoke.sh` to catch
+  drift between deploys — a commander or server redeploy (which has no client
+  deploy to fire the hook), a dropped route, an OCR regression. A durable cron,
+  not a session-scoped one, e.g. daily at an off-minute:
+
+  ```cron
+  17 6 * * *  cd /home/aspirant/aspirant-deploy && ./scripts/post-deploy-smoke.sh >> /home/aspirant/aspirant-deploy/.logs/valuation-smoke.log 2>&1
+  ```
+
+  The wrapper sources `.env`, so the crontab line needs no secrets. On failure it
+  logs the `s3 failure-mode` row regardless of who invoked it.
 - **Failure reaches someone:** `post-deploy-smoke.sh` logs an `s3 failure-mode`
   row and prints a banner on any non-zero exit, and propagates the exit code.
 
