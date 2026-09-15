@@ -103,6 +103,17 @@ case "${1:-deploy}" in
     fi
     apply_slot "$STANDBY" "$ACTIVE"
     echo "Done. Active: client-$STANDBY"
+    # Validate the now-live cross-service journey (#5921). The per-slot health
+    # check above only proves the client serves HTML; it cannot see a broken
+    # /decide route or a 502 from the server — the defects that shipped silently.
+    # A failure here does NOT auto-rollback (the cause may be the server or the
+    # commander, which a client rollback would not fix); it warns loudly and logs
+    # a fleet signal so someone looks. Opt out with SMOKE_SKIP=1.
+    # (cwd is the deploy root — see the `cd` at the top of this script.)
+    if [ "${SMOKE_SKIP:-0}" != "1" ] && [ -x "scripts/post-deploy-smoke.sh" ]; then
+      echo "Running post-deploy valuation smoke check..."
+      ./scripts/post-deploy-smoke.sh || echo "WARNING: post-deploy smoke check reported a failure (see above); traffic stays on client-$STANDBY — investigate."
+    fi
     ;;
   swap)
     TARGET="$(resolve_swap_target "$ACTIVE" "${2:-}")"
