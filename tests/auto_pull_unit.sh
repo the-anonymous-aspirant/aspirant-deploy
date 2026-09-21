@@ -350,6 +350,192 @@ got="$(checkout_ff "$DIVERGED")"
 assert_eq "refused:not_fast_forward" "$got" "checkout_ff refuses a diverged main"
 assert_eq "$before" "$(git -C "$DIVERGED" rev-parse HEAD)" "checkout_ff leaves a diverged HEAD alone"
 
+# --- failed pulls are their own decision (#6252) ------------------------------
+#
+# The defect these pin: process_service ran
+#   docker compose pull "$svc" >/dev/null 2>&1 || true
+# so a registry that denied or refused the pull left the local :latest tag in
+# place, decide() saw current == latest and logged `no_change`/`sha_match` —
+# the same bytes a healthy nothing-new tick writes. Every pull on the cell
+# failed `denied: denied` for 4.2 days behind a dead credential and the log
+# said `no_change` throughout (#6250).
+
+# pull_error_summary() — the LAST non-empty line, because `docker compose pull`
+# writes its progress to stderr too. Transcript captured on the cell
+# 2026-09-21 with the dead ghcr.io credential in place.
+PULL_TRANSCRIPT="$(printf '%s\n' \
+  ' Image ghcr.io/the-anonymous-aspirant/aspirant-commander:latest Pulling ' \
+  ' Image ghcr.io/the-anonymous-aspirant/aspirant-commander:latest Error Head "https://ghcr.io/v2/x/manifests/latest": denied: denied' \
+  'Error response from daemon: Head "https://ghcr.io/v2/x/manifests/latest": denied: denied')"
+assert_eq \
+  'Error response from daemon: Head "https://ghcr.io/v2/x/manifests/latest": denied: denied' \
+  "$(pull_error_summary "$PULL_TRANSCRIPT")" \
+  "pull_error_summary takes the last stderr line, not the progress line"
+assert_eq "no_stderr" "$(pull_error_summary "")" "pull_error_summary names an empty stderr"
+assert_eq "no_stderr" "$(pull_error_summary "$(printf '  \n\t\n')")" "pull_error_summary ignores whitespace-only stderr"
+assert_eq "one line" "$(pull_error_summary "$(printf 'one line\n\n\n')")" "pull_error_summary trims trailing blank lines"
+assert_eq "$PULL_ERROR_MAX" "$(pull_error_summary "$(head -c 900 < /dev/zero | tr '\0' 'x')" | wc -c)" \
+  "pull_error_summary truncates a runaway stderr to PULL_ERROR_MAX"
+
+# json_escape() — until #6252 every reason was a fixed token from the script,
+# so nothing ever escaped anything. `pull_failed` is the first reason written
+# by docker, and docker quotes the URL it failed on.
+assert_eq 'a\"b'   "$(json_escape 'a"b')"        "json_escape escapes a double quote"
+assert_eq 'a\\b'   "$(json_escape 'a\b')"        "json_escape escapes a backslash"
+assert_eq 'a b'    "$(json_escape "$(printf 'a\nb')")" "json_escape flattens a newline to a space"
+assert_eq 'ab'     "$(json_escape "$(printf 'a\033b')")" "json_escape drops control characters"
+assert_eq 'plain'  "$(json_escape 'plain')"      "json_escape leaves an ordinary token alone"
+
+# End to end through log_decision: a docker error reaches the ledger as ONE
+# parseable JSON line. Without the escaping the embedded quotes split the
+# string and every jsonl reader loses the line.
+ESC_LOG="$TMPDIR_TEST/escape-log.jsonl"
+( DECISIONS_LOG="$ESC_LOG"
+  log_decision "commander" "pull_failed" "sha256:cur" "" \
+    'rc=1;consecutive=3;Error response from daemon: Head "https://ghcr.io/v2/x": denied: denied' )
+if python3 -c 'import json,sys; json.loads(open(sys.argv[1]).readline())' "$ESC_LOG" 2>/dev/null; then
+  PASS=$((PASS + 1)); printf "  PASS  a pull_failed line with a quoted docker error is valid JSON\n"
+else
+  FAIL=$((FAIL + 1)); printf "  FAIL  pull_failed line is not parseable JSON — %s\n" "$(cat "$ESC_LOG")"
+fi
+
+# --- process_service against a stubbed docker ---------------------------------
+#
+# A stub on PATH rather than a real daemon: the behaviour under test is which
+# decision gets logged when the pull exits non-zero, which needs no docker.
+FAKE_BIN="$TMPDIR_TEST/fakebin"
+mkdir -p "$FAKE_BIN"
+cat > "$FAKE_BIN/docker" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  inspect)
+    # Two different inspects: the running container's image SHA, and its
+    # lifecycle status after a recreate.
+    case "$*" in
+      *State.Status*) printf '%s\n' "${FAKE_STATUS:-running}" ;;
+      *)              printf '%s\n' "${FAKE_CURRENT_SHA:-sha256:current}" ;;
+    esac ;;
+  image)   # image inspect IMAGE --format {{.Id}}
+           if [[ -n "${FAKE_LATEST_SHA:-}" ]]; then printf '%s\n' "$FAKE_LATEST_SHA"; else exit 1; fi ;;
+  compose)
+    if [[ "$2" == "pull" ]]; then
+      if [[ "${FAKE_PULL_RC:-0}" -ne 0 ]]; then
+        printf '%s\n' "${FAKE_PULL_STDERR:-}" >&2
+        exit "${FAKE_PULL_RC}"
+      fi
+    fi
+    ;;
+esac
+exit 0
+STUB
+chmod +x "$FAKE_BIN/docker"
+
+PULL_LOG="$TMPDIR_TEST/pull-log.jsonl"
+export FAKE_CURRENT_SHA="sha256:current"
+
+run_process_service() {
+  ( PATH="$FAKE_BIN:$PATH"
+    DECISIONS_LOG="$PULL_LOG"
+    DRY_RUN=0
+    process_service "commander" "aspirant-online-commander-1" \
+      "ghcr.io/the-anonymous-aspirant/aspirant-commander:latest" )
+}
+
+# THE REGRESSION TEST. The pull is denied and the local tag never moves, so
+# current == latest. Pre-#6252 this logged `no_change`/`sha_match`.
+: > "$PULL_LOG"
+rm -rf "$ASPIRANT_AUTO_PULL_STATE_DIR/pull-failures"
+FAKE_PULL_RC=1 FAKE_PULL_STDERR="$PULL_TRANSCRIPT" FAKE_LATEST_SHA="sha256:current" \
+  run_process_service
+if grep -qF '"action":"pull_failed"' "$PULL_LOG"; then
+  PASS=$((PASS + 1)); printf "  PASS  a denied pull is logged pull_failed\n"
+else
+  FAIL=$((FAIL + 1)); printf "  FAIL  denied pull did not log pull_failed — got %s\n" "$(cat "$PULL_LOG")"
+fi
+if grep -qF '"action":"no_change"' "$PULL_LOG"; then
+  FAIL=$((FAIL + 1)); printf "  FAIL  a denied pull is still logged no_change (the #6252 defect)\n"
+else
+  PASS=$((PASS + 1)); printf "  PASS  a denied pull is never logged no_change (the #6252 defect)\n"
+fi
+line="$(grep -F '"action":"pull_failed"' "$PULL_LOG" | tail -1)"
+if [[ "$line" == *'denied: denied'* && "$line" == *'consecutive=1;'* && "$line" == *'rc=1;'* ]]; then
+  PASS=$((PASS + 1)); printf "  PASS  pull_failed carries the exit code, the streak and the docker error\n"
+else
+  FAIL=$((FAIL + 1)); printf "  FAIL  pull_failed reason unexpected — got %s\n" "$line"
+fi
+assert_eq "1" "$(pull_failure_count commander)" "a failed pull records a streak of 1"
+
+# The streak accumulates across ticks — that is what lets a sweep see a dead
+# lane without parsing this log at all.
+FAKE_PULL_RC=1 FAKE_PULL_STDERR="$PULL_TRANSCRIPT" FAKE_LATEST_SHA="sha256:current" \
+  run_process_service
+assert_eq "2" "$(pull_failure_count commander)" "consecutive failed pulls accumulate"
+
+# NEGATIVE CONTROL for the two assertions above: with the pull succeeding and
+# the SHAs matching, the healthy nothing-new tick is unchanged — still
+# `no_change`, never `pull_failed` — and the streak resets. Without this, a
+# process_service hard-wired to log pull_failed would pass everything above.
+: > "$PULL_LOG"
+FAKE_PULL_RC=0 FAKE_LATEST_SHA="sha256:current" run_process_service
+if grep -qF '"action":"no_change"' "$PULL_LOG"; then
+  PASS=$((PASS + 1)); printf "  PASS  a successful pull with matching SHAs still logs no_change\n"
+else
+  FAIL=$((FAIL + 1)); printf "  FAIL  healthy tick no longer logs no_change — got %s\n" "$(cat "$PULL_LOG")"
+fi
+if grep -qF '"action":"pull_failed"' "$PULL_LOG"; then
+  FAIL=$((FAIL + 1)); printf "  FAIL  a successful pull logged pull_failed\n"
+else
+  PASS=$((PASS + 1)); printf "  PASS  a successful pull does not log pull_failed\n"
+fi
+assert_eq "0" "$(pull_failure_count commander)" "a successful pull clears the streak"
+
+# A successful pull that moved the tag still reaches deploy — the pull-failure
+# branch must not swallow the case the script exists for. --dry-run so nothing
+# is recreated.
+: > "$PULL_LOG"
+( PATH="$FAKE_BIN:$PATH"; DECISIONS_LOG="$PULL_LOG"; DRY_RUN=1
+  FAKE_LATEST_SHA="sha256:newer" process_service "commander" "aspirant-online-commander-1" \
+    "ghcr.io/the-anonymous-aspirant/aspirant-commander:latest" )
+if grep -qF '"action":"would_deploy"' "$PULL_LOG"; then
+  PASS=$((PASS + 1)); printf "  PASS  a moved tag still reaches the deploy branch\n"
+else
+  FAIL=$((FAIL + 1)); printf "  FAIL  moved tag did not reach deploy — got %s\n" "$(cat "$PULL_LOG")"
+fi
+
+# A failed pull must NOT strand a locally cached image that differs from the
+# running one: hand-loading the image and letting this gate recreate the
+# container is the sanctioned recovery when the registry lane is down (#6250),
+# and a blanket skip on pull failure would have broken it. Both lines are
+# expected — the pull_failed, and the deploy that still had work to do.
+: > "$PULL_LOG"
+rm -rf "$ASPIRANT_AUTO_PULL_STATE_DIR/pull-failures"
+( PATH="$FAKE_BIN:$PATH"; DECISIONS_LOG="$PULL_LOG"; DRY_RUN=0; HEALTH_WAIT_SECONDS=0
+  FAKE_PULL_RC=1 FAKE_PULL_STDERR="$PULL_TRANSCRIPT" FAKE_LATEST_SHA="sha256:handloaded" \
+    process_service "commander" "aspirant-online-commander-1" \
+      "ghcr.io/the-anonymous-aspirant/aspirant-commander:latest" )
+if grep -qF '"action":"pull_failed"' "$PULL_LOG" && grep -qF '"action":"deployed"' "$PULL_LOG"; then
+  PASS=$((PASS + 1)); printf "  PASS  a failed pull still deploys a hand-loaded newer image\n"
+else
+  FAIL=$((FAIL + 1)); printf "  FAIL  failed pull stranded a hand-loaded image — got %s\n" "$(cat "$PULL_LOG")"
+fi
+
+# ...but a failed pull whose SHAs match adds no second line. `no_change` after
+# a denied pull is the defect, and `skipped`/`deferred_known_bad` would assert
+# a comparison the failed pull cannot support either.
+: > "$PULL_LOG"
+FAKE_PULL_RC=1 FAKE_PULL_STDERR="$PULL_TRANSCRIPT" FAKE_LATEST_SHA="sha256:current" \
+  run_process_service
+assert_eq "1" "$(grep -c . "$PULL_LOG")" "a failed pull with matching SHAs logs exactly one line"
+
+# Service names are used as path components for the streak file. Compose
+# never produces one of these, but the value reaches a path, so pin it.
+assert_eq "${ASPIRANT_AUTO_PULL_STATE_DIR}/pull-failures/.._.._etc_passwd" \
+  "$(pull_failure_file "../../etc/passwd")" "pull_failure_file folds path separators"
+assert_eq "${ASPIRANT_AUTO_PULL_STATE_DIR}/pull-failures/_" \
+  "$(pull_failure_file "..")" "pull_failure_file refuses a bare dot-dot name"
+assert_eq "${ASPIRANT_AUTO_PULL_STATE_DIR}/pull-failures/client-blue" \
+  "$(pull_failure_file "client-blue")" "pull_failure_file leaves an ordinary service name alone"
+
 # --- gate 3 in cron shape ----------------------------------------------------
 #
 # Run the real script, from a clone that carries it, as cron would: gates run,
