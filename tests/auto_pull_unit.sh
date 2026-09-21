@@ -435,6 +435,76 @@ else
 fi
 assert_eq "$cron_target" "$(git -C "$CRON_CLONE" rev-parse HEAD)" "refused run does not move the checkout"
 
+# ---------------------------------------------------------------------------
+# deploy_verdict() / verdict_good() — the post-deploy health gate (#6239)
+#
+# The defect these pin: the gate was named container_healthy_after_wait and
+# only ever read .State.Status, so a container that started and immediately
+# wedged was logged `deployed` and its SHA recorded as good — the exact
+# failure the #5528-A4 healthchecks were added to detect.
+# ---------------------------------------------------------------------------
+
+# With a healthcheck: Docker's verdict decides.
+assert_eq "healthy"   "$(deploy_verdict yes healthy running)"   "healthcheck passing -> healthy"
+assert_eq "unhealthy" "$(deploy_verdict yes unhealthy running)" "healthcheck failing -> unhealthy"
+
+# THE REGRESSION TEST. Pre-#6239 this container passed the gate: it is running,
+# which was the only question asked. It must now roll back.
+if verdict_good "$(deploy_verdict yes unhealthy running)"; then
+  FAIL=$((FAIL + 1)); printf "  FAIL  a running-but-unhealthy container still passes the gate\n"
+else
+  PASS=$((PASS + 1)); printf "  PASS  running-but-unhealthy container is marked bad (the #6239 defect)\n"
+fi
+
+# Negative control for the line above: without it, a gate hard-wired to return
+# "unhealthy" would pass the assertion above while breaking every deploy.
+if verdict_good "$(deploy_verdict yes healthy running)"; then
+  PASS=$((PASS + 1)); printf "  PASS  a running-and-healthy container still deploys\n"
+else
+  FAIL=$((FAIL + 1)); printf "  FAIL  healthy container rejected — gate is inverted\n"
+fi
+
+# No healthcheck defined: behaviour must be byte-identical to pre-#6239, or
+# this change silently alters the eight cell services that have no check.
+assert_eq "running"     "$(deploy_verdict no none running)"  "no healthcheck + running -> running"
+assert_eq "not_running" "$(deploy_verdict no none exited)"   "no healthcheck + exited  -> not_running"
+assert_eq "not_running" "$(deploy_verdict no none missing)"  "no healthcheck + missing -> not_running"
+verdict_good "$(deploy_verdict no none running)" \
+  && { PASS=$((PASS + 1)); printf "  PASS  uncovered service still deploys on running\n"; } \
+  || { FAIL=$((FAIL + 1)); printf "  FAIL  uncovered service behaviour changed\n"; }
+verdict_good "$(deploy_verdict no none exited)" \
+  && { FAIL=$((FAIL + 1)); printf "  FAIL  exited container passed the gate\n"; } \
+  || { PASS=$((PASS + 1)); printf "  PASS  uncovered service still rolls back on exit\n"; }
+
+# A dead container is not_running whatever its stale health field says — the
+# status check precedes the health check, so a cached `healthy` on an exited
+# container cannot pass.
+assert_eq "not_running" "$(deploy_verdict yes healthy exited)" "exited beats a stale healthy"
+
+# `starting` at timeout: NOT a rollback (a start_period longer than our budget
+# is legitimate), but it gets its own token so a too-short budget is visible
+# in the log rather than hidden inside `running`.
+assert_eq "starting_timeout" "$(deploy_verdict yes starting running)" "still starting -> starting_timeout"
+verdict_good "$(deploy_verdict yes starting running)" \
+  && { PASS=$((PASS + 1)); printf "  PASS  starting_timeout does not roll back\n"; } \
+  || { FAIL=$((FAIL + 1)); printf "  FAIL  starting_timeout rolled back a slow-but-fine deploy\n"; }
+if [[ "$(deploy_verdict yes starting running)" == "running" ]]; then
+  FAIL=$((FAIL + 1)); printf "  FAIL  starting_timeout is indistinguishable from running in the log\n"
+else
+  PASS=$((PASS + 1)); printf "  PASS  starting_timeout is logged distinctly from running\n"
+fi
+
+# Health field unreadable though a healthcheck is defined (older daemon, or an
+# inspect race): fall back to liveness rather than invent a rollback.
+assert_eq "running" "$(deploy_verdict yes '' running)"     "unreadable health -> falls back to running"
+assert_eq "running" "$(deploy_verdict yes none running)"   "health 'none' -> falls back to running"
+
+# `docker inspect` on a missing container prints a bare newline AND exits
+# non-zero, so the `|| echo missing` fallback yields $'\nmissing'. strip_ws
+# normalises it; pin both that and the fail-safe behaviour without it.
+assert_eq "missing"     "$(strip_ws "$(printf '\nmissing')")"    "strip_ws drops docker's stray newline"
+assert_eq "not_running" "$(deploy_verdict no none "$(printf '\nmissing')")" "untrimmed status is still fail-safe"
+
 echo
 echo "Passed: $PASS  Failed: $FAIL"
 [[ "$FAIL" -eq 0 ]]
