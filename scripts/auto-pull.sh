@@ -46,6 +46,12 @@ KNOWN_BAD_FILE="${STATE_DIR}/known-bad.txt"
 
 IMAGE_PREFIX="${ASPIRANT_AUTO_PULL_IMAGE_PREFIX:-ghcr.io/the-anonymous-aspirant/aspirant-}"
 HEALTH_WAIT_SECONDS="${ASPIRANT_AUTO_PULL_HEALTH_WAIT:-30}"
+# Extra budget for a healthcheck still reporting `starting` once
+# HEALTH_WAIT_SECONDS has elapsed — a `start_period` longer than the wait is
+# legitimate. Exhausting it yields `starting_timeout`, which does NOT roll back
+# (see deploy_verdict).
+HEALTH_SETTLE_SECONDS="${ASPIRANT_AUTO_PULL_HEALTH_SETTLE:-60}"
+HEALTH_POLL_SECONDS="${ASPIRANT_AUTO_PULL_HEALTH_POLL:-5}"
 
 # Maintenance-pause marker. Same filename and same presence-is-the-signal
 # contract as the system_3 side (shared/paths.py::MAINTENANCE_MARKER_NAME), but
@@ -232,13 +238,83 @@ decide() {
   echo "deploy"
 }
 
-# Verify container is "running" (and not "restarting") after HEALTH_WAIT_SECONDS.
-container_healthy_after_wait() {
+# deploy_verdict HAS_HEALTHCHECK HEALTH_STATUS CONTAINER_STATUS -> verdict token
+#
+# Pure; the docker reads live in container_deploy_verdict below. Verdicts:
+#   healthy           container defines a healthcheck and Docker says it passes
+#   running           no healthcheck defined (or its status is unreadable), but
+#                     the container is up — the pre-#6239 behaviour, unchanged
+#   starting_timeout  healthcheck still `starting` when the budget ran out
+#   unhealthy         Docker says the healthcheck fails — the rollback trigger
+#   not_running       container exited, restarting, or missing
+#
+# Why `starting_timeout` is NOT a rollback trigger: a slow-but-fine service
+# whose start_period outlives our budget must not be marked bad, or the first
+# effect of this change is spurious rollbacks on healthy deploys. It is a
+# distinct token rather than folded into `running` so the log shows a budget
+# that is too short instead of hiding it (#6239).
+deploy_verdict() {
+  local has_hc="$1" health="$2" status="$3"
+  if [[ "$status" != "running" ]]; then echo "not_running"; return; fi
+  if [[ "$has_hc" != "yes" ]]; then echo "running"; return; fi
+  case "$health" in
+    healthy)   echo "healthy" ;;
+    unhealthy) echo "unhealthy" ;;
+    starting)  echo "starting_timeout" ;;
+    # Health defined but unreadable (older daemon, race on inspect): fall back
+    # to liveness rather than inventing a rollback from a missing field.
+    *)         echo "running" ;;
+  esac
+}
+
+# verdict_good VERDICT -> true when the deploy should NOT be marked known-bad.
+# Pure. Exactly one verdict rolls back today; keeping the predicate explicit
+# means adding a verdict forces a decision about which side it falls on.
+verdict_good() {
+  case "$1" in
+    healthy|running|starting_timeout) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# strip_ws VALUE -> echoes VALUE with all whitespace removed.
+# `docker inspect` on a missing container prints a bare newline to stdout AND
+# exits non-zero, so `$(docker inspect ... || echo missing)` yields the literal
+# $'\nmissing'. The verdict comparisons below are exact-token, so the stray
+# newline is fail-safe (it can only ever miss `running`/`healthy` and fall to
+# the conservative branch) — but it would reach the decisions log mangled.
+strip_ws() {
+  local v="$1"
+  printf '%s' "${v//[$'\n\r\t ']/}"
+}
+
+# container_deploy_verdict CONTAINER -> echoes a deploy_verdict token.
+#
+# Waits HEALTH_WAIT_SECONDS exactly as before — a container that starts and
+# dies at t+20s must still be caught, so this is not shortened just because a
+# healthcheck might answer sooner. Only when the check is still `starting` at
+# that point does it poll on, up to HEALTH_SETTLE_SECONDS, for a verdict.
+container_deploy_verdict() {
   local container="$1"
   sleep "$HEALTH_WAIT_SECONDS"
-  local status
-  status="$(docker inspect "$container" --format '{{.State.Status}}' 2>/dev/null || echo "missing")"
-  [[ "$status" == "running" ]]
+
+  local has_hc health status waited=0
+  has_hc="$(strip_ws "$(docker inspect "$container" \
+    --format '{{if .Config.Healthcheck}}yes{{else}}no{{end}}' 2>/dev/null || echo "no")")"
+
+  while :; do
+    status="$(strip_ws "$(docker inspect "$container" --format '{{.State.Status}}' 2>/dev/null || echo "missing")")"
+    health="$(strip_ws "$(docker inspect "$container" \
+      --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null || echo "none")")"
+    # Only `starting` is worth waiting out; every other state is terminal here.
+    if [[ "$has_hc" != "yes" || "$health" != "starting" || "$waited" -ge "$HEALTH_SETTLE_SECONDS" ]]; then
+      break
+    fi
+    sleep "$HEALTH_POLL_SECONDS"
+    waited=$((waited + HEALTH_POLL_SECONDS))
+  done
+
+  deploy_verdict "$has_hc" "$health" "$status"
 }
 
 # is_polled_image_ref IMAGE_REF -> true when the ref is one this sweep owns:
@@ -338,11 +414,13 @@ deploy_service() {
   fi
 
   if docker compose up -d --force-recreate "$svc" >/dev/null 2>&1; then
-    if container_healthy_after_wait "$container"; then
-      log_decision "$svc" "deployed" "$old_sha" "$new_sha" "running_after_wait"
+    local verdict
+    verdict="$(container_deploy_verdict "$container")"
+    if verdict_good "$verdict"; then
+      log_decision "$svc" "deployed" "$old_sha" "$new_sha" "${verdict}_after_wait"
     else
       mark_known_bad "$new_sha"
-      log_decision "$svc" "deployed_unhealthy" "$old_sha" "$new_sha" "not_running_after_wait_marked_bad"
+      log_decision "$svc" "deployed_unhealthy" "$old_sha" "$new_sha" "${verdict}_after_wait_marked_bad"
     fi
   else
     mark_known_bad "$new_sha"
