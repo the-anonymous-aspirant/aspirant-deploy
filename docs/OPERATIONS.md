@@ -50,7 +50,7 @@ docker compose up -d
 
 ### Auto-pull on `:latest` image push
 
-`scripts/auto-pull.sh` polls every aspirant-* service whose compose `image:` is `ghcr.io/the-anonymous-aspirant/aspirant-*:latest`. Membership is read from the ref each container was *created* from (`docker inspect … {{.Config.Image}}`), not from the ref `docker compose ps` prints: the ps column resolves through the local tag store and becomes a bare `sha256:…` as soon as `:latest` moves off the running image — after a hand `docker pull`, or after this script's own failed blue/green (the pull re-points `:latest` at the candidate before `deploy-client.sh` health-checks it, and a rollback leaves it there). Keyed on the ps column, a service in that state silently left the sweep; on 2026-08-26 client-* did, and 20 merged aspirant-client PRs sat undeployed for two days with no decision line (system_3 #4489, fix #4507). Keyed on the create-time ref, it stays in, and the next ticks say `deferred_known_bad` until a good build lands. When the local image SHA drifts from the running container's image SHA, it recreates the container (or, for `client`, delegates to `scripts/deploy-client.sh` for the blue/green swap). Each decision is appended as one JSON line to `/var/log/aspirant-auto-pull/decisions.jsonl`. Failed deploys (container not running after `ASPIRANT_AUTO_PULL_HEALTH_WAIT` seconds, default 30 s) record the new SHA in `/var/lib/aspirant-auto-pull/known-bad.txt` so subsequent ticks skip the bad image instead of looping on it forever.
+`scripts/auto-pull.sh` polls every aspirant-* service whose compose `image:` is `ghcr.io/the-anonymous-aspirant/aspirant-*:latest`. Membership is read from the ref each container was *created* from (`docker inspect … {{.Config.Image}}`), not from the ref `docker compose ps` prints: the ps column resolves through the local tag store and becomes a bare `sha256:…` as soon as `:latest` moves off the running image — after a hand `docker pull`, or after this script's own failed blue/green (the pull re-points `:latest` at the candidate before `deploy-client.sh` health-checks it, and a rollback leaves it there). Keyed on the ps column, a service in that state silently left the sweep; on 2026-08-26 client-* did, and 20 merged aspirant-client PRs sat undeployed for two days with no decision line (system_3 #4489, fix #4507). Keyed on the create-time ref, it stays in, and the next ticks say `deferred_known_bad` until a good build lands. When the local image SHA drifts from the running container's image SHA, it recreates the container (or, for `client`, delegates to `scripts/deploy-client.sh` for the blue/green swap). Each decision is appended as one JSON line to `/var/log/aspirant-auto-pull/decisions.jsonl`; a pull the registry refuses is one of them (`pull_failed`, below) and is never recorded as `no_change`. Failed deploys (container not running after `ASPIRANT_AUTO_PULL_HEALTH_WAIT` seconds, default 30 s) record the new SHA in `/var/lib/aspirant-auto-pull/known-bad.txt` so subsequent ticks skip the bad image instead of looping on it forever.
 
 Install on the cell:
 
@@ -110,6 +110,26 @@ To force a single new SHA back into rotation after a fix lands, drop it from the
 ```bash
 sed -i '/sha256:abc.../d' /var/lib/aspirant-auto-pull/known-bad.txt
 ```
+
+#### Failed pulls (`pull_failed`)
+
+A pull that the registry denies or that cannot reach it is logged as its own decision:
+
+```json
+{"ts":"…","service":"commander","action":"pull_failed","from_sha":"sha256:…","to_sha":"","reason":"rc=1;consecutive=3;Error response from daemon: Head \"https://ghcr.io/v2/…\": denied: denied"}
+```
+
+`reason` carries the pull's exit code, how many ticks in a row have now failed for that service, and the last line of docker's stderr (the first lines are per-image progress, not the error).
+
+After a failed pull the tick still deploys a locally cached image that differs from the running one — hand-loading the image and letting this gate recreate the container is the sanctioned recovery while the registry lane is down (that is how the 2026-09 outage was unblocked), so `pull_failed` and `deployed` can appear for the same service on one tick. It logs nothing further in any other case: `no_change` after a denied pull is exactly the thing this decision exists to stop being written.
+
+The streak is also written to `/var/lib/aspirant-auto-pull/pull-failures/<service>` and removed on the next success, so a sweep outside this script — the system_3 deploy-freshness reader, a cell-health row — can ask "has this lane been down for N ticks?" with a file read instead of parsing the ledger:
+
+```bash
+grep -c . /var/lib/aspirant-auto-pull/pull-failures/* 2>/dev/null   # nothing listed == every lane pulling
+```
+
+History: until system_3 #6252 the pull ran as `docker compose pull "$svc" >/dev/null 2>&1 || true`. A failing pull left the local `:latest` tag where it was, so the local and running SHAs still matched and the tick logged `no_change`/`sha_match` — byte-identical to a healthy nothing-new tick. The stored ghcr.io credential died after 2026-09-17T11:06Z, every pull on the box failed `denied: denied` for the next 4.2 days across all nine polled services, and the ledger said `no_change` throughout. It surfaced only because one service's HEAD happened to move and the system_3 deploy-freshness `identity=stale` red fired (system_3 #6250). With no HEAD movement it would still be invisible. A one-off `pull_failed` line is signal, not noise: the reader groups by action, and the alternative was 1,100+ identical `no_change` lines hiding a dead lane.
 
 ### Development
 
