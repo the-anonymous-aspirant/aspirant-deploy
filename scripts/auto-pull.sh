@@ -17,6 +17,9 @@ set -euo pipefail
 # Outputs:
 #   /var/log/aspirant-auto-pull/decisions.jsonl   one JSON line per (service, run, decision)
 #   /var/lib/aspirant-auto-pull/known-bad.txt     list of image SHAs we will not re-deploy
+#   /var/lib/aspirant-auto-pull/pull-failures/<service>
+#                                                 consecutive failed-pull count,
+#                                                 removed on the next success
 #
 # Gates (checked once per run, before any pull or recreate):
 #   1. Maintenance pause — if .maintenance-pause exists in this checkout, the
@@ -96,11 +99,27 @@ fi
 
 iso_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
+# json_escape VALUE -> echoes VALUE safe to embed in a JSON string literal.
+# Control characters are dropped, tab/CR/LF collapse to a space, and backslash
+# and double-quote are escaped. Every reason logged before #6252 was a fixed
+# token from this file, so this was a no-op requirement; `pull_failed` is the
+# first decision whose reason is text docker wrote, and docker's own errors
+# quote the URL they failed on (`Head "https://ghcr.io/...": denied: denied`).
+# One unescaped quote would make the line unparseable to every jsonl reader.
+json_escape() {
+  local v
+  v="$(printf '%s' "$1" | tr -d '\000-\010\013\014\016-\037\177' | tr '\n\r\t' '   ')"
+  v="${v//\\/\\\\}"
+  v="${v//\"/\\\"}"
+  printf '%s' "$v"
+}
+
 # log_decision SERVICE ACTION FROM_SHA TO_SHA REASON
 log_decision() {
   local svc="$1" action="$2" from="$3" to="$4" reason="$5"
   printf '{"ts":"%s","service":"%s","action":"%s","from_sha":"%s","to_sha":"%s","reason":"%s"}\n' \
-    "$(iso_now)" "$svc" "$action" "$from" "$to" "$reason" >> "$DECISIONS_LOG"
+    "$(iso_now)" "$(json_escape "$svc")" "$(json_escape "$action")" \
+    "$(json_escape "$from")" "$(json_escape "$to")" "$(json_escape "$reason")" >> "$DECISIONS_LOG"
 }
 
 # maintenance_paused MARKER_PATH -> true when a freeze window is open.
@@ -222,6 +241,84 @@ mark_known_bad() {
   [[ -n "$sha" ]] || return 0
   is_known_bad "$sha" && return 0
   echo "$sha" >> "$KNOWN_BAD_FILE"
+}
+
+# Longest reason text kept from a failed pull. A decisions.jsonl line is read
+# by eye as often as by a parser; docker's error plus the URL it failed on fits
+# well inside this, and a runaway multi-KB stderr must not become the log line.
+PULL_ERROR_MAX=200
+
+# pull_error_summary STDERR_TEXT -> echoes the one line worth recording as the
+# reason for a `pull_failed` decision: trimmed, and truncated to PULL_ERROR_MAX.
+#
+# The LAST non-empty line, not the first. `docker compose pull` writes its
+# per-image progress to stderr as well, so the first line is always framing.
+# Captured on the cell 2026-09-21, with the dead ghcr.io credential in place:
+#
+#    Image ghcr.io/.../aspirant-commander:latest Pulling
+#    Image ghcr.io/.../aspirant-commander:latest Error Head "https://...": denied: denied
+#   Error response from daemon: Head "https://...": denied: denied
+#
+# Only the last line states the failure without the progress prefix. Pure, so
+# the unit suite pins it against that transcript.
+pull_error_summary() {
+  local raw="$1" line summary=""
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    if [[ -n "$line" ]]; then
+      summary="$line"
+    fi
+  done <<< "$raw"
+  if [[ -z "$summary" ]]; then
+    summary="no_stderr"
+  fi
+  printf '%s' "${summary:0:$PULL_ERROR_MAX}"
+}
+
+# Consecutive-pull-failure counter: one file per service under $STATE_DIR
+# holding the number of ticks in a row whose pull failed, removed on the first
+# success. It exists so a sweep that is not this script — the deploy-freshness
+# reader, a cell-health row — can ask "has this service's registry lane been
+# down for N ticks?" with a file read, instead of parsing decisions.jsonl and
+# inferring a streak from the absence of other lines. That absence is exactly
+# what hid the 4.2-day GHCR outage (#6250).
+#
+# Service names come from `docker compose ps`, but they are used here as path
+# components, so anything outside the compose-name charset is folded to `_`.
+pull_failure_file() {
+  local svc="${1//[^A-Za-z0-9_.-]/_}"
+  # `.` is a legal compose-name character, so folding the separators alone
+  # still leaves `.` and `..` naming a directory rather than a state file.
+  if [[ "$svc" == "." || "$svc" == ".." || -z "$svc" ]]; then
+    svc="_"
+  fi
+  printf '%s/pull-failures/%s' "$STATE_DIR" "$svc"
+}
+
+# pull_failure_count SERVICE -> echoes the recorded streak, 0 when there is none.
+pull_failure_count() {
+  local f n=""
+  f="$(pull_failure_file "$1")"
+  if [[ -f "$f" ]]; then
+    n="$(tr -dc '0-9' < "$f" 2>/dev/null || true)"
+  fi
+  printf '%s' "${n:-0}"
+}
+
+# record_pull_failure SERVICE -> increments the streak and echoes the new value.
+record_pull_failure() {
+  local f n
+  f="$(pull_failure_file "$1")"
+  mkdir -p "$(dirname "$f")"
+  n=$(( $(pull_failure_count "$1") + 1 ))
+  printf '%s\n' "$n" > "$f"
+  printf '%s' "$n"
+}
+
+# clear_pull_failure SERVICE -> forgets the streak after a pull succeeds.
+clear_pull_failure() {
+  rm -f "$(pull_failure_file "$1")"
 }
 
 # decide ACTION_TARGET CURRENT_SHA LATEST_SHA KNOWN_BAD_FILE -> echoes one of:
@@ -365,17 +462,49 @@ list_aspirant_services() {
 process_service() {
   local svc="$1" container="$2" image="$3"
 
-  local current_sha latest_sha
+  local current_sha latest_sha pull_ok=1
   current_sha="$(docker inspect "$container" --format '{{.Image}}' 2>/dev/null || true)"
 
   if [[ "$DRY_RUN" -eq 0 ]]; then
-    docker compose pull "$svc" >/dev/null 2>&1 || true
+    # Capture the pull's stderr and exit code instead of discarding both.
+    # Until #6252 this was `docker compose pull "$svc" >/dev/null 2>&1 || true`,
+    # and a denied or unreachable registry left the local `:latest` tag exactly
+    # where it was — so latest_sha == current_sha and decide() returned
+    # `no_change`, byte-identical to the healthy nothing-new case. Every pull on
+    # this cell failed `denied: denied` for 4.2 days behind a dead credential
+    # and the log said `no_change` throughout; the outage surfaced only because
+    # one service's HEAD moved and the deploy-freshness `identity=stale` red
+    # fired (#6250). A failed pull is now its own decision, never a `no_change`.
+    local pull_err="" pull_rc=0
+    pull_err="$(docker compose pull "$svc" 2>&1 >/dev/null)" || pull_rc=$?
+    if [[ "$pull_rc" -ne 0 ]]; then
+      pull_ok=0
+      local streak
+      streak="$(record_pull_failure "$svc")"
+      log_decision "$svc" "pull_failed" "$current_sha" "" \
+        "rc=${pull_rc};consecutive=${streak};$(pull_error_summary "$pull_err")"
+    else
+      clear_pull_failure "$svc"
+    fi
   fi
 
   latest_sha="$(docker image inspect "$image" --format '{{.Id}}' 2>/dev/null || true)"
 
   local action
   action="$(decide "$current_sha" "$latest_sha" "$KNOWN_BAD_FILE")"
+
+  # A failed pull is already logged. Of the remaining arms only `deploy` still
+  # has work: a locally cached image that differs from the running one is a
+  # real pending deploy, and hand-loading that image is the sanctioned recovery
+  # when the registry lane itself is down — the 2026-09 GHCR outage was
+  # unblocked by pulling anonymously and letting this script's own gate do the
+  # recreate (#6250), which a blanket skip here would have broken. Every other
+  # arm would only add a second line asserting a comparison the failed pull
+  # cannot support, and `no_change` after a denied pull is the #6252 defect
+  # itself.
+  if [[ "$pull_ok" -eq 0 && "$action" != "deploy" ]]; then
+    return 0
+  fi
 
   case "$action" in
     no_change)
@@ -429,7 +558,9 @@ deploy_service() {
 }
 
 # Test-mode escape hatch: source the script with ASPIRANT_AUTO_PULL_LIB=1
-# to expose decide / log_decision / is_known_bad / mark_known_bad /
+# to expose decide / log_decision / json_escape / is_known_bad /
+# mark_known_bad / pull_error_summary / pull_failure_file /
+# pull_failure_count / record_pull_failure / clear_pull_failure /
 # is_polled_image_ref / select_polled_services / checkout_ff_preflight /
 # checkout_ff without running the main loop.
 if [[ "${ASPIRANT_AUTO_PULL_LIB:-0}" -eq 1 ]]; then
