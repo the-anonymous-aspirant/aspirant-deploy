@@ -38,6 +38,14 @@ if command -v cryptsetup >/dev/null 2>&1; then
   cryptsetup --version
   # dmsetup lists active device-mapper targets; grep is informational only.
   dmsetup ls --target crypt 2>/dev/null || echo "no active crypt targets"
+  # A crypto_LUKS on a loopback-backed file is a #4131 rehearsal artifact, NOT a
+  # layer-1 mapping — it appears as crypto_LUKS in the block listing above and is
+  # easy to misread as an existing mapping. Call it out so it is not counted, and
+  # so it is detached (`sudo losetup -d <loopdev>`) before the ceremony.
+  losetup --list --noheadings --output NAME,BACK-FILE 2>/dev/null | while read -r loopdev backing; do
+    [[ -n "$loopdev" ]] && cryptsetup isLuks "$loopdev" 2>/dev/null && \
+      echo "NOTE: $loopdev ($backing) is a loopback LUKS rehearsal artifact, NOT a layer-1 mapping — detach before the ceremony"
+  done
 else
   echo "cryptsetup NOT installed — install before the ceremony"
 fi
