@@ -22,9 +22,9 @@ layout, and the corrections shape every decision below.
 
 | Task premise | Reality on the cell | Consequence |
 |---|---|---|
-| `/data` is an LV to migrate | **md0 RAID1** (sdb+sdc), **rotational HDDs**, ext4, **125G real data used** of 1.8T | Not an LV. The one hard, downtime-bearing volume; carries production secrets/uploads/finance/penpot/backups. |
+| `/data` is an LV to migrate | **md0 RAID1** (sdb+sdc), **rotational HDDs**, ext4, **126G real data used** of 1.8T (the payload, not the 1.8T fs size, is what a restore moves) | Not an LV. The one hard, downtime-bearing volume; carries production secrets/uploads/finance/penpot/backups. |
 | `/scratch` is an LV / "SSD" | **sda**, raw ext4, **rotational HDD**, 47M used (synthetic lake-skeleton only) | Not an LV, not an SSD. Trivial: §11.0 designates scratch as destroy-on-disposal. |
-| "the lake's SSD LV" exists | **Does not exist.** Only SSD is **sdd**; VG `ubuntu-vg-1` has **~130G VFree** | The lake LV is *created* here, greenfield, from the SSD's free extents. Zero data at risk. |
+| "the lake's SSD LV" exists | **Does not exist.** Only SSD is **sdd**; VG `ubuntu-vg-1` has **~123G VFree** across **2 LVs** (`ubuntu-lv` 100G + `swap2` 8G, added since the Aug figures) | The lake LV is *created* here, greenfield, from the SSD's free extents. Zero data at risk. Size it to leave headroom (**`-L 110G`**, not the earlier 120G, now leaves only ~3G). |
 | (implied) targets need boot-time unlock | **None of the three is the OS root `/`** (root is a 100G LV on sdd) | The cell boots to normal, fully-networked SSH **without** any unlock. See §3. |
 
 Distro confirmed **Ubuntu 24.04.4 LTS**, systemd, kernel 6.8, `cryptsetup 2.7.0`
@@ -45,9 +45,11 @@ twice on volumes where a mistake costs nothing.
 1. **`/scratch` (sda) — fresh luksFormat.** Synthetic-only; correct disposal is
    destruction (§11.0 guardrail). `umount` → `luksFormat` → `luksOpen` →
    `mkfs.ext4` → mount → re-seed the lake-skeleton fixtures. No backup needed.
-2. **lake SSD LV — create + luksFormat.** `lvcreate -L 120G -n lake ubuntu-vg-1`
-   (leaving headroom on the SSD) → `luksFormat` → `luksOpen` → `mkfs.ext4` →
-   mount at `/lake`. Greenfield; zero data at risk.
+2. **lake SSD LV — create + luksFormat.** `lvcreate -L 110G -n lake ubuntu-vg-1`
+   (was 120G; a `swap2` LV added since the Aug figures dropped VFree to ~123G, so
+   120G leaves only ~3G — `preflight.sh` warns below its headroom threshold) →
+   `luksFormat` → `luksOpen` → `mkfs.ext4` → mount at `/lake`. Greenfield; zero
+   data at risk.
 3. **`/data` (md0) — evacuate → luksFormat → restore.** This is the design's own
    endorsed path: §11.0 states plainly that *"a populated disk cannot be
    encrypted in place … retrofitting means evacuating the data, rebuilding the

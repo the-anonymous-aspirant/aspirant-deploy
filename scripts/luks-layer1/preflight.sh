@@ -28,7 +28,12 @@ done
 
 LAKE_VG=ubuntu-vg-1
 LAKE_LV=lake
-LAKE_SIZE=120G           # carve from the ~130G VFree on the SSD (sdd); leave headroom
+# Overridable via env. The SSD VG's free space dropped from ~130G to ~123G when a
+# `swap2` LV was added after the playbook's Aug measurements, so the original
+# 120G left only ~3G headroom. 110G keeps ~13G. The readiness check below WARNs
+# if the chosen size would leave the VG under LAKE_MIN_HEADROOM_G.
+LAKE_SIZE="${LAKE_SIZE:-110G}"
+LAKE_MIN_HEADROOM_G=8
 SCRATCH_DEV=/dev/sda
 BACKUP_ROOT="${BACKUP_ROOT:-/data/aspirant/backups}"
 
@@ -52,24 +57,53 @@ else
   warn "md0 not reporting [UU] — resolve RAID health BEFORE encrypting /data"
 fi
 
-# Free extents for the lake LV.
+# Free extents for the lake LV — checked against the chosen size AND a headroom
+# margin, because "fits" is not "fits with room to spare". A `swap2` LV added
+# since the playbook's Aug figures took VFree from ~130G to ~123G, so the old
+# 120G now leaves only ~3G; this is why the size and the check are both here.
 VFREE=$(vgs --noheadings -o vg_free --units g "$LAKE_VG" 2>/dev/null | tr -dc '0-9.' || echo 0)
-if awk "BEGIN{exit !($VFREE+0 >= 120)}"; then
-  ok "VG $LAKE_VG has ${VFREE}G free — enough for a ${LAKE_SIZE} lake LV"
+LAKE_G=$(printf '%s' "$LAKE_SIZE" | tr -dc '0-9.')
+HEADROOM=$(awk "BEGIN{printf \"%.1f\", $VFREE - $LAKE_G}")
+if awk "BEGIN{exit !($VFREE+0 >= $LAKE_G+0 + $LAKE_MIN_HEADROOM_G)}"; then
+  ok "VG $LAKE_VG free=${VFREE}G — fits a ${LAKE_SIZE} lake LV, leaving ${HEADROOM}G headroom (>= ${LAKE_MIN_HEADROOM_G}G)"
+elif awk "BEGIN{exit !($VFREE+0 >= $LAKE_G+0)}"; then
+  warn "VG $LAKE_VG free=${VFREE}G fits ${LAKE_SIZE} but leaves only ${HEADROOM}G headroom (< ${LAKE_MIN_HEADROOM_G}G) — lower LAKE_SIZE (a swap2 LV was added since the playbook's Aug figures)"
 else
-  warn "VG $LAKE_VG free=${VFREE}G — not enough for ${LAKE_SIZE}; adjust LAKE_SIZE"
+  warn "VG $LAKE_VG free=${VFREE}G — NOT enough for a ${LAKE_SIZE} lake LV; lower LAKE_SIZE (the lake step cannot run as-is; /scratch and /data are independent)"
 fi
 
-# Backup presence for the one volume that carries real data.
+# Stray rehearsal LUKS artifact (#4131 dogfood leftover). A crypto_LUKS on a
+# loopback-backed file is NOT a layer-1 mapping — but it shows up in lsblk as a
+# crypto_LUKS device and can be misread as one. Detach it before the ceremony so
+# neither inventory.sh's block listing nor postcheck can mistake it (this is the
+# tracking task #4486 exit-criterion #4).
+STRAY_LOOP=""
+while read -r loopdev backing; do
+  [[ -z "$loopdev" ]] && continue
+  if cryptsetup isLuks "$loopdev" 2>/dev/null; then
+    STRAY_LOOP+="$loopdev ($backing) "
+  fi
+done < <(losetup --list --noheadings --output NAME,BACK-FILE 2>/dev/null)
+if [[ -n "$STRAY_LOOP" ]]; then
+  warn "loopback LUKS artifact still attached: ${STRAY_LOOP}— a #4131 rehearsal leftover, not a layer-1 mapping. Detach with 'sudo losetup -d <loopdev>' before the ceremony (#4486 exit-criterion #4)."
+else
+  ok "no stray loopback LUKS artifact attached"
+fi
+
+# restic is the tool the /data gate names (playbook §5 step 3:
+# `restic backup /data` -> `restic check` -> a sha256sum manifest). It gates
+# /data ONLY: /scratch and /lake carry no real data and need no backup, so its
+# absence must not read as blocking them. Checked unconditionally, not nested
+# under the backup-root probe, so the gate is visible even before the root exists.
+if command -v restic >/dev/null 2>&1; then
+  ok "restic present: $(restic version 2>/dev/null | head -1) — run 'restic check' + a verified restore before /data"
+else
+  warn "restic NOT installed — the /data gate (playbook §5 step 3) cannot run. /scratch and /lake are UNAFFECTED (no real data at risk) and may proceed; /data waits until restic is installed and a verified restore is proven."
+fi
 if [[ -d "$BACKUP_ROOT" ]]; then
   ok "backup root exists: $BACKUP_ROOT"
-  if command -v restic >/dev/null 2>&1; then
-    ok "restic present — run 'restic check' + a test restore before proceeding"
-  else
-    warn "restic not on PATH — verify the /data backup path manually before /data"
-  fi
 else
-  warn "no backup root at $BACKUP_ROOT — /data MUST be backed up before encryption"
+  warn "no backup root at $BACKUP_ROOT — create it and prove a verified restore before /data"
 fi
 
 # --------------------------------------------------------------------------
@@ -86,7 +120,7 @@ mount /dev/mapper/scratch_crypt /scratch
 # then re-seed lake-skeleton fixtures as needed
 
 # --- lake SSD LV (new; carve from ubuntu-vg-1 free extents on the SSD) -------
-lvcreate -L 120G -n lake ubuntu-vg-1
+lvcreate -L 110G -n lake ubuntu-vg-1   # was 120G; VG free dropped to ~123G (swap2 added), 110G leaves ~13G headroom
 cryptsetup luksFormat /dev/ubuntu-vg-1/lake
 cryptsetup luksOpen  /dev/ubuntu-vg-1/lake lake_crypt
 mkfs.ext4 /dev/mapper/lake_crypt
