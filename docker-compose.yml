@@ -162,6 +162,10 @@ services:
   commander:
     logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-commander:latest
+    # PID 1 must reap orphans: every PDF export runs LibreOffice, whose gpgme
+    # init spawns detached gpgconf/gpg/gpgsm helpers that re-parent to PID 1
+    # and zombie under a bare uvicorn (task #6671: 70 zombies in 8 days).
+    init: true
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
       interval: 30s
