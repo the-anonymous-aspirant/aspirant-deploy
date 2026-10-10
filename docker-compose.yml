@@ -76,13 +76,51 @@ services:
       # them per service scopes the fix without touching .env, so `monitor`
       # keeps its configuration unchanged.
       #
+      # SMTP_USER is masked precisely BECAUSE this service does not read it.
+      # The two services read different names, which is the whole reason this
+      # block is confusing, so both sets are written out here:
+      #
+      #   server  — SMTP_HOST, SMTP_USERNAME, SMTP_PASSWORD, SMTP_FROM
+      #             (optional SMTP_PORT), all-or-nothing
+      #             (aspirant-server server/email/email.go:52-56, read by
+      #             SenderFromEnv at :287)
+      #   monitor — SMTP_HOST, SMTP_USER, SMTP_PASSWORD, ALERT_EMAIL_FROM /
+      #             ALERT_EMAIL_TO; ready when host + to + from are set
+      #             (aspirant-monitor app/config.py:17-31, app/email.py:29)
+      #
+      # aspirant-server declines to adopt SMTP_USER on purpose: doing so would
+      # make the server send as whatever account the ambient credentials belong
+      # to, "which is not a decision a name collision gets to make"
+      # (email.go:282-286).
+      #
+      # So SETTING THE THREE NAMES BELOW DOES NOT SWITCH OUTBOUND MAIL ON —
+      # that is what this comment used to say, and it is wrong. Without
+      # SMTP_USERNAME and SMTP_FROM the server reads a PARTIAL configuration:
+      # it logs "ERROR: outbound mail is DISABLED", keeps writing mail to its
+      # log, and since aspirant-server#123 the admin page additionally refuses
+      # to open public sign-up (409, naming these four names). Nothing crashes
+      # and nothing works. Turning mail on means setting all four, explicitly,
+      # on this service.
+      #
+      # And the From address is DNS-constrained. the-aspirant.com publishes
+      # `v=spf1 -all` and `_dmarc` `p=reject; sp=reject; adkim=s; aspf=s`, with
+      # no DKIM selector at any common name (read 2026-10-06). An SMTP_FROM in
+      # that domain is therefore REJECTED by the recipient while the server
+      # logs a successful send — worse to diagnose than today's dev sink. Use a
+      # From the relay is authorised for, or publish SPF + DKIM first.
+      #
       # These stay empty until a relay is chosen for sign-up mail (system_3
-      # #5119). Setting them is what switches outbound mail on, and the
-      # credentials in .env are a personal Gmail account, so that is the
-      # operator's decision to make.
+      # #5119 / #6742), and the credentials in .env are a personal Gmail
+      # account, so that is the operator's decision to make.
       SMTP_HOST: ""
       SMTP_USER: ""
       SMTP_PASSWORD: ""
+      # SMTP_USERNAME and SMTP_FROM are deliberately NOT declared: .env carries
+      # neither, so there is nothing to mask, and declaring them empty would
+      # add two more names to keep in step for no gain. They are what gets
+      # ADDED here when the relay lands.
+      # SMTP_USERNAME: "<the relay account>"
+      # SMTP_FROM: "<an address the relay is authorised to send as>"
     env_file:
       - .env
     volumes:
