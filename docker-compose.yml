@@ -18,6 +18,9 @@ services:
   postgres:
     logging: *default-logging
     image: pgvector/pgvector:pg16
+    # Kernel OOM victim order (system_3 #7674): prod data dies last. earlyoom
+    # avoids postgres by name, but the kernel killer reads oom_score only.
+    oom_score_adj: -900
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${DB_USER}
@@ -39,6 +42,9 @@ services:
   server:
     logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-server:latest
+    # OOM victim order (system_3 #7674): user-facing, killed after the
+    # adj-0 services (penpot, ollama, browser) but before postgres.
+    oom_score_adj: -500
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health >/dev/null 2>&1 || exit 1"]
       interval: 30s
@@ -143,6 +149,9 @@ services:
   client-blue:
     logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-client:latest
+    # OOM victim order (system_3 #7674): user-facing, killed after the
+    # adj-0 services (penpot, ollama, browser) but before postgres.
+    oom_score_adj: -500
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1/ >/dev/null || exit 1"]
       interval: 30s
@@ -160,6 +169,9 @@ services:
   client-green:
     logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-client:latest
+    # OOM victim order (system_3 #7674): user-facing, killed after the
+    # adj-0 services (penpot, ollama, browser) but before postgres.
+    oom_score_adj: -500
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1/ >/dev/null || exit 1"]
       interval: 30s
