@@ -17,6 +17,11 @@
 #                                             (prompts again — this destroys /data)
 set -euo pipefail
 
+# shellcheck source=system3_freeze.sh
+source "$(dirname "${BASH_SOURCE[0]}")/system3_freeze.sh"
+# How long the system_3 freeze lasts unless postcheck.sh closes it (#7342).
+LUKS_FREEZE_MINUTES="${LUKS_FREEZE_MINUTES:-120}"
+
 CONFIRM=""
 TARGET=""
 while [[ $# -gt 0 ]]; do
@@ -151,8 +156,18 @@ if [[ "$CONFIRM" != "yes" ]]; then
   exit 0
 fi
 
+# Tell system_3 the window is planned before the first destructive command: its
+# verifies wait, automated spawns pause, and anomalies are tagged (#7342). The
+# dry run above opens nothing, because it touches nothing.
+open_ceremony_freeze() {
+  rule "system_3 planned-maintenance freeze"
+  freeze_open "LUKS ceremony: layer-1 $1" "$LUKS_FREEZE_MINUTES"
+  freeze_status
+}
+
 case "$TARGET" in
   scratch)
+    open_ceremony_freeze scratch
     umount /scratch
     cryptsetup luksFormat "$SCRATCH_DEV"
     cryptsetup luksOpen "$SCRATCH_DEV" scratch_crypt
@@ -161,6 +176,7 @@ case "$TARGET" in
     ok "/scratch is now LUKS-backed"
     ;;
   lake)
+    open_ceremony_freeze lake
     lvcreate -L "$LAKE_SIZE" -n "$LAKE_LV" "$LAKE_VG"
     cryptsetup luksFormat "/dev/$LAKE_VG/$LAKE_LV"
     cryptsetup luksOpen "/dev/$LAKE_VG/$LAKE_LV" lake_crypt
@@ -172,6 +188,7 @@ case "$TARGET" in
     echo "  /data carries 125G of REAL production data across the 16y RAID."
     read -r -p "  Type exactly 'ENCRYPT /data' to proceed: " reply
     [[ "$reply" == "ENCRYPT /data" ]] || die "confirmation phrase not matched — aborting"
+    open_ceremony_freeze data
     die "operator must run the /data evacuate->restore steps by hand (see printed plan); \
 this script refuses to automate a 1.8T restore without an interactive verified-restore checkpoint."
     ;;
