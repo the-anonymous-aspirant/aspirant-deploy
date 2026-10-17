@@ -721,9 +721,34 @@ Templates for all of these are in the [_template/](_template/) directory.
 - Secrets managed in GitHub repo settings (GHCR auth uses the built-in `GITHUB_TOKEN`)
 - Reference template: `_template/.github/workflows/ci.yml`
 
-### New Service CI Setup
+### Image Publish Lanes
 
-Every service that has a Docker image in `docker-compose.yml` **must** have a CI workflow. Without it, the image will never be built and production will fail with a pull error.
+Every image in `docker-compose.yml` that is built from one of our repos **must** be published by one of two lanes. Without one, the image is never rebuilt after a merge, and production either fails with a pull error or keeps running an old build.
+
+1. **CI workflow.** A workflow under `.github/workflows/` in the image's repo builds the image and pushes it to GHCR on push to `main`. This is the default for a new service (setup below).
+2. **Local-publish poller.** `scripts/aspirant_publish_poller.py` in the system_3 repo runs on the dev box every 30 minutes, from the cron that `scripts/install-aspirant-publish-poller-cron.sh` installs. On each run it fetches every repo in its `REPOS` list, checks GHCR for a `sha-<7char>` tag for that repo's `origin/main` HEAD, and when the tag is missing it builds from the dev-box clone under `/home/aspirant/git/aspirant/<repo>` and pushes `sha-<7char>` and `latest`. The lane exists because a GitHub-side merge used to publish no image for repos whose CI could not build it. aspirant-client's build needs its `file:../aspirant-design-system` sibling, which the CI runner did not have (system_3 #2281 and #2346; see `docs/IMAGE_PUBLISH_DECISION.md`). A repo is in this lane only if it is listed in `REPOS`. The poller pushes only when the dev box holds a `write:packages` credential. Without one, it reads GHCR and logs which repos need a build, but publishes nothing.
+
+Images we do not build are outside this rule: upstream images pulled as they are (`pgvector/pgvector`, `tecnativa/docker-socket-proxy`, `dperson/torproxy`, `ollama/ollama`) and the digest-pinned Penpot mirrors (see `docs/DECISIONS.md`, "GHCR mirrors for the Penpot images").
+
+Lane per image, read 2026-10-14 from each repo's `.github/workflows/` and the poller's `REPOS`:
+
+| Image | Built from | Lane |
+|-------|------------|------|
+| `aspirant-server` | aspirant-server | CI (`build-image.yml`); also listed in the poller |
+| `aspirant-client` | aspirant-client | CI (`build-image.yml`); also listed in the poller |
+| `aspirant-commander` | aspirant-commander | CI (`build-image.yml`); also listed in the poller |
+| `aspirant-transcriber` | aspirant-transcriber | CI (`ci.yml`) |
+| `aspirant-translator` | aspirant-translator | CI (`ci.yml`) |
+| `aspirant-monitor` | aspirant-monitor | CI (`ci.yml`) |
+| `aspirant-advisor` | aspirant-advisor | CI (`ci.yml`) |
+| `aspirant-browser` | aspirant-browser | CI (`build-image.yml`) |
+| `aspirant-histoire` | aspirant-design-system | CI (`build-image.yml`) |
+| `aspirant-explorer` | aspirant-explorer | **None.** No workflow and not in the poller. The service sits behind the `explorer` compose profile. |
+| `aspirant-explorer-frontend` | aspirant-explorer | **None.** Same as above. |
+
+When you add an image to `docker-compose.yml`, add its row here with the lane that publishes it.
+
+### New Service CI Setup
 
 1. Create `.github/workflows/ci.yml` with test and build jobs (see variants below)
 2. Merge to main — this triggers the first image push to ghcr.io
