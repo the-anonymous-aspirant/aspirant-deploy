@@ -28,6 +28,11 @@
 # real-volume acceptance test for this script; see POST_BOOT_UNLOCK_PLAYBOOK.md.
 set -euo pipefail
 
+# shellcheck source=../luks-layer1/system3_freeze.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../luks-layer1/system3_freeze.sh"
+# How long an unlock-opened system_3 freeze lasts unless postcheck.sh closes it.
+LUKS_UNLOCK_FREEZE_MINUTES="${LUKS_UNLOCK_FREEZE_MINUTES:-60}"
+
 # name -> "backing-device:mount-point". These match the mapper names the layer-1
 # ceremony creates (postcheck.sh) and the real cell layout (LUKS_LAYER1_PLAYBOOK
 # §1). Overridable via env for the loopback self-test (tests/luks_unlock_loopback.sh).
@@ -88,6 +93,14 @@ status_report() {
   done
 }
 
+# freeze_for_unlock: tell system_3 the window is planned (#7342). `open` opens a
+# freeze if none is in force (an unlock run outside the preflight/postcheck pair)
+# or extends the pre-reboot one (later expiry wins). postcheck.sh closes it.
+freeze_for_unlock() {
+  rule "system_3 planned-maintenance freeze"
+  freeze_open "LUKS post-boot unlock" "$LUKS_UNLOCK_FREEZE_MINUTES"
+}
+
 # --- main ------------------------------------------------------------------
 
 main() {
@@ -105,6 +118,7 @@ main() {
 
   [[ "$status_only" == yes ]] && { status_report; exit 0; }
   [[ $EUID -eq 0 ]] || die "must run as root (cryptsetup/mount) — use sudo"
+  freeze_for_unlock
 
   local -a targets=("${ORDER[@]}")
   [[ ${#want[@]} -gt 0 ]] && targets=("${want[@]}")

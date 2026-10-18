@@ -12,6 +12,9 @@
 #                                               # checksum manifest of /data
 set -euo pipefail
 
+# shellcheck source=system3_freeze.sh
+source "$(dirname "${BASH_SOURCE[0]}")/system3_freeze.sh"
+
 MANIFEST=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -64,7 +67,11 @@ fi
 echo "=== summary ==="
 if [[ "$rc" -eq 0 ]]; then
   echo "  all layer-1 volumes verified LUKS-active and mounted."
+  # The ceremony is over: release system_3's freeze (#7342).
+  echo "=== system_3 planned-maintenance freeze ==="
+  freeze_close
 else
   echo "  one or more checks FAILED — do not close #4131 until resolved."
+  echo "  system_3's freeze stays open while you resolve it; it lapses at its expiry."
 fi
 exit "$rc"
