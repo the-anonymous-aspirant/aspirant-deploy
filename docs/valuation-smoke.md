@@ -19,11 +19,21 @@ browser uses:
 - **Part A — route contract.** Every commander endpoint the client calls resolves
   to a route on aspirant-server, probed unauthenticated at the served surface:
   a registered auth-gated route answers **401**, a missing one **404**. 404-where-
-  401 is the whole of #5920, and a list comparison catches it.
-- **Part B — real-document journey.** As a Member, `POST /decide` then `/extract`
-  for each corpus document through the client nginx `/api` proxy (the real chain),
-  asserting the pre-flight classifies it and the extract returns **200** (not the
-  #5919 502) with the expected field structure.
+  401 is the whole of #5920, and a list comparison catches it. The list itself is
+  reconciled against the client's `origin/main` source by
+  `tests/smoke_valuation_unit.py`. A path the client calls but the list lacks
+  reds the unit test, because Part A cannot see a hop it does not probe.
+- **Part B — real-document journey.** As a Member, `POST /decide`, then submit to
+  `/extract-async` and poll `/jobs/{id}`, for each corpus document through the
+  client nginx `/api` proxy (the real chain). This is the client's own extraction
+  path since #5979, with its 5-minute deadline and 2-second poll. It asserts that
+  the pre-flight classifies the document and that the job ends `done` (not
+  `failed`, not past the deadline) with the expected field structure. A 404 on
+  the submit fails loudly. The client would silently fall back to the sync
+  `/extract` on that status, so the edge-safe path could vanish unnoticed.
+  Until #8246 this part walked the sync `/extract`, which no member uses. Its
+  50-155 s calls were the long samples in `proxy_request_log` that the system_3
+  latency and timeout-margin rows read as member traffic.
 
 It asserts only **structure** — classification, field counts, outcome, HTTP status.
 The corpus documents are real client valuations; their bytes and field *values*
