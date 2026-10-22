@@ -24,10 +24,13 @@ Two assertions:
   registered auth-gated route answers 401; a missing one 404s. 404-where-401 is the
   whole of #5920, and a list comparison catches it.
 
-  Part B — real-document journey. As a Member, POST /decide then /extract for each
-  corpus document, asserting the pre-flight classifies it and the extract returns
-  200 (not the #5919 502) with the expected fields — the journey #5915 shipped
-  "done" without, that never once worked for a user.
+  Part B — real-document journey. As a Member, POST /decide, then submit to
+  /extract-async and poll /jobs/{id} for each corpus document, the way the client
+  has extracted since #5979. It asserts the pre-flight classifies the document and
+  the job ends `done` (not failed, not past the client's deadline) with the
+  expected fields. That is the journey #5915 shipped "done" without, and it never
+  once worked for a user. Until #8246 this part walked the sync /extract, which no
+  member uses, and its 50-155 s calls read as member latency in the health rows.
 
 Privacy: the corpus documents are real client valuations; their bytes and field
 VALUES never leave the cell and are never asserted here. This check reads them from
@@ -68,10 +71,14 @@ SMOKE_USER_EPOCH = int(os.environ.get("SMOKE_USER_EPOCH", "0"))
 
 # Every commander endpoint the aspirant-client calls through /api, as (method, path)
 # in the form the client uses. Mirrors the client's call sites
-# (src/views/member/personal/ValuationStatement.vue); the reconcile check below
-# fails if the client grows an endpoint not listed here.
+# (src/views/member/personal/ValuationStatement.vue). tests/smoke_valuation_unit.py
+# reconciles it against the client's origin/main source and fails if the client
+# calls a path not listed here (#8246: until then only a comment claimed so, and
+# extract-async + jobs went unlisted for a month).
 CLIENT_COMMANDER_CONTRACT = [
     ("POST", "/api/commander/valuation-statement/extract"),
+    ("POST", "/api/commander/valuation-statement/extract-async"),
+    ("GET", "/api/commander/valuation-statement/jobs/smoke-probe-id"),
     ("POST", "/api/commander/valuation-statement/decide"),
     ("POST", "/api/commander/valuation-statement/generate"),
     ("GET", "/api/commander/valuation-statement/operator-defaults"),
@@ -108,10 +115,16 @@ CORPUS_MANIFEST = [
     },
 ]
 
-# The extract client's ceiling on the deployed server is 300s (#5919); give the
-# HTTP read a little more so a genuine server-side 504/slowness surfaces as itself
-# rather than as a client-side socket timeout we would misread.
-EXTRACT_TIMEOUT = 320
+# Extraction runs as an async job, the way the client runs it (#5979): submit to
+# /extract-async, then poll /jobs/{id}. The deadline and cadence mirror the
+# client's _extractViaJob (5 min, 2 s), so the check gives up exactly when a member's
+# wizard would. Every request is short; only the background job is long. That is
+# also why this check no longer puts 100 s+ samples into proxy_request_log, where
+# they used to read as member latency (#8244).
+SUBMIT_TIMEOUT = 60
+POLL_TIMEOUT = 15
+JOB_DEADLINE = 300
+POLL_INTERVAL = 2
 DECIDE_TIMEOUT = 60
 
 
@@ -133,6 +146,38 @@ def decide_ok(expect: dict, doc: dict) -> list[str]:
     if "subkind" in expect and doc.get("no_text_subkind") != expect["subkind"]:
         errs.append(f"subkind={doc.get('no_text_subkind')} want {expect['subkind']}")
     return errs
+
+
+def submit_ok(status: int, body: dict) -> tuple[str | None, list[str]]:
+    """The /extract-async submit: 202 with a job_id. A 404 is the #5920 class on
+    the async hop, and it is the dangerous one: the client falls back to the sync
+    /extract on a 404, so members would silently lose the edge-safe path."""
+    if status == 404:
+        return None, ["submit HTTP 404: no extract-async route (the #5920 class; the "
+                      "client would silently fall back to the sync /extract)"]
+    if status not in (200, 202):
+        return None, [f"submit HTTP {status} (want 202)"]
+    job_id = body.get("job_id") if isinstance(body, dict) else None
+    if not job_id:
+        return None, [f"submit HTTP {status} carried no job_id"]
+    return str(job_id), []
+
+
+def job_state(status: int, body: dict) -> tuple[str, object]:
+    """Classify one /jobs/{id} poll as done (result), failed (error), pending, or
+    fatal (a reason). A transient non-200 counts as pending, as in the client,
+    except 401/404: the session or the job is gone, and the job is scoped to its
+    owner (#5986), so polling on cannot recover it."""
+    if status in (401, 404):
+        return "fatal", f"poll HTTP {status}"
+    if status != 200 or not isinstance(body, dict):
+        return "pending", None
+    st = body.get("status")
+    if st == "done":
+        return "done", body.get("result") or {}
+    if st == "failed":
+        return "failed", body.get("error") or "no error text"
+    return "pending", None
 
 
 def extract_ok(expect: dict, status: int, doc: dict) -> list[str]:
@@ -253,18 +298,51 @@ def part_b_journey(res: Result, token: str) -> None:
                 f"{entry['file']} decide: " + ("; ".join(errs) if errs else
                 f"ocr_required={docs[0].get('ocr_required')} subkind={docs[0].get('no_text_subkind')}"))
 
-        # /extract — the blocking journey (#5919 502-at-30s lived here).
+        # Extraction — the member's journey since #5979: submit, then poll the job.
         body, ct = _multipart(pdf, entry["file"])
         t0 = time.time()
-        status, raw = _request("POST", "/api/commander/valuation-statement/extract",
-                               token, body, ct, EXTRACT_TIMEOUT)
+        status, doc, errs = _extract_via_job(token, body, ct)
         dt = time.time() - t0
-        doc = json.loads(raw).get("documents", [{}])[0] if status == 200 and raw else {}
-        errs = extract_ok(entry["extract"], status, doc)
+        if not errs:
+            errs = extract_ok(entry["extract"], status, doc)
         filled = sum(1 for f in (doc.get("fields") or []) if f.get("value"))
-        summary = f"{status} in {dt:.1f}s outcome={(doc.get('diagnostics') or {}).get('outcome')} filled={filled}"
+        summary = f"job done in {dt:.1f}s outcome={(doc.get('diagnostics') or {}).get('outcome')} filled={filled}"
         (res.fail if errs else res.ok)(
             f"{entry['file']} extract: " + ("; ".join(errs) if errs else summary))
+
+
+def _json(raw: bytes) -> dict:
+    try:
+        return json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+
+
+def _extract_via_job(token: str, body: bytes, ct: str) -> tuple[int, dict, list[str]]:
+    """Submit to /extract-async and poll /jobs/{id} until it is terminal or the
+    deadline passes. Returns (status for extract_ok, first document, errors)."""
+    status, raw = _request("POST", "/api/commander/valuation-statement/extract-async",
+                           token, body, ct, SUBMIT_TIMEOUT)
+    job_id, errs = submit_ok(status, _json(raw))
+    if errs:
+        return status, {}, errs
+    deadline = time.time() + JOB_DEADLINE
+    while time.time() < deadline:
+        try:
+            pstatus, praw = _request("GET", f"/api/commander/valuation-statement/jobs/{job_id}",
+                                     token, None, None, POLL_TIMEOUT)
+        except Exception:  # noqa: BLE001 — a transient poll error, as the client treats it
+            pstatus, praw = 0, b""
+        state, detail = job_state(pstatus, _json(praw))
+        if state == "done":
+            return 200, (detail.get("documents") or [{}])[0], []
+        if state == "failed":
+            return 200, {}, [f"job {job_id} failed: {detail}"]
+        if state == "fatal":
+            return pstatus, {}, [f"job {job_id}: {detail}"]
+        time.sleep(POLL_INTERVAL)
+    return 504, {}, [f"job {job_id} not terminal after {JOB_DEADLINE}s "
+                     "(the member's wizard gives up here too)"]
 
 
 def main() -> int:
