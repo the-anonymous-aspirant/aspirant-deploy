@@ -306,6 +306,9 @@ services:
       ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
       ALERT_EMAIL_FROM: ${ALERT_EMAIL_FROM:-}
       DAILY_REPORT_HOUR: ${DAILY_REPORT_HOUR:-8}
+      # system_3 #8739: bearer token system_3 presents on POST /report/send;
+      # unset keeps that endpoint disabled (503). Set in .env, recreate monitor.
+      REPORT_SEND_TOKEN: ${REPORT_SEND_TOKEN:-}
     networks:
       - default
       - docker_proxy_net
