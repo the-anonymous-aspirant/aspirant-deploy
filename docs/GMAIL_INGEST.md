@@ -11,7 +11,7 @@ read path (C1).
 | thing | where | mode | in git? |
 |---|---|---|---|
 | OAuth client JSON (Desktop app; holds the client secret) | `~/secrets/gmail-oauth-client.json` | 600, dir 700 | never |
-| refresh token, as a lake envelope (`AOBJ` object + wrapped DEK) | `~/secrets/gmail/token.aobj`, `token.wdek` | 600 | never |
+| refresh token, as a lake envelope (`AOBJ` object + wrapped DEK) | `~/secrets/gmail/token.aobj`, `token.wdek` (owned by you; the tool runs as your user, not root) | 600 | never |
 | non-secret sidecar (obtained_at, scopes, kek version, fingerprint) | `~/secrets/gmail/token.meta.json` | 600 | never |
 | the lake KEK | off-cell (operator), typed or passed one-shot per run | — | never |
 | tools | `scripts/gmail/` in this repo, run through `scripts/gmail/gmail.sh` | — | yes |
@@ -42,13 +42,25 @@ machine, so open the SSH session with a tunnel that carries that port to the
 cell:
 
 ```bash
-ssh -L 8765:127.0.0.1:8765 -p 41922 aspirant@home.the-aspirant.com
+ssh -o ExitOnForwardFailure=yes -L 8765:127.0.0.1:8765 -p 41922 aspirant@home.the-aspirant.com
 cd ~/aspirant-deploy
 scripts/gmail/gmail.sh consent --note 'consent screen: Testing'
 ```
 
-The tool asks for the KEK (hidden prompt; or export `LAKE_KEK_HEX` one-shot for
-this command only), prints an authorisation URL, you open it in your browser,
+`ExitOnForwardFailure=yes` makes ssh abort if your local port 8765 is taken, so
+Google's redirect can never land on some other local process; without it ssh
+only warns and carries on.
+
+The tool asks for the KEK on a hidden prompt (the way to enter it). If you need
+it in the environment for a non-interactive run, read it hidden and export the
+variable, never type the hex on a command line, which would write the lake
+master key to the shell history on the cell:
+
+```bash
+read -rs LAKE_KEK_HEX && export LAKE_KEK_HEX    # one shell, one run; `unset LAKE_KEK_HEX` after
+```
+
+It then prints an authorisation URL, you open it in your browser,
 grant read-only access, and Google's redirect lands on the cell through the
 tunnel. The token is then stored as an envelope and the sidecar is printed.
 Nothing secret is printed, ever.

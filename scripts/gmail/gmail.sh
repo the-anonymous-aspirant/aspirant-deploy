@@ -7,10 +7,12 @@
 #   ./scripts                          read-only  (gmail/ and kek/ modules)
 #   ~/secrets/gmail                    read-write (the envelope-encrypted token)
 #   ~/secrets/gmail-oauth-client.json  read-only  (the operator's Desktop client)
-# `--network host` so the loopback consent server on 127.0.0.1:<port> is the
-# one the operator's SSH tunnel reaches. The KEK is passed through only when the
-# caller exported LAKE_KEK_HEX (one-shot); otherwise the hidden prompt runs on
-# the terminal. Nothing here persists key material.
+# `--network host` for `consent` only, so the loopback consent server on
+# 127.0.0.1:<port> is the one the operator's SSH tunnel reaches; other commands
+# get the default bridge network (egress only). Runs as the invoking user, not
+# root. The KEK is passed through only when the caller exported LAKE_KEK_HEX
+# (one-shot, entered with `read -rs`, never typed on a command line); otherwise
+# the hidden prompt runs on the terminal. Nothing here persists key material.
 #
 # Usage: scripts/gmail/gmail.sh consent [--port 8765] [--note TEXT]
 #        scripts/gmail/gmail.sh status [--check]
@@ -28,7 +30,12 @@ fi
 mkdir -p "$SECRETS/gmail"
 chmod 700 "$SECRETS" "$SECRETS/gmail"
 
-run=(docker run --rm --network host -e HOME=/root -e GMAIL_SECRETS_DIR=/secrets/gmail -e GMAIL_CLIENT_JSON=/secrets/gmail-oauth-client.json)
+# Non-root: the token files land on the host owned by the invoking user, and the
+# process that holds the KEK does not run as root. Host networking only for
+# `consent`, whose loopback server the operator's SSH tunnel must reach; every
+# other command needs egress only (review c54457).
+run=(docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e GMAIL_SECRETS_DIR=/secrets/gmail -e GMAIL_CLIENT_JSON=/secrets/gmail-oauth-client.json)
+if [[ "${1:-}" == "consent" ]]; then run+=(--network host); fi
 if [[ -t 0 && -t 1 ]]; then run+=(-it); fi
 for v in LAKE_KEK_HEX LAKE_KEK_FINGERPRINT LAKE_KEK_VERSION; do
   if [[ -n "${!v:-}" ]]; then run+=(-e "$v"); fi

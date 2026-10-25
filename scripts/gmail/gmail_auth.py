@@ -115,9 +115,7 @@ def write_token(info: dict, kek: bytes, kek_version: int, secrets_dir: Path, not
     os.chmod(secrets_dir, 0o700)
     aobj, wdek_b64 = seal_token(info, kek, kek_version)
     for path, data in ((paths["aobj"], aobj), (paths["wdek"], wdek_b64.encode("ascii"))):
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
+        _write_private(path, data)
     meta = {
         "obtained_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "scopes": sorted(info.get("scopes") or []),
@@ -126,10 +124,29 @@ def write_token(info: dict, kek: bytes, kek_version: int, secrets_dir: Path, not
         "kek_fingerprint": kek_loader.fingerprint(kek),
         "note": note,
     }
-    fd = os.open(paths["meta"], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as fh:
-        json.dump(meta, fh, indent=1, sort_keys=True)
+    _write_private(paths["meta"], json.dumps(meta, indent=1, sort_keys=True).encode("utf-8"))
     return meta
+
+
+def _write_private(path: Path, data: bytes) -> None:
+    """Write a 0600 file atomically: temp file, fchmod, fsync, os.replace.
+
+    `O_TRUNC` on an existing file would keep its old mode, and a crash between
+    the `.aobj` and `.wdek` writes would leave a pair that reads as a wrong key
+    (review c54457); the temp-and-replace shape closes both.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
 
 
 def read_meta(secrets_dir: Path | None = None) -> dict | None:
@@ -155,6 +172,27 @@ def load_credentials(kek: bytes, secrets_dir: Path | None = None):
     from google.oauth2.credentials import Credentials  # lazy: the self-test has no google libs
 
     return Credentials.from_authorized_user_info(info, scopes=[SCOPE])
+
+
+# --- consent flow ------------------------------------------------------------
+
+def build_flow(client_json_path: str):
+    """The loopback consent flow, with PKCE made mandatory.
+
+    google-auth-oauthlib's `from_client_secrets_file` passes
+    `autogenerate_code_verifier=None` through to the constructor, which drops
+    the PKCE challenge (security review #8807 c54457; RFC 8252 §8.1 requires it
+    for native-app loopback flows). It is set explicitly here and checked
+    afterwards, so a library change cannot silently remove it again.
+    """
+    from google_auth_oauthlib.flow import InstalledAppFlow  # lazy
+
+    flow = InstalledAppFlow.from_client_secrets_file(
+        client_json_path, scopes=[SCOPE], autogenerate_code_verifier=True
+    )
+    if not getattr(flow, "autogenerate_code_verifier", False):
+        raise ConfigError("the OAuth flow would run without a PKCE code verifier; refusing")
+    return flow
 
 
 # --- refresh check -----------------------------------------------------------
@@ -220,9 +258,11 @@ def cmd_consent(args) -> int:
     except kek_loader.KekLoadError as exc:
         print(f"refused: no usable KEK ({exc}); the token is only ever stored encrypted", file=sys.stderr)
         return EXIT_KEK
-    from google_auth_oauthlib.flow import InstalledAppFlow  # lazy
-
-    flow = InstalledAppFlow.from_client_secrets_file(str(CLIENT_JSON), scopes=[SCOPE])
+    try:
+        flow = build_flow(str(CLIENT_JSON))
+    except ConfigError as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return EXIT_CONFIG
     message = (
         "\nOpen this URL in a browser on YOUR machine. Google will redirect to "
         f"http://localhost:{args.port}/ which must reach this process through your SSH "
@@ -238,6 +278,10 @@ def cmd_consent(args) -> int:
         prompt="consent",
     )
     info = json.loads(creds.to_json())
+    granted = getattr(creds, "granted_scopes", None)
+    if granted is not None and set(granted) != {SCOPE}:
+        print(f"refused: Google granted {sorted(granted)}, not exactly {{{SCOPE}}}; nothing stored", file=sys.stderr)
+        return EXIT_CONFIG
     if not info.get("refresh_token"):
         print("Google returned no refresh token; nothing stored. Re-run consent (prompt=consent is set).", file=sys.stderr)
         return EXIT_TRANSPORT
@@ -357,6 +401,25 @@ def _self_test() -> int:
             check("the written files open with the same KEK", False, repr(exc))
         check("meta sidecar carries no secret", not any(info[f] in json.dumps(meta) for f in SECRET_FIELDS))
     check("no-token status reads as such", "no token stored" in render_status(None))
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp) / "gmail"; d.mkdir()
+        stale = d / "token.aobj"; stale.write_bytes(b"old"); os.chmod(stale, 0o644)
+        write_token(info, kek, 1, d)
+        check("an existing 0644 token file is rewritten as 0600", oct(stale.stat().st_mode & 0o777) == "0o600")
+        check("no temp file is left behind", not list(d.glob("*.tmp")))
+    try:
+        import google_auth_oauthlib  # noqa: F401
+    except ImportError:
+        print("[SKIP] PKCE check: google-auth-oauthlib not installed in this interpreter")
+    else:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "client.json"
+            cfg.write_text(json.dumps({"installed": {"client_id": "123-selftest.apps.googleusercontent.com", "client_secret": "GOCSPX-SELFTEST-SECRET-NOT-REAL", "token_uri": "https://oauth2.googleapis.com/token", "auth_uri": "https://accounts.google.com/o/oauth2/auth", "redirect_uris": ["http://localhost"]}}))
+            flow = build_flow(str(cfg))
+            check("the flow autogenerates a PKCE code verifier", flow.autogenerate_code_verifier is True)
+            flow.redirect_uri = "http://localhost:8765/"
+            url, _state = flow.authorization_url(access_type="offline", prompt="consent")
+            check("the authorisation URL carries code_challenge and S256", "code_challenge=" in url and "code_challenge_method=S256" in url, url[:160])
     print(f"self-test: {passed} passed, {failed} failed")
     return 0 if failed == 0 else 1
 
