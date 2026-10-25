@@ -730,7 +730,7 @@ Every image in `docker-compose.yml` that is built from one of our repos **must**
 
 Images we do not build are outside this rule: upstream images pulled as they are (`pgvector/pgvector`, `tecnativa/docker-socket-proxy`, `dperson/torproxy`, `ollama/ollama`) and the digest-pinned Penpot mirrors (see `docs/DECISIONS.md`, "GHCR mirrors for the Penpot images").
 
-Lane per image, read 2026-10-14 from each repo's `.github/workflows/` and the poller's `REPOS`:
+Lane per image, read 2026-10-14 from each repo's `.github/workflows/` and the poller's `REPOS`; the explorer rows re-read 2026-10-25 after their first green run:
 
 | Image | Built from | Lane |
 |-------|------------|------|
@@ -743,8 +743,8 @@ Lane per image, read 2026-10-14 from each repo's `.github/workflows/` and the po
 | `aspirant-advisor` | aspirant-advisor | CI (`ci.yml`) |
 | `aspirant-browser` | aspirant-browser | CI (`build-image.yml`) |
 | `aspirant-histoire` | aspirant-design-system | CI (`build-image.yml`) |
-| `aspirant-explorer` | aspirant-explorer | **None.** No workflow and not in the poller. The service sits behind the `explorer` compose profile. |
-| `aspirant-explorer-frontend` | aspirant-explorer | **None.** Same as above. |
+| `aspirant-explorer` | aspirant-explorer | CI (`build-image.yml`, system_3 #7794); first green run 2026-10-25 (`sha-5819d1b`). Not in the poller. The service sits behind the `explorer` compose profile. |
+| `aspirant-explorer-frontend` | aspirant-explorer | CI (`build-image.yml`, same workflow, second job). Same profile. |
 
 When you add an image to `docker-compose.yml`, add its row here with the lane that publishes it.
 
