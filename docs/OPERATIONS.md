@@ -199,6 +199,55 @@ grep -nE '^(CF_TOKEN|ZONE_ID|ROOT_RECORD_ID|HOME_RECORD_ID)=' scripts/update-dns
 ssh -p 41922 aspirant@home.the-aspirant.com 'ls -l ~/.config/aspirant/ddns.env'       # -rw-------
 ```
 
+## Cloudflare Access lockout: break-glass
+
+The admin paths (`/admin`, `/browser-flows`) sit behind a Cloudflare Access application that sends a One-time PIN to the operator's one address (system_3 decision `corpus/decisions/2026-07-20-admin-auth-second-factor.md`, option D; the applications are created by system_3 #8798). Three things lock the operator out of it: a Cloudflare outage, a lost mailbox, or a bad Access policy. None of them touches SSH, which does not pass through Cloudflare at all: `home.the-aspirant.com` is an unproxied A record pointing straight at the cell (see INFRASTRUCTURE.md, DNS Records) and sshd listens on 41922 (`Port 41922` in `/etc/ssh/sshd_config`). The DDNS cron above keeps that record current. This section is written ahead of the lockout on purpose: the path is only as good as the SSH key you last tested with it.
+
+### 1. Get a shell on the cell
+
+```bash
+ssh -p 41922 aspirant@home.the-aspirant.com
+```
+
+Key-based only (`PasswordAuthentication no`, `AllowUsers aspirant`), so the device needs a key enrolled under `mesh/`. If the hostname does not answer, the A record may be stale: read the cell's current address from the Cloudflare DNS page or from the router, and use `ssh -p 41922 aspirant@<ip>`. `mesh/README.md` has the connection troubleshooting.
+
+### 2. Reach the admin tools through the tunnel
+
+The client nginx that serves the public hostname also listens on the cell's own port 80, as the default server with no `server_name`, so it answers any Host header. Traffic that arrives this way never meets Access, and the DOCKER-USER firewall that limits the public `:80` to Cloudflare's ranges does not apply either: it filters forwarded traffic, and a connection from the cell itself is not forwarded (checked 2026-10-25: `curl http://127.0.0.1/admin/` from the cell answers 200, with or without a Host header).
+
+```bash
+ssh -p 41922 -L 8080:127.0.0.1:80 aspirant@home.the-aspirant.com
+# then, in a browser on the laptop:
+#   http://localhost:8080/admin/
+```
+
+Everything the public hostname serves is behind that one port: `/admin/`, `/api/` (aspirant-server), `/browser-flows`, `/admin/penpot/`, `/admin/histoire/`. Sign in with the normal password login. No second port needs forwarding.
+
+Whatever #8798 adds to the sign-in path must keep this step working from loopback without a Cloudflare assertion header, or the break-glass is gone the day Access goes live. Re-run the verify below after #8798 ships.
+
+### 3. Turn the Access application off, or loosen it
+
+Cloudflare dashboard → Zero Trust → Access → Applications. The dashboard signs in with the Cloudflare account's own credentials and second factor, not through Access, so an Access lockout never locks the dashboard.
+
+- **Lost mailbox:** edit the application's policy and change the Include rule to an address you can read. The next PIN goes there.
+- **Bad policy** (no one receives a PIN, or the wrong people pass): fix the policy, or delete the application. Deleting it returns the path to the password login, which stays in place underneath Access.
+- **Cloudflare outage:** the dashboard is usually unreachable too. Use step 2 and wait; the public site is down regardless, because the root record is proxied.
+
+### Verify the path while you are not locked out
+
+Run this from the device you would use in a lockout, and repeat it whenever a device key or the Access policy changes.
+
+```bash
+# sshd answers on the direct hostname (a key problem shows as "Permission denied (publickey)"; a stale record or a blocked port as a timeout)
+ssh -p 41922 -o BatchMode=yes -o ConnectTimeout=10 aspirant@home.the-aspirant.com 'hostname'   # aspirant-cell
+
+# the admin UI answers through the tunnel without Cloudflare
+ssh -p 41922 -f -N -o ExitOnForwardFailure=yes -L 8080:127.0.0.1:80 aspirant@home.the-aspirant.com
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/admin/    # 200
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/api/health # 200
+pkill -f 'ssh -p 41922 -f -N -o ExitOnForwardFailure=yes -L 8080'          # close the tunnel
+```
+
 ## Testing
 
 ### Integration test suite
