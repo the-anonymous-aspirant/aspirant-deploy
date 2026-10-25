@@ -1,0 +1,8 @@
+# Runtime for scripts/gmail/*.py (system_3 #8806): the Google client libraries
+# and `cryptography` (for the lake envelope) that the cell's host python lacks.
+# No source is baked in; scripts/gmail/gmail.sh mounts the repo's scripts/ and
+# the operator's secrets at run time, like Dockerfile-LakeDuckDB does for the lake.
+FROM python:3.12-slim
+RUN pip install --no-cache-dir google-auth-oauthlib==1.2.1 google-api-python-client==2.154.0 cryptography==46.0.3
+WORKDIR /work
+ENTRYPOINT ["python"]
