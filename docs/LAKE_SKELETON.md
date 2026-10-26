@@ -30,7 +30,7 @@ is §11.0's stated trigger, not an exception to be made once.
 ## Shape
 
 Three services on a project-local bridge network, **no host ports** (§4 — the
-cell's 80/8081/8999 are already internet-exposed and the lake must not join
+cell's 80 is already internet-exposed, 8081 and 8999 were until system_3 #8801, and the lake must not join
 them):
 
 | Service | Image | Role |

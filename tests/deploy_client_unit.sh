@@ -65,7 +65,8 @@ write_override green "$OV"
 assert_eq "1" "$(grep -c "client-green" "$OV")" "write_override names the requested slot"
 assert_eq "0" "$(grep -c "client-blue" "$OV" || true)" "write_override omits the other slot"
 assert_eq "1" "$(grep -c '"80:80"' "$OV")" "write_override maps port 80"
-assert_eq "1" "$(grep -c '"8999:80"' "$OV")" "write_override maps port 8999"
+assert_eq "1" "$(grep -c '"127.0.0.1:8999:80"' "$OV")" "write_override maps port 8999 on loopback only"
+assert_eq "0" "$(grep -c '"8999:80"' "$OV" || true)" "write_override never publishes 8999 on all interfaces"
 
 echo
 echo "deploy_client_unit: $PASS passed, $FAIL failed"
