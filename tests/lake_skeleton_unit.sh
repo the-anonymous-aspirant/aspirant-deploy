@@ -195,6 +195,7 @@ EOF
 ENV_FILE="$SKEL_ENV"
 DEPLOY_ENV_FILE="$DEPLOY_ENV"
 mkdir -p "$ROOT"
+chmod 644 "$DEPLOY_ENV"  # the mode the cell's deploy .env was found at
 
 rc=0; out="$(explorer_env_check)" || rc=$?
 assert_rc "check fails when the deploy .env holds the previous credentials" "1" "$rc"
@@ -217,6 +218,22 @@ assert_eq "the backup holds the previous credentials" \
   "EXPLORER_S3_ACCESS_KEY=GKoldkey" "$(grep '^EXPLORER_S3_ACCESS_KEY=' "$ROOT"/deploy-env.bak-*)"
 rc=0; explorer_env_check > /dev/null || rc=$?
 assert_rc "check passes after sync" "0" "$rc"
+assert_eq "sync leaves the deploy .env at mode 600" "600" "$(stat -c %a "$DEPLOY_ENV")"
+explorer_env_sync > /dev/null
+assert_eq "a second sync keeps only the newest backup" \
+  "1" "$(find "$ROOT" -maxdepth 1 -name 'deploy-env.bak-*' | wc -l)"
+
+# env_set's value is a sed replacement: | ends it, & and \ are special.
+rc=0; ENV_FILE="$TMPDIR_TEST/sed.env" env_set SOME_KEY 'a&b' 2>/dev/null || rc=$?
+assert_rc "env_set refuses a value containing &" "1" "$rc"
+sed -i '/^EXPLORER_S3_ACCESS_KEY=/d' "$SKEL_ENV"
+printf 'EXPLORER_S3_ACCESS_KEY=GK|bad\n' >> "$SKEL_ENV"
+before="$(cat "$DEPLOY_ENV")"
+rc=0; explorer_env_sync > /dev/null 2>&1 || rc=$?
+assert_rc "sync refuses a skeleton value containing |" "1" "$rc"
+assert_eq "and writes none of the three" "$before" "$(cat "$DEPLOY_ENV")"
+sed -i '/^EXPLORER_S3_ACCESS_KEY=/d' "$SKEL_ENV"
+printf 'EXPLORER_S3_ACCESS_KEY=GKnewkey\n' >> "$SKEL_ENV"
 
 # If the skeleton is only half-issued (bootstrap interrupted), sync must not
 # overwrite a working deploy .env with a mix of new and placeholder values.

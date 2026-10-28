@@ -83,6 +83,15 @@ catalog_psql() {
 # credentials, on precisely the hosts that already exist.
 env_set() {
   local key="$1" value="$2"
+  # The value becomes a sed replacement, where `|` ends the expression and `&`
+  # and `\` are special, so any of them would silently corrupt the file.
+  # Every current generator emits hex; refuse rather than mangle a future one.
+  case "$value" in
+    *'|'* | *'&'* | *'\'*)
+      echo "refusing: value for $key contains | & or \\, which env_set cannot write safely" >&2
+      return 1
+      ;;
+  esac
   if grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
     sed -i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
   else
@@ -371,10 +380,20 @@ explorer_env_sync() {
       echo "refusing: $skey is not issued in $ENV_FILE; run 'up' first" >&2
       return 1
     fi
+    # Checked here as well as in env_set, so a refusal comes before any write.
+    case "$value" in
+      *'|'* | *'&'* | *'\'*)
+        echo "refusing: $skey contains | & or \\, which env_set cannot write safely" >&2
+        return 1
+        ;;
+    esac
   done
+  # The backup holds every service's secrets, not just these three. Create it
+  # 600 from the start, rather than cp-then-chmod (which leaves it at the
+  # source's mode in between), and keep only the newest copy.
   backup="$ROOT/deploy-env.bak-$(date -u +%Y%m%dT%H%M%SZ)"
-  cp -p "$DEPLOY_ENV_FILE" "$backup"
-  chmod 600 "$backup"
+  rm -f "$ROOT"/deploy-env.bak-*
+  install -m 600 "$DEPLOY_ENV_FILE" "$backup"
   local skeleton_env="$ENV_FILE"
   for pair in "${EXPLORER_ENV_MAP[@]}"; do
     dkey="${pair%%=*}"
@@ -382,6 +401,8 @@ explorer_env_sync() {
     value="$(env_get "$skeleton_env" "$skey")"
     ENV_FILE="$DEPLOY_ENV_FILE" env_set "$dkey" "$value"
   done
+  # The deploy .env was found at 644 (security review, #9074 c55779).
+  chmod 600 "$DEPLOY_ENV_FILE"
   echo "explorer credentials copied into $DEPLOY_ENV_FILE (previous copy: $backup)"
   echo "next: docker compose --profile explorer up -d explorer-api"
 }
