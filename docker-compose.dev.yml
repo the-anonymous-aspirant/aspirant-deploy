@@ -196,7 +196,8 @@ services:
     mem_limit: 2g
 
   tor:
-    image: dperson/torproxy:latest
+    image: osminogin/tor-simple:0.4.9.14@sha256:ea335859425375b3294b15a5df61ca317ca4fdd143cf7a8d568bb2cd48217774
+    command: ["tor", "-f", "/etc/tor/torrc", "--Log", "notice stdout"]
     mem_limit: 256m
 
   ollama:
