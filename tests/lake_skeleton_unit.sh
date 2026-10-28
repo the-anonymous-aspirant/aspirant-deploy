@@ -173,6 +173,63 @@ assert_rc "an unresolvable device is FAIL (rc 1)" "1" "$rc"
 
 unset -f findmnt lsblk
 
+# --- explorer_env_check / explorer_env_sync (system_3 #9074) ----------------
+# The 2026-10-25 rebuild issued fresh explorer credentials into $ENV_FILE, but
+# the deploy .env kept the old ones. The explorer was down for three days and
+# nothing reported the drift.
+
+SKEL_ENV="$TMPDIR_TEST/skeleton.env"
+DEPLOY_ENV="$TMPDIR_TEST/deploy.env"
+NEW_DSN="postgresql://explorer_ro:newpw0123@lake-skeleton-catalog:5432/lake_catalog_skeleton"
+cat > "$SKEL_ENV" <<EOF
+EXPLORER_S3_ACCESS_KEY=GKnewkey
+EXPLORER_S3_SECRET_KEY=newsecret0123
+LAKE_CATALOG_RO_DSN=$NEW_DSN
+EOF
+cat > "$DEPLOY_ENV" <<'EOF'
+UNRELATED=keep-me
+EXPLORER_S3_ACCESS_KEY=GKoldkey
+EXPLORER_S3_SECRET_KEY=oldsecret0123
+LAKE_CATALOG_DSN=postgresql://explorer_ro:oldpw0123@lake-skeleton-catalog:5432/lake_catalog_skeleton
+EOF
+ENV_FILE="$SKEL_ENV"
+DEPLOY_ENV_FILE="$DEPLOY_ENV"
+mkdir -p "$ROOT"
+
+rc=0; out="$(explorer_env_check)" || rc=$?
+assert_rc "check fails when the deploy .env holds the previous credentials" "1" "$rc"
+assert_eq "and names each drifted key" "3" "$(grep -c 'differs from' <<<"$out")"
+if grep -qE 'oldsecret|newsecret|oldpw|newpw' <<<"$out"; then
+  FAIL=$((FAIL + 1)); echo "[FAIL] check output contains a credential value"
+else
+  PASS=$((PASS + 1)); echo "[PASS] check output contains no credential value"
+fi
+
+explorer_env_sync > /dev/null
+assert_eq "sync copies the catalog DSN under the name compose reads" \
+  "LAKE_CATALOG_DSN=$NEW_DSN" "$(grep '^LAKE_CATALOG_DSN=' "$DEPLOY_ENV")"
+assert_eq "sync copies the secret key" \
+  "EXPLORER_S3_SECRET_KEY=newsecret0123" "$(grep '^EXPLORER_S3_SECRET_KEY=' "$DEPLOY_ENV")"
+assert_eq "sync leaves other keys alone" "UNRELATED=keep-me" "$(grep '^UNRELATED=' "$DEPLOY_ENV")"
+assert_eq "sync keeps a mode-600 backup of the previous file under ROOT" \
+  "600" "$(stat -c %a "$ROOT"/deploy-env.bak-*)"
+assert_eq "the backup holds the previous credentials" \
+  "EXPLORER_S3_ACCESS_KEY=GKoldkey" "$(grep '^EXPLORER_S3_ACCESS_KEY=' "$ROOT"/deploy-env.bak-*)"
+rc=0; explorer_env_check > /dev/null || rc=$?
+assert_rc "check passes after sync" "0" "$rc"
+
+# If the skeleton is only half-issued (bootstrap interrupted), sync must not
+# overwrite a working deploy .env with a mix of new and placeholder values.
+sed -i 's|^EXPLORER_S3_SECRET_KEY=.*|EXPLORER_S3_SECRET_KEY=pending|' "$SKEL_ENV"
+before="$(cat "$DEPLOY_ENV")"
+rc=0; explorer_env_sync > /dev/null 2>&1 || rc=$?
+assert_rc "sync refuses while a skeleton credential is still pending" "1" "$rc"
+assert_eq "and writes nothing" "$before" "$(cat "$DEPLOY_ENV")"
+
+DEPLOY_ENV_FILE="$TMPDIR_TEST/absent-deploy.env"
+rc=0; explorer_env_sync > /dev/null 2>&1 || rc=$?
+assert_rc "sync refuses when the deploy .env does not exist" "1" "$rc"
+
 echo
 if [ "$FAIL" -gt 0 ]; then
   echo "FAILED: $FAIL failed, $PASS passed"
