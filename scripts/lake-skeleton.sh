@@ -8,6 +8,9 @@
 #   lake-skeleton.sh verify    run the acceptance checks (bucket + catalog)
 #   lake-skeleton.sh verify-at-rest
 #                              prove data on disk is envelope-encrypted (#4273)
+#   lake-skeleton.sh explorer-env [check|sync]
+#                              compare (or copy) the explorer's credentials
+#                              into the deploy .env (system_3 #9074)
 #   lake-skeleton.sh status    show containers, published ports, and disk use
 #   lake-skeleton.sh down      stop the stack, keep the scratch data
 #   lake-skeleton.sh destroy   stop the stack and delete every byte it owns
@@ -311,6 +314,78 @@ layer1_check_all() {
   return "$worst"
 }
 
+# The explorer does not read $ENV_FILE. docker-compose.yml's explorer-api
+# takes its lake credentials from the deploy checkout's .env, and nothing
+# carried a rebuild's fresh ones across. After the 2026-10-25 rebuild the
+# explorer authenticated with the previous set for three days, and it logged
+# the stale catalog password on every attempt (system_3 #9074).
+DEPLOY_ENV_FILE="${ASPIRANT_DEPLOY_ENV_FILE:-$SRC_DIR/.env}"
+
+# <deploy .env key>=<skeleton env key>
+EXPLORER_ENV_MAP=(
+  "EXPLORER_S3_ACCESS_KEY=EXPLORER_S3_ACCESS_KEY"
+  "EXPLORER_S3_SECRET_KEY=EXPLORER_S3_SECRET_KEY"
+  "LAKE_CATALOG_DSN=LAKE_CATALOG_RO_DSN"
+)
+
+env_get() {
+  { grep "^$2=" "$1" 2>/dev/null || true; } | tail -n 1 | cut -d= -f2-
+}
+
+# Reports per key and never prints a value. Returns 1 on any drift.
+explorer_env_check() {
+  local pair dkey skey want got rc=0
+  for pair in "${EXPLORER_ENV_MAP[@]}"; do
+    dkey="${pair%%=*}"
+    skey="${pair#*=}"
+    want="$(env_get "$ENV_FILE" "$skey")"
+    got="$(env_get "$DEPLOY_ENV_FILE" "$dkey")"
+    if [ -z "$want" ] || [ "$want" = "pending" ]; then
+      echo "  [FAIL] $skey is not issued in $ENV_FILE"
+      rc=1
+    elif [ "$got" = "$want" ]; then
+      echo "  [ok]   $dkey matches $skey"
+    elif [ -z "$got" ]; then
+      echo "  [FAIL] $dkey is missing from $DEPLOY_ENV_FILE"
+      rc=1
+    else
+      echo "  [FAIL] $dkey in $DEPLOY_ENV_FILE differs from $skey"
+      rc=1
+    fi
+  done
+  return "$rc"
+}
+
+# Copies all three or none. The backup goes under $ROOT, on the scratch volume
+# beside the skeleton env, rather than as an untracked secret in the checkout.
+explorer_env_sync() {
+  local pair dkey skey value backup
+  if [ ! -f "$DEPLOY_ENV_FILE" ]; then
+    echo "refusing: $DEPLOY_ENV_FILE does not exist" >&2
+    return 1
+  fi
+  for pair in "${EXPLORER_ENV_MAP[@]}"; do
+    skey="${pair#*=}"
+    value="$(env_get "$ENV_FILE" "$skey")"
+    if [ -z "$value" ] || [ "$value" = "pending" ]; then
+      echo "refusing: $skey is not issued in $ENV_FILE; run 'up' first" >&2
+      return 1
+    fi
+  done
+  backup="$ROOT/deploy-env.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+  cp -p "$DEPLOY_ENV_FILE" "$backup"
+  chmod 600 "$backup"
+  local skeleton_env="$ENV_FILE"
+  for pair in "${EXPLORER_ENV_MAP[@]}"; do
+    dkey="${pair%%=*}"
+    skey="${pair#*=}"
+    value="$(env_get "$skeleton_env" "$skey")"
+    ENV_FILE="$DEPLOY_ENV_FILE" env_set "$dkey" "$value"
+  done
+  echo "explorer credentials copied into $DEPLOY_ENV_FILE (previous copy: $backup)"
+  echo "next: docker compose --profile explorer up -d explorer-api"
+}
+
 # Test-mode escape hatch: source this file with ASPIRANT_LAKE_SKELETON_LIB=1 to
 # get the pure helpers without dispatching a verb. Mirrors the same hatch in
 # auto-pull.sh so the two test suites read alike.
@@ -332,6 +407,9 @@ case "${1:-}" in
     echo "lake skeleton up — bucket '$BUCKET' on $ROOT (credentials in $ENV_FILE)"
     echo "explorer read-only credentials issued: '$RO_KEY_NAME' + catalog role '$CATALOG_RO_ROLE'"
     echo "their read-only-ness is PROVEN by 'verify', not asserted here — run it next"
+    echo "explorer credentials in $DEPLOY_ENV_FILE:"
+    explorer_env_check ||
+      echo "  stale: run 'lake-skeleton.sh explorer-env sync', then recreate explorer-api"
     echo "next: 'lake-skeleton.sh seed' to generate fixtures, then 'verify'"
     ;;
 
@@ -407,6 +485,17 @@ case "${1:-}" in
     exit 1
     ;;
 
+  explorer-env)
+    case "${2:-check}" in
+      check) explorer_env_check ;;
+      sync) explorer_env_sync ;;
+      *)
+        echo "usage: lake-skeleton.sh explorer-env [check|sync]" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+
   status)
     compose ps
     echo
@@ -430,7 +519,7 @@ case "${1:-}" in
     ;;
 
   *)
-    sed -n '3,16p' "${BASH_SOURCE[0]}"
+    sed -n '3,19p' "${BASH_SOURCE[0]}"
     exit 1
     ;;
 esac
