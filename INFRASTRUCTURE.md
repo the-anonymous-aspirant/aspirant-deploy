@@ -71,7 +71,7 @@ Full-stack web platform (Go + Vue.js + Python microservices) running on a single
 | **Monitor** | aspirant-monitor | Python 3.11 + FastAPI + Docker SDK | `ghcr.io/.../aspirant-monitor` | 127.0.0.1:8085 | 8000 | — |
 | **Advisor** | aspirant-advisor | Python 3.11 + FastAPI + sentence-transformers + pgvector | `ghcr.io/.../aspirant-advisor` | 127.0.0.1:8088 | 8000 | 2 GB |
 | **Browser** | aspirant-browser | Python 3.11 + FastAPI + Selenium + Chromium | `ghcr.io/.../aspirant-browser` | — (internal) | 8000 | 2 GB |
-| **Tor** | — | Tor SOCKS5 proxy (egress anonymisation for Browser) | `dperson/torproxy` | — (internal) | 9050 | 256 MB |
+| **Tor** | — | Tor SOCKS5 proxy (egress anonymisation for Browser) | `osminogin/tor-simple` (digest-pinned) | — (internal) | 9050 | 256 MB |
 | **Ollama** | — | Ollama (LLM inference) | `ollama/ollama` | — (internal) | 11434 | 6 GB |
 
 **Host-port bindings.** Only port 80 (client nginx) is published on `0.0.0.0`, and the `DOCKER-USER` chain admits only Cloudflare's ranges to it. Every other listed host port, including the server's 8081 and the client's second port 8999 (both loopback-only since system_3 #8801; 8081 used to be the one path to the server around nginx and Cloudflare), is bound to `127.0.0.1` so it is reachable to on-cell debug shells (localhost) and to compose peers via internal DNS, but never from the LAN or WAN. See system_3 #1379 for the container-escape / weak-DB-credential attack chain this closes; the aspirant-server `/api/*` proxy remains the single authenticated ingress for downstream microservices. `browser` is un-published entirely per #1375.

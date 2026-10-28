@@ -376,9 +376,18 @@ services:
         condition: service_started
     mem_limit: 2g
 
+  # Tor SOCKS5 sidecar for browser's egress (TOR_SOCKS_URL above). Pinned
+  # by digest to the upstream Alpine build of Tor (system_3 #9083): the old
+  # dperson/torproxy:latest shipped Tor 0.4.3.5 (2020), which the network
+  # consensus now rejects, so it crash-looped. Upgrading means pinning a new
+  # tag's digest (Docker Hub osminogin/tor-simple tags each Tor release).
+  # The image's torrc listens only on 0.0.0.0:9050 (no Privoxy, no
+  # TransPort), runs as the `tor` user, and logs to a file; `command` sends
+  # the log to stdout so `docker logs` and the json-file cap see it.
   tor:
     logging: *default-logging
-    image: dperson/torproxy:latest
+    image: osminogin/tor-simple:0.4.9.14@sha256:ea335859425375b3294b15a5df61ca317ca4fdd143cf7a8d568bb2cd48217774
+    command: ["tor", "-f", "/etc/tor/torrc", "--Log", "notice stdout"]
     restart: unless-stopped
     mem_limit: 256m
 
