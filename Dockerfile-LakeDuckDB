@@ -26,7 +26,17 @@
 # skeleton merely consumes (garage, catalog-postgres) stay digest-pinned.
 # `tests/lake_client_image_unit.sh` builds and probes it to confirm every
 # pinned dependency imports and every extension LOADs from the mounted cache.
-FROM python:3.12-slim
+# Supply chain pinned twice (system_3 #8815): this process holds the lake KEK in
+# memory, so the base image is pinned by digest (python:3.12-slim as pulled
+# 2026-10-25; bump deliberately and regenerate the lock in the new base) and
+# every Python package, transitive ones included, installs by hash from
+# requirements/lake-duckdb.lock.txt (regeneration recipe at its top). Top-level
+# pins stay in requirements/lake-duckdb.in and, for the unit test's parser
+# (tests/lake_client_image_probe.py, which no longer finds inline name==version
+# tokens on the `pip install --require-hashes -r ...` RUN line below), on this
+# marker line, same shape as LAKE_EXTENSIONS below:
+# LAKE_REQUIREMENTS: duckdb==1.5.4 pytz==2025.2 boto3==1.40.47 cryptography==46.0.3
+FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
 
 # duckdb >= 1.5.2 is the floor for DuckLake v1.0 (ducklake.select stable docs).
 # pytz is not optional despite not being a duckdb dependency: the Python client
@@ -38,7 +48,8 @@ FROM python:3.12-slim
 # cryptography: the ingest runner envelope-encrypts sensitivity=high blobs before
 # the Garage PUT (§9 layer 2, task #4134) via scripts/kek/dek_envelope.py, which
 # uses AES-256-GCM from `cryptography`.
-RUN pip install --no-cache-dir duckdb==1.5.4 pytz==2025.2 boto3==1.40.47 cryptography==46.0.3
+COPY requirements/lake-duckdb.lock.txt /tmp/lake-duckdb.lock.txt
+RUN pip install --no-cache-dir --require-hashes -r /tmp/lake-duckdb.lock.txt && rm /tmp/lake-duckdb.lock.txt
 
 # The extensions are NOT installed at build time (that reached
 # extensions.duckdb.org, which the cell cannot; see the header, #5366). They are

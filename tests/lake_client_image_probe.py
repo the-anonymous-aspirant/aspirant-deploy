@@ -60,15 +60,27 @@ def read_dockerfile():
 
 
 def parse_requirements(text):
-    """Every `name==version` pinned on a `pip install` line."""
+    """Every `name==version` pinned on a `pip install` line, plus any declared
+    on a `# LAKE_REQUIREMENTS: ...` marker line.
+
+    A hash-locked install (system_3 #8815) carries no inline `name==version`
+    token on its `RUN pip install --require-hashes -r ...` line -- the pins
+    moved to the lock file. The marker is the same shape as LAKE_EXTENSIONS
+    below, read for the same reason: so this probe still asserts against the
+    Dockerfile's own declared pins rather than going quietly empty.
+    """
     reqs = {}
     for line in text.splitlines():
-        if not re.match(r"^\s*RUN\s+pip\s+install\b", line):
-            continue
-        for token in line.split():
-            m = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s]+)", token)
-            if m:
-                reqs[m.group(1)] = m.group(2)
+        if re.match(r"^\s*RUN\s+pip\s+install\b", line):
+            for token in line.split():
+                m = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s]+)", token)
+                if m:
+                    reqs[m.group(1)] = m.group(2)
+    for m in re.finditer(r"^\s*#\s*LAKE_REQUIREMENTS:\s*(.+)$", text, re.MULTILINE):
+        for token in m.group(1).split():
+            tm = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s]+)", token)
+            if tm:
+                reqs[tm.group(1)] = tm.group(2)
     return reqs
 
 
