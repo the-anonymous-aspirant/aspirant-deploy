@@ -1,0 +1,4 @@
+duckdb==1.5.4
+pytz==2025.2
+boto3==1.40.47
+cryptography==46.0.3
