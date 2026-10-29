@@ -171,6 +171,7 @@ Run from a checkout on the cell (`~/aspirant-deploy` post-merge):
 ```bash
 scripts/lake-skeleton.sh up       # start + bootstrap bucket, key, catalog
 scripts/lake-skeleton.sh verify   # acceptance checks
+scripts/lake-skeleton.sh explorer-env sync  # copy the explorer's credentials into .env
 scripts/lake-skeleton.sh status   # containers, published ports, disk use
 scripts/lake-skeleton.sh down     # stop, keep data
 scripts/lake-skeleton.sh destroy  # stop and delete every byte it owns
@@ -179,6 +180,11 @@ scripts/lake-skeleton.sh destroy  # stop and delete every byte it owns
 `up` is idempotent: it generates `garage.toml` and the credentials env-file only
 when absent, assigns a Garage cluster layout only when the node has no role yet,
 and creates the bucket and access key only when they do not already exist.
+
+A rebuild from an empty `$LAKE_SKELETON_ROOT` issues **new** explorer
+credentials. The explorer reads them from this checkout's `.env`, not from the
+skeleton's env file, so `up` ends by comparing the two. When they differ, run
+`explorer-env sync` and recreate `explorer-api` (system_3 #9074).
 
 ### The explorer's read-only credentials
 
