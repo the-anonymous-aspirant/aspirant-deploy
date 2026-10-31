@@ -181,9 +181,19 @@ networks:
     # are different facts. A proxy pass-through to a lake port would violate it
     # even though it changes no network list.
     #
-    # THE PERMISSION EXPIRES. It is scoped to the window in which this skeleton
-    # holds only synthetic fixtures on a scratch volume, and must be re-derived
-    # before real data lands -- the same trigger DATA_LAKE_DESIGN.md §11.0
-    # rev 3b defines for encryption. Recorded here rather than in a task thread
-    # because a permission whose expiry nobody wrote down is a permanent one.
+    # THE PERMISSION WAS RE-DERIVED FOR REAL DATA on 2026-10-31 (system_3
+    # #9109). Its first scope, synthetic fixtures only, ended when the first
+    # real records landed (DS-2026-0001, 2026-10-29T14:53:51Z). Asked whether
+    # the explorer should wait for the /admin PIN (#8798), the operator
+    # answered, verbatim (#9109 comment 57255): "I think being able to login as
+    # an admin is sufficent for now to be able to see the data". So the scope
+    # is now: admins only, behind the admin login (aspirant-client
+    # default.conf, `auth_request /_internal/verify-admin` on /admin/explorer/
+    # and /admin/explorer/api/), with no decryption key in the explorer, so it
+    # shows records' metadata and never their contents. The PIN is not a
+    # condition. Re-derive it again before any of these happens: that route
+    # stops requiring the admin login, the explorer is given a decryption key,
+    # or the operator's "for now" is revisited. Recorded here rather than in a
+    # task thread because a permission whose expiry nobody wrote down is a
+    # permanent one.
     driver: bridge
