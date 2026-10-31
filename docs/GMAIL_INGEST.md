@@ -15,6 +15,8 @@ read path (C1).
 | non-secret sidecar (obtained_at, scopes, kek version, fingerprint) | `~/secrets/gmail/token.meta.json` | 600 | never |
 | the lake KEK | off-cell (operator), typed or passed one-shot per run | — | never |
 | tools | `scripts/gmail/` in this repo, run through `scripts/gmail/gmail.sh` | — | yes |
+| pulled mail, in clear until the lake ingest encrypts it | `/data/gmail/runs/<run_id>/` on the LUKS volume (`GMAIL_STAGING_DIR` overrides) | 600, dirs 700 | never |
+| where the next pull starts (`history_id`; no secret) | `/data/gmail/state.json` | 600 | never |
 
 The refresh token is a production credential. It is written only encrypted
 under the lake KEK (`scripts/kek/dek_envelope.py` format), the same key that
@@ -80,8 +82,56 @@ scripts/gmail/gmail.sh status --check   # decrypts in memory and refreshes once;
   is expected weekly until the app is switched to production; run `consent` again;
 - a transport error (exit 4): try again later; nothing was changed.
 
-The pull (B1) runs the same check first and stops with the same line rather than
+The pull runs the same check first and stops with the same line rather than
 returning stale mail.
+
+## Pull (on demand)
+
+```bash
+scripts/gmail/gmail.sh pull          # incremental from the stored history id; a full pull the first time
+scripts/gmail/gmail.sh pull --full   # ignore the stored history id and pull everything again
+```
+
+It needs the KEK the same way `status --check` does, because it opens the
+token in memory. It writes nothing that holds a secret, and it never encrypts.
+Encrypting for the lake is the ingest runner's job (#8806-B2).
+
+- **First run (no `state.json`):** reads the mailbox's current history id,
+  then lists and fetches every message (`format=full`).
+- **Later runs:** read only what changed since the stored history id
+  (`users.history.list`) and fetch those messages. Gmail keeps history for a
+  limited time; when it has expired (404), the run falls back to a full pull
+  and says `fallback=history_expired`.
+- **Excluded:** spam and trash, on both paths.
+
+Each run that finds something writes one directory, which appears only once it
+is complete:
+
+```
+/data/gmail/runs/<YYYYMMDDTHHMMSSZ>-<full|incremental>/
+  messages.json   {"messages": [...], "deleted_ids": [...], "mode", "base_history_id", "history_id", "pulled_at", "format"}
+  manifest.json   the source manifest for scripts/lake_ingest.py: dataset_id gmail, kind message_export, sensitivity high
+```
+
+Each message has `id, threadId, date (UTC), from, to, cc, subject, labels, text,
+attachments`. `text` is the text/plain part, or the visible text of the HTML
+when there is none. `attachments` lists `name, mime, size` only: no attachment
+content is fetched until the security review (#8806-D1) decides otherwise.
+
+A full run's export is the whole mailbox. An incremental run's export is the
+change: messages added or changed since the last run, and `deleted_ids` for
+those that were deleted or moved to spam or trash. Applying the incremental
+exports in order to the last full one gives what a fresh full pull would give;
+`tests/gmail_pull_unit.sh` proves that on a synthetic mailbox. A run that finds
+no change writes no directory.
+
+The new history id goes into `state.json` last, after the run directory is in
+place. A pull that dies earlier leaves the history id where it was, and the next
+pull repeats the same window. Two pulls cannot run at once: the second exits 7.
+
+The output is one line of counts, for example
+`gmail pull: run_id=... mode=incremental exported=2 deleted=3 history=1002->1008 ...`.
+No subject, address, body or token is ever printed.
 
 ## Consent-screen status (decided on #8806)
 

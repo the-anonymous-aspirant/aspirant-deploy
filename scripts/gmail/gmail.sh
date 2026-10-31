@@ -7,6 +7,8 @@
 #   ./scripts                          read-only  (gmail/ and kek/ modules)
 #   ~/secrets/gmail                    read-write (the envelope-encrypted token)
 #   ~/secrets/gmail-oauth-client.json  read-only  (the operator's Desktop client)
+#   /data/gmail                        read-write (`pull` only: the export staging
+#                                      dir on the LUKS volume; GMAIL_STAGING_DIR overrides)
 # `--network host` for `consent` only, so the loopback consent server on
 # 127.0.0.1:<port> is the one the operator's SSH tunnel reaches; other commands
 # get the default bridge network (egress only). Runs as the invoking user, not
@@ -16,12 +18,21 @@
 #
 # Usage: scripts/gmail/gmail.sh consent [--port 8765] [--note TEXT]
 #        scripts/gmail/gmail.sh status [--check]
+#        scripts/gmail/gmail.sh pull [--full]
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 IMAGE="${GMAIL_IMAGE:-aspirant-gmail:local}"
 SECRETS="${GMAIL_SECRETS_DIR:-$HOME/secrets}"
 CLIENT="$SECRETS/gmail-oauth-client.json"
+STAGING="${GMAIL_STAGING_DIR:-/data/gmail}"
 TOOL="${GMAIL_TOOL:-scripts/gmail/gmail_auth.py}"
+if [[ "${1:-}" == "pull" ]]; then
+  TOOL="${GMAIL_TOOL:-scripts/gmail/gmail_pull.py}"
+  shift
+  pull=1
+else
+  pull=0
+fi
 
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   echo "building $IMAGE from Dockerfile-Gmail ..." >&2
@@ -41,6 +52,13 @@ for v in LAKE_KEK_HEX LAKE_KEK_FINGERPRINT LAKE_KEK_VERSION; do
   if [[ -n "${!v:-}" ]]; then run+=(-e "$v"); fi
 done
 run+=(-v "$PWD/scripts:/work/scripts:ro" -v "$SECRETS/gmail:/secrets/gmail")
+if [[ $pull -eq 1 ]]; then
+  # The exports are mail in clear until the lake ingest (#8806-B2) encrypts
+  # them, so they live only on the LUKS volume, in a dir only this user reads.
+  mkdir -p "$STAGING"
+  chmod 700 "$STAGING"
+  run+=(-v "$STAGING:/staging" -e GMAIL_STAGING_DIR=/staging)
+fi
 if [[ -f "$CLIENT" ]]; then
   run+=(-v "$CLIENT:/secrets/gmail-oauth-client.json:ro")
 elif [[ "${1:-}" == "consent" ]]; then
