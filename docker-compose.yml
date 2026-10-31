@@ -642,10 +642,16 @@ networks:
   # silently creating a second, empty one named alike.
   #
   # This is the ONE mediated exception to the lake's isolation (see the
-  # explorer-api comment above and #2409). It is scoped and it EXPIRES: the
-  # permission holds only while the skeleton carries synthetic fixtures on a
-  # scratch volume, and must be re-derived before real data lands — the same
-  # trigger DATA_LAKE_DESIGN.md §11.0 rev 3b already defines for encryption. A
+  # explorer-api comment above and #2409). It is scoped, and its conditions are
+  # written here. It was re-derived for real data on 2026-10-31 (system_3
+  # #9109), because its first scope, synthetic fixtures only, ended when real
+  # records landed on 2026-10-29. Operator, verbatim (#9109 comment 57255): "I
+  # think being able to login as an admin is sufficent for now to be able to
+  # see the data". The scope is admins only, behind the admin login
+  # (aspirant-client default.conf `auth_request /_internal/verify-admin`), with
+  # no decryption key in explorer-api, so it shows metadata and not contents.
+  # Re-derive it before that route stops requiring the admin login, before the
+  # explorer gets a decryption key, or when the operator revisits "for now". A
   # permission that expires on a condition nobody recorded is a permanent
   # permission, which is why the condition is written here and not in a thread.
   lake:
