@@ -51,7 +51,11 @@ if [[ -t 0 && -t 1 ]]; then run+=(-it); fi
 for v in LAKE_KEK_HEX LAKE_KEK_FINGERPRINT LAKE_KEK_VERSION; do
   if [[ -n "${!v:-}" ]]; then run+=(-e "$v"); fi
 done
-run+=(-v "$PWD/scripts:/work/scripts:ro" -v "$SECRETS/gmail:/secrets/gmail")
+# `pull` only reads the token, so it gets the secrets dir read-only (security
+# review on #8809); `consent` writes it.
+secrets_mode=""
+if [[ $pull -eq 1 ]]; then secrets_mode=":ro"; fi
+run+=(-v "$PWD/scripts:/work/scripts:ro" -v "$SECRETS/gmail:/secrets/gmail$secrets_mode")
 if [[ $pull -eq 1 ]]; then
   # The exports are mail in clear until the lake ingest (#8806-B2) encrypts
   # them, so they live only on the LUKS volume, in a dir only this user reads.

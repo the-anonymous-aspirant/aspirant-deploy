@@ -117,54 +117,55 @@ class GmailApi:
     def __init__(self, service):
         self._users = service.users()
 
-    def _run(self, request):
+    def _run(self, request, name: str, not_found=None):
+        """Execute one call. Every failure leaves as PullError (exit 4), except
+        a 404 where the caller says what a missing object means."""
         from googleapiclient.errors import HttpError  # lazy: only the image has it
 
         try:
             return request.execute(num_retries=RETRIES)
-        except HttpError:
-            raise
+        except HttpError as exc:
+            status = _http_status(exc)
+            if status == 404 and not_found is not None:
+                return not_found()
+            raise PullError(f"{name} answered {status}") from exc
         except Exception as exc:  # noqa: BLE001 - transport errors carry no mail
-            raise PullError(type(exc).__name__) from exc
+            raise PullError(f"{name}: {type(exc).__name__}") from exc
 
     def profile(self) -> dict:
-        return self._run(self._users.getProfile(userId="me"))
+        return self._run(self._users.getProfile(userId="me"), "getProfile")
 
     def list_message_ids(self, page_token: str | None = None) -> dict:
         return self._run(
             self._users.messages().list(
                 userId="me", maxResults=LIST_PAGE, pageToken=page_token, includeSpamTrash=False
-            )
+            ),
+            "messages.list",
         )
 
     def get_message(self, message_id: str) -> dict | None:
         """The full message, or None if it no longer exists."""
-        from googleapiclient.errors import HttpError
-
-        try:
-            return self._run(self._users.messages().get(userId="me", id=message_id, format="full"))
-        except HttpError as exc:
-            if _http_status(exc) == 404:
-                return None
-            raise PullError(f"messages.get answered {_http_status(exc)}") from exc
+        return self._run(
+            self._users.messages().get(userId="me", id=message_id, format="full"),
+            "messages.get",
+            not_found=lambda: None,
+        )
 
     def list_history(self, start_history_id: str, page_token: str | None = None) -> dict:
-        from googleapiclient.errors import HttpError
+        def expired():
+            raise HistoryExpired(start_history_id)
 
-        try:
-            return self._run(
-                self._users.history().list(
-                    userId="me",
-                    startHistoryId=start_history_id,
-                    historyTypes=HISTORY_TYPES,
-                    maxResults=LIST_PAGE,
-                    pageToken=page_token,
-                )
-            )
-        except HttpError as exc:
-            if _http_status(exc) == 404:
-                raise HistoryExpired(start_history_id) from exc
-            raise PullError(f"history.list answered {_http_status(exc)}") from exc
+        return self._run(
+            self._users.history().list(
+                userId="me",
+                startHistoryId=start_history_id,
+                historyTypes=HISTORY_TYPES,
+                maxResults=LIST_PAGE,
+                pageToken=page_token,
+            ),
+            "history.list",
+            not_found=expired,
+        )
 
 
 # --- message normalisation ---------------------------------------------------
