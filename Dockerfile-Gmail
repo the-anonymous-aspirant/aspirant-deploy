@@ -1,0 +1,16 @@
+# Runtime for scripts/gmail/*.py (system_3 #8806): the Google client libraries
+# and `cryptography` (for the lake envelope) that the cell's host python lacks.
+# No source is baked in; scripts/gmail/gmail.sh mounts the repo's scripts/ and
+# the operator's secrets at run time, like Dockerfile-LakeDuckDB does for the lake.
+#
+# This process holds the lake KEK in memory, so its supply chain is pinned twice
+# (system_3 #8815): the base image by digest (python:3.12-slim as pulled
+# 2026-10-25; bump deliberately, with the lock regenerated in the new base), and
+# every Python package, transitive ones included, by hash from
+# requirements/gmail.lock.txt (top-level pins in requirements/gmail.in:
+# google-auth-oauthlib==1.2.1 google-api-python-client==2.154.0 cryptography==46.0.3).
+FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
+COPY requirements/gmail.lock.txt /tmp/gmail.lock.txt
+RUN pip install --no-cache-dir --require-hashes -r /tmp/gmail.lock.txt && rm /tmp/gmail.lock.txt
+WORKDIR /work
+ENTRYPOINT ["python"]
