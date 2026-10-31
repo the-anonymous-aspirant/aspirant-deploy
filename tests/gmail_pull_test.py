@@ -362,6 +362,37 @@ class PullTest(unittest.TestCase):
         for secret in SECRET_STRINGS + ["PULLTEST-REFRESH-TOKEN", "GOCSPX-PULLTEST"]:
             self.assertNotIn(secret, logs)
 
+    def test_api_errors_exit_4_and_keep_the_history_id(self):
+        def failing(name, status):
+            def call(*_a, **_k):
+                def boom():
+                    raise http_error(status)
+                return _Req(boom, [], name)
+            return call
+
+        self.full_at("s1")
+        a, svc = api("s2")
+        svc.getProfile = failing("getProfile", 500)
+        with self.assertRaises(gmail_pull.PullError):
+            gmail_pull.run_pull(a, self.staging, force_full=True, now=LATER)
+
+        a, svc = api("s2")
+        messages = svc.messages()
+        messages.list = failing("messages.list", 503)
+        svc.messages = lambda: messages
+        kek = os.urandom(32)
+        self._store_token(kek)
+        env = {"LAKE_KEK_HEX": kek.hex(), "LAKE_KEK_FINGERPRINT": ""}
+        args = mock.Mock(full=True)
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(out), contextlib.redirect_stderr(out), \
+                mock.patch.object(gmail_pull, "_refresh", lambda _c: None), mock.patch.object(gmail_pull, "_build_api", lambda _c: a):
+            code = gmail_pull.cmd_pull(args, staging=self.staging, secrets_dir=Path(self.tmp.name) / "secrets")
+        self.assertEqual(code, gmail_auth.EXIT_TRANSPORT, out.getvalue())
+        self.assertIn("messages.list answered 503", out.getvalue())
+        self.assertNotIn("Traceback", out.getvalue())
+        self.assertEqual(json.loads((self.staging / "state.json").read_text())["history_id"], "1002")
+
     def test_a_second_pull_is_refused_while_one_holds_the_lock(self):
         kek = os.urandom(32)
         env = {"LAKE_KEK_HEX": kek.hex(), "LAKE_KEK_FINGERPRINT": ""}
