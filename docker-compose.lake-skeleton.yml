@@ -22,8 +22,19 @@
 
 name: aspirant-lake-skeleton
 
+# Bound every container's log file, as docker-compose.yml does (system_3
+# #5244). This file is a separate compose project, so it needs its own anchor;
+# #5244 missed it and its containers logged unrotated (system_3 #9073, from the
+# #9013 disk audit). 10m x 3 = 30 MB per container.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   garage:
+    logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/garage:v2.3.0@sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77be8cfa439ae088c1e4690
     container_name: lake-skeleton-garage
     restart: unless-stopped
@@ -45,6 +56,7 @@ services:
       start_period: 10s
 
   catalog:
+    logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/lake-catalog-postgres:16-alpine@sha256:0fc5c901ec0a3c55ce70b99b040daeb89d5b35b61febbced1b4b24dbc3153ec8
     container_name: lake-skeleton-catalog
     restart: unless-stopped
@@ -68,6 +80,7 @@ services:
       start_period: 10s
 
   duckdb:
+    logging: *default-logging
     # Built locally from our own Dockerfile rather than pulled from a pinned
     # GHCR digest (#4475). This is the one image in the skeleton we author; the
     # upstream images we merely consume (garage, catalog-postgres) stay
