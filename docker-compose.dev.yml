@@ -1,5 +1,17 @@
+# Bound every container's log file, as docker-compose.yml does (system_3
+# #5244). This file runs on its own (`docker compose -f docker-compose.dev.yml`),
+# not as an overlay, so it inherits nothing and needs its own anchor; #5244
+# missed it (system_3 #9073, from the #9013 disk audit). 10m x 3 = 30 MB per
+# container.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   postgres:
+    logging: *default-logging
     image: pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
@@ -20,6 +32,7 @@ services:
       retries: 5
 
   server:
+    logging: *default-logging
     build:
       context: ../aspirant-server
       dockerfile: Dockerfile-Server
@@ -44,6 +57,7 @@ services:
         condition: service_healthy
 
   client:
+    logging: *default-logging
     build:
       context: ../aspirant-client
       dockerfile: Dockerfile-Client
@@ -54,6 +68,7 @@ services:
       - server
 
   transcriber:
+    logging: *default-logging
     build:
       context: ../aspirant-transcriber
       dockerfile: Dockerfile-Transcriber
@@ -74,6 +89,7 @@ services:
     mem_limit: 2g
 
   commander:
+    logging: *default-logging
     build:
       context: ../aspirant-commander
       dockerfile: Dockerfile-Commander
@@ -88,6 +104,7 @@ services:
         condition: service_healthy
 
   translator:
+    logging: *default-logging
     build:
       context: ../aspirant-translator
       dockerfile: Dockerfile-Translator
@@ -101,6 +118,7 @@ services:
   # a read-only socket-proxy on an internal-only bridge. See the main
   # compose file's docker-socket-proxy service comment for rationale.
   docker-socket-proxy:
+    logging: *default-logging
     # See docker-compose.yml for pin + tmpfs rationale.
     image: tecnativa/docker-socket-proxy:v0.4.2
     environment:
@@ -118,6 +136,7 @@ services:
     mem_limit: 64m
 
   monitor:
+    logging: *default-logging
     build:
       context: ../aspirant-monitor
       dockerfile: Dockerfile-Monitor
@@ -145,6 +164,7 @@ services:
   # Dev build of the Histoire workbench straight from the sibling DS
   # checkout (prod uses the GHCR image published by the DS pre-push hook).
   histoire:
+    logging: *default-logging
     build:
       context: ../aspirant-design-system
       dockerfile: Dockerfile.histoire
@@ -152,6 +172,7 @@ services:
       - "127.0.0.1:8090:80"
 
   advisor:
+    logging: *default-logging
     build:
       context: ../aspirant-advisor
       dockerfile: Dockerfile-Advisor
@@ -170,6 +191,7 @@ services:
     mem_limit: 2g
 
   browser:
+    logging: *default-logging
     build:
       context: ../aspirant-browser
       dockerfile: Dockerfile-Browser
@@ -196,11 +218,13 @@ services:
     mem_limit: 2g
 
   tor:
+    logging: *default-logging
     image: osminogin/tor-simple:0.4.9.14@sha256:ea335859425375b3294b15a5df61ca317ca4fdd143cf7a8d568bb2cd48217774
     command: ["tor", "-f", "/etc/tor/torrc", "--Log", "notice stdout"]
     mem_limit: 256m
 
   ollama:
+    logging: *default-logging
     image: ollama/ollama:latest
     volumes:
       - ollamadata-dev:/root/.ollama
@@ -216,6 +240,7 @@ services:
   # The lake boundary is identical to production: only explorer-api holds a
   # `lake` interface, and neither service publishes a port.
   explorer-api:
+    logging: *default-logging
     profiles: ["explorer"]
     build:
       context: ../aspirant-explorer
@@ -232,6 +257,7 @@ services:
       - lake
 
   explorer:
+    logging: *default-logging
     profiles: ["explorer"]
     build:
       context: ../aspirant-explorer
