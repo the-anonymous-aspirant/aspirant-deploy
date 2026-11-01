@@ -199,6 +199,51 @@ grep -nE '^(CF_TOKEN|ZONE_ID|ROOT_RECORD_ID|HOME_RECORD_ID)=' scripts/update-dns
 ssh -p 41922 aspirant@home.the-aspirant.com 'ls -l ~/.config/aspirant/ddns.env'       # -rw-------
 ```
 
+## Per-service database roles
+
+`transcriber`, `commander`, `advisor` and `browser` each have a login role of their own, `aspirant_<svc>`, with a schema of the same name (system_3 #9317). `DB_USER` is a Postgres superuser. A service that connects as it can:
+- run shell commands in the postgres container (`COPY … TO PROGRAM`);
+- read every table, `users` included;
+- create roles.
+
+Each service role instead:
+- owns that service's tables, kept in its own schema, which heads its `search_path`. Server's tables stay in `public`.
+- may read one other table: commander reads `voice_messages` through a view in its own schema.
+
+None of the roles can create anything in `public`. A role that could would be able to plant a function or operator that a superuser session (server, backups, your `psql`) resolves to. That's the CVE-2018-1058 class, and `tests/db_roles_unit.sh` reproduces it as a control. Keeping the tables in `public` with a changed owner isn't enough either, because `CREATE INDEX` needs CREATE on the table's schema even when the index already exists.
+
+`scripts/db-roles.sh` does it all from `scripts/db-roles.sql`, as the superuser inside the postgres container. It passes the passwords by name, so no value appears on a command line or in its output. It has three modes:
+
+| command | what it does |
+|---|---|
+| `./scripts/db-roles.sh` | **Provision.** Creates the roles, their schemas and `search_path`, CONNECT, and the `vector` extension (untrusted, so only the superuser can create it). Idempotent, safe at any time, and never moves a table. |
+| `./scripts/db-roles.sh move <svc>…` | Also moves those services' tables from `public` into their schemas, owned by their roles. Indexes, constraints, sequences and grants move with them. |
+| `./scripts/db-roles.sh unmove <svc>…` | **Rollback.** Moves them back to `public`, owned by the superuser. |
+
+Every mode refuses to proceed in any of these cases:
+- a service table carries a trigger or rule, which would run as whoever writes to it, the superuser included after a rollback;
+- a table exists in both places;
+- the order is wrong: move commander before transcriber, and unmove transcriber before commander, because commander reads `voice_messages`.
+
+A superuser session searches only `public`. So a service must already be connecting as its own role when its tables move, and must be back on the superuser when they move back. The cutover is per service: stop it, `move` it, start it as its role (system_3 #9320 has the compose side and the runbook).
+
+```bash
+cd ~/aspirant-deploy
+# once: a password for each role, in .env (edit by hand; never echo them)
+#   ASPIRANT_TRANSCRIBER_DB_PASSWORD, ASPIRANT_COMMANDER_DB_PASSWORD,
+#   ASPIRANT_ADVISOR_DB_PASSWORD, ASPIRANT_BROWSER_DB_PASSWORD   (openssl rand -hex 32 each)
+./scripts/db-roles.sh
+# prints each role with superuser = f, and how many of its tables are in its schema vs public
+```
+
+`aspirant_signal_ro`, the system_3 cell-signal reader, keeps its SELECT grant when `processed_valuations` moves, because grants travel with the table. `db-roles.sh` points the role's `search_path` at commander's schema. Its password and grant stay with system_3's `scripts/provision_aspirant_signal_ro.py`.
+
+`tests/db_roles_unit.sh` boots a throwaway `pgvector/pgvector:pg16` and runs each service image's real startup database code. It runs it first as the superuser, then as the service's role after `move`, and then checks:
+- every refusal above;
+- the attack control;
+- the rollback;
+- idempotence.
+
 ## Cloudflare Access lockout: break-glass
 
 The admin paths (`/admin`, `/browser-flows`) sit behind a Cloudflare Access application that sends a One-time PIN to the operator's one address (system_3 decision `corpus/decisions/2026-07-20-admin-auth-second-factor.md`, option D; the applications are created by system_3 #8798). Three things lock the operator out of it: a Cloudflare outage, a lost mailbox, or a bad Access policy. None of them touches SSH, which does not pass through Cloudflare at all: `home.the-aspirant.com` is an unproxied A record pointing straight at the cell (see INFRASTRUCTURE.md, DNS Records) and sshd listens on 41922 (`Port 41922` in `/etc/ssh/sshd_config`). The DDNS cron above keeps that record current. This section is written ahead of the lockout on purpose: the path is only as good as the SSH key you last tested with it.
