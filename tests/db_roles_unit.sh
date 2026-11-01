@@ -286,6 +286,28 @@ rc=0; out="$(db_roles unmove transcriber commander 2>&1)" || rc=$?
 record "$(yes_if grep -q "triggers or rules" <<<"$out")" "unmove refuses while a service table carries a trigger"
 psql_as aspirant_commander "DROP TRIGGER planted ON commander_notes; DROP FUNCTION aspirant_commander.noop()" >/dev/null
 
+# Code attached without a trigger (security, c57836): a function in a service
+# schema, called from a column default, would run as the superuser after a
+# rollback. Every mode refuses while the function exists, and names it.
+psql_as aspirant_browser "
+  CREATE FUNCTION aspirant_browser.planted_default() RETURNS text LANGUAGE sql AS 'select 1::text';
+  ALTER TABLE jobs ADD COLUMN planted text DEFAULT aspirant_browser.planted_default()" >/dev/null
+for mode in "" "move browser" "unmove browser"; do
+  rc=0; out="$(db_roles $mode 2>&1)" || rc=$?
+  record "$(yes_if grep -q "functions or operators: aspirant_browser.planted_default" <<<"$out")" \
+    "${mode:-provision} refuses while a service schema holds a function (a column default calls it)"
+done
+psql_as aspirant_browser "ALTER TABLE jobs DROP COLUMN planted; DROP FUNCTION aspirant_browser.planted_default()" >/dev/null
+# An RLS policy on transcriber's table would run in commander's sessions.
+psql_as aspirant_transcriber "ALTER TABLE voice_messages ENABLE ROW LEVEL SECURITY;
+  CREATE POLICY planted ON voice_messages USING (true)" >/dev/null
+for mode in "" "unmove transcriber"; do
+  rc=0; out="$(db_roles $mode 2>&1)" || rc=$?
+  record "$(yes_if grep -q "row-level security: aspirant_transcriber.voice_messages" <<<"$out")" \
+    "${mode:-provision} refuses while a service table carries row-level security"
+done
+psql_as aspirant_transcriber "DROP POLICY planted ON voice_messages; ALTER TABLE voice_messages DISABLE ROW LEVEL SECURITY" >/dev/null
+
 # Rollback: transcriber back on the superuser.
 rc=0; out="$(db_roles unmove commander 2>&1)" || rc=$?
 record "$(yes_if grep -q "unmove transcriber before" <<<"$out")" "unmove refuses commander while transcriber is still moved"

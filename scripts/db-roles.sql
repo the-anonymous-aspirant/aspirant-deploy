@@ -37,6 +37,7 @@
 -- password statements are kept out of the server log whatever its setting.
 SET search_path = pg_catalog, pg_temp;
 SET log_statement = 'none';
+SET log_min_error_statement = panic;
 
 BEGIN;
 
@@ -96,6 +97,30 @@ BEGIN
       OR EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite w WHERE w.ev_class = c.oid AND w.rulename <> '_RETURN');
   IF bad IS NOT NULL THEN
     RAISE EXCEPTION 'db-roles: refusing, service tables carry triggers or rules: %', bad;
+  END IF;
+
+  -- The same goes for code a table's owner can attach without a trigger: a
+  -- column default, CHECK, generated column, expression index, domain
+  -- constraint or RLS policy that calls a function. The roles can create code
+  -- only in their own schemas (no CREATE anywhere else), and none of the four
+  -- services creates any, so a function or operator there is refused
+  -- outright, whatever might call it (security, c57836 on #9318).
+  SELECT string_agg(format('%I.%I', n.nspname, x.name), ', ') INTO bad
+    FROM (SELECT pronamespace AS nsp, proname AS name FROM pg_catalog.pg_proc
+          UNION ALL SELECT oprnamespace, oprname FROM pg_catalog.pg_operator) x
+    JOIN pg_catalog.pg_namespace n ON n.oid = x.nsp
+   WHERE n.nspname IN (SELECT 'aspirant_' || svc FROM pg_temp.service_tables);
+  IF bad IS NOT NULL THEN
+    RAISE EXCEPTION 'db-roles: refusing, service schemas contain functions or operators: %', bad;
+  END IF;
+  SELECT string_agg(format('%I.%I', l.schema, l.tbl), ', ') INTO bad
+    FROM pg_temp.located l
+    JOIN pg_catalog.pg_class c ON c.relname = l.tbl
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace AND n.nspname = l.schema
+   WHERE c.relrowsecurity
+      OR EXISTS (SELECT 1 FROM pg_catalog.pg_policy p WHERE p.polrelid = c.oid);
+  IF bad IS NOT NULL THEN
+    RAISE EXCEPTION 'db-roles: refusing, service tables carry row-level security: %', bad;
   END IF;
 
   -- A table in both places means a service ran create_all where it could not

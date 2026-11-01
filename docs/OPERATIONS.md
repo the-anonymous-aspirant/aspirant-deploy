@@ -222,6 +222,8 @@ None of the roles can create anything in `public`. A role that could would be ab
 
 Every mode refuses to proceed in any of these cases:
 - a service table carries a trigger or rule, which would run as whoever writes to it, the superuser included after a rollback;
+- a service schema contains a function or operator. A column default, CHECK, generated column, expression index or domain could call it, with the same effect. The roles can create code only in their own schemas, and none of the services creates any.
+- a service table has row-level security;
 - a table exists in both places;
 - the order is wrong: move commander before transcriber, and unmove transcriber before commander, because commander reads `voice_messages`.
 
