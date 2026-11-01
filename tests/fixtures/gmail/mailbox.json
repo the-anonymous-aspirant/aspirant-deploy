@@ -1,0 +1,711 @@
+{
+ "_note": "Synthetic mailbox in Gmail API v1 response shapes (users.getProfile, messages.list/get format=full, history.list). No real mail. system_3 #8806-B1; generated once, edit by hand if needed.",
+ "email": "me@example.com",
+ "oldest_history_id": "900",
+ "s1": {
+  "history_id": "1002",
+  "messages": [
+   {
+    "id": "18f0000000000001",
+    "threadId": "18f0000000000001",
+    "labelIds": [
+     "INBOX",
+     "IMPORTANT"
+    ],
+    "snippet": "SNIPPET-NOT-EXPORTED",
+    "historyId": "990",
+    "internalDate": "1793347200000",
+    "sizeEstimate": 1234,
+    "payload": {
+     "partId": "",
+     "mimeType": "text/plain",
+     "filename": "",
+     "headers": [
+      {
+       "name": "From",
+       "value": "Anna Berg <anna@example.org>"
+      },
+      {
+       "name": "To",
+       "value": "me@example.com"
+      },
+      {
+       "name": "Subject",
+       "value": "Möte på fredag"
+      },
+      {
+       "name": "Date",
+       "value": "Fri, 30 Oct 2026 09:00:00 +0100"
+      },
+      {
+       "name": "Content-Type",
+       "value": "text/plain; charset=UTF-8"
+      }
+     ],
+     "body": {
+      "size": 40,
+      "data": "SGVqISBTZXMgdmkgcMOlIGZyZWRhZyBrbCAxMD8gL0FubmENCg"
+     }
+    }
+   },
+   {
+    "id": "18f0000000000002",
+    "threadId": "18f0000000000002",
+    "labelIds": [
+     "INBOX",
+     "CATEGORY_UPDATES"
+    ],
+    "snippet": "SNIPPET-NOT-EXPORTED",
+    "historyId": "990",
+    "internalDate": "1793350800000",
+    "sizeEstimate": 1234,
+    "payload": {
+     "partId": "",
+     "mimeType": "multipart/mixed",
+     "filename": "",
+     "headers": [
+      {
+       "name": "From",
+       "value": "Billing <billing@shop.example>"
+      },
+      {
+       "name": "To",
+       "value": "me@example.com"
+      },
+      {
+       "name": "Subject",
+       "value": "Your invoice INV-2026-118"
+      },
+      {
+       "name": "Date",
+       "value": "Fri, 30 Oct 2026 09:00:00 +0100"
+      },
+      {
+       "name": "Cc",
+       "value": "accounts@example.com"
+      }
+     ],
+     "body": {
+      "size": 0
+     },
+     "parts": [
+      {
+       "partId": "0",
+       "mimeType": "multipart/alternative",
+       "filename": "",
+       "headers": [],
+       "body": {
+        "size": 0
+       },
+       "parts": [
+        {
+         "partId": "0.0",
+         "mimeType": "text/plain",
+         "filename": "",
+         "headers": [
+          {
+           "name": "Content-Type",
+           "value": "text/plain; charset=\"utf-8\""
+          }
+         ],
+         "body": {
+          "size": 52,
+          "data": "SW52b2ljZSBJTlYtMjAyNi0xMTggaXMgYXR0YWNoZWQuIFRvdGFsOiA0OS4wMCBFVVIu"
+         }
+        },
+        {
+         "partId": "0.1",
+         "mimeType": "text/html",
+         "filename": "",
+         "headers": [
+          {
+           "name": "Content-Type",
+           "value": "text/html; charset=\"utf-8\""
+          }
+         ],
+         "body": {
+          "size": 80,
+          "data": "PHA-SW52b2ljZSA8Yj5JTlYtMjAyNi0xMTg8L2I-IGlzIGF0dGFjaGVkLiBUb3RhbDogNDkuMDAgRVVSLjwvcD4"
+         }
+        }
+       ]
+      },
+      {
+       "partId": "1",
+       "mimeType": "application/pdf",
+       "filename": "INV-2026-118.pdf",
+       "headers": [
+        {
+         "name": "Content-Type",
+         "value": "application/pdf; name=\"INV-2026-118.pdf\""
+        },
+        {
+         "name": "Content-Disposition",
+         "value": "attachment; filename=\"INV-2026-118.pdf\""
+        }
+       ],
+       "body": {
+        "size": 18342,
+        "attachmentId": "ANGjdJ-ATTACHMENT-ID-NOT-FETCHED"
+       }
+      }
+     ]
+    }
+   },
+   {
+    "id": "18f0000000000003",
+    "threadId": "18f0000000000003",
+    "labelIds": [
+     "INBOX"
+    ],
+    "snippet": "SNIPPET-NOT-EXPORTED",
+    "historyId": "990",
+    "internalDate": "1793354400000",
+    "sizeEstimate": 1234,
+    "payload": {
+     "partId": "",
+     "mimeType": "text/html",
+     "filename": "",
+     "headers": [
+      {
+       "name": "From",
+       "value": "Newsletter <news@club.example>"
+      },
+      {
+       "name": "To",
+       "value": "me@example.com"
+      },
+      {
+       "name": "Subject",
+       "value": "Club news: October"
+      },
+      {
+       "name": "Date",
+       "value": "Fri, 30 Oct 2026 09:00:00 +0100"
+      }
+     ],
+     "body": {
+      "size": 160,
+      "data": "PGh0bWw-PGhlYWQ-PHN0eWxlPnB7Y29sb3I6cmVkfTwvc3R5bGU-PHRpdGxlPnQ8L3RpdGxlPjwvaGVhZD48Ym9keT48aDE-T2N0b2JlcjwvaDE-PHA-VHJhaW5pbmcgbW92ZXMgdG8gPGk-VHVlc2RheTwvaT4gJmFtcDsgVGh1cnNkYXkuPC9wPjxzY3JpcHQ-dHJhY2soKTwvc2NyaXB0PjwvYm9keT48L2h0bWw-"
+     }
+    }
+   },
+   {
+    "id": "18f0000000000004",
+    "threadId": "18f0000000000004",
+    "labelIds": [
+     "SPAM"
+    ],
+    "snippet": "SNIPPET-NOT-EXPORTED",
+    "historyId": "990",
+    "internalDate": "1793358000000",
+    "sizeEstimate": 1234,
+    "payload": {
+     "partId": "",
+     "mimeType": "text/plain",
+     "filename": "",
+     "headers": [
+      {
+       "name": "From",
+       "value": "Prize <win@spam.example>"
+      },
+      {
+       "name": "To",
+       "value": "me@example.com"
+      },
+      {
+       "name": "Subject",
+       "value": "SPAM-SUBJECT you won"
+      },
+      {
+       "name": "Date",
+       "value": "Fri, 30 Oct 2026 09:00:00 +0100"
+      }
+     ],
+     "body": {
+      "size": 20,
+      "data": "U1BBTS1CT0RZIGNsYWltIG5vdw"
+     }
+    }
+   },
+   {
+    "id": "18f0000000000005",
+    "threadId": "18f0000000000005",
+    "labelIds": [
+     "INBOX",
+     "UNREAD"
+    ],
+    "snippet": "SNIPPET-NOT-EXPORTED",
+    "historyId": "990",
+    "internalDate": "1793361600000",
+    "sizeEstimate": 1234,
+    "payload": {
+     "partId": "",
+     "mimeType": "text/plain",
+     "filename": "",
+     "headers": [
+      {
+       "name": "From",
+       "value": "Old Friend <old@example.net>"
+      },
+      {
+       "name": "To",
+       "value": "me@example.com"
+      },
+      {
+       "name": "Subject",
+       "value": "Gamla bilder"
+      },
+      {
+       "name": "Date",
+       "value": "Fri, 30 Oct 2026 09:00:00 +0100"
+      }
+     ],
+     "body": {
+      "size": 30,
+      "data": "SGVyZSBhcmUgdGhlIG9sZCBwaG90b3MsIGZpbmFsbHku"
+     }
+    }
+   }
+  ]
+ },
+ "s2": {
+  "history_id": "1008",
+  "messages": [
+   {
+    "id": "18f0000000000001",
+    "threadId": "18f0000000000001",
+    "labelIds": [
+     "INBOX",
+     "IMPORTANT"
+    ],
+    "snippet": "SNIPPET-NOT-EXPORTED",
+    "historyId": "990",
+    "internalDate": "1793347200000",
+    "sizeEstimate": 1234,
+    "payload": {
+     "partId": "",
+     "mimeType": "text/plain",
+     "filename": "",
+     "headers": [
+      {
+       "name": "From",
+       "value": "Anna Berg <anna@example.org>"
+      },
+      {
+       "name": "To",
+       "value": "me@example.com"
+      },
+      {
+       "name": "Subject",
+       "value": "Möte på fredag"
+      },
+      {
+       "name": "Date",
+       "value": "Fri, 30 Oct 2026 09:00:00 +0100"
+      },
+      {
+       "name": "Content-Type",
+       "value": "text/plain; charset=UTF-8"
+      }
+     ],
+     "body": {
+      "size": 40,
+      "data": "SGVqISBTZXMgdmkgcMOlIGZyZWRhZyBrbCAxMD8gL0FubmENCg"
+     }
+    }
+   },
+   {
+    "id": "18f0000000000002",
+    "threadId": "18f0000000000002",
+    "labelIds": [
+     "INBOX",
+     "CATEGORY_UPDATES",
+     "STARRED"
+    ],
+    "snippet": "SNIPPET-NOT-EXPORTED",
+    "historyId": "990",
+    "internalDate": "1793350800000",
+    "sizeEstimate": 1234,
+    "payload": {
+     "partId": "",
+     "mimeType": "multipart/mixed",
+     "filename": "",
+     "headers": [
+      {
+       "name": "From",
+       "value": "Billing <billing@shop.example>"
+      },
+      {
+       "name": "To",
+       "value": "me@example.com"
+      },
+      {
+       "name": "Subject",
+       "value": "Your invoice INV-2026-118"
+      },
+      {
+       "name": "Date",
+       "value": "Fri, 30 Oct 2026 09:00:00 +0100"
+      },
+      {
+       "name": "Cc",
+       "value": "accounts@example.com"
+      }
+     ],
+     "body": {
+      "size": 0
+     },
+     "parts": [
+      {
+       "partId": "0",
+       "mimeType": "multipart/alternative",
+       "filename": "",
+       "headers": [],
+       "body": {
+        "size": 0
+       },
+       "parts": [
+        {
+         "partId": "0.0",
+         "mimeType": "text/plain",
+         "filename": "",
+         "headers": [
+          {
+           "name": "Content-Type",
+           "value": "text/plain; charset=\"utf-8\""
+          }
+         ],
+         "body": {
+          "size": 52,
+          "data": "SW52b2ljZSBJTlYtMjAyNi0xMTggaXMgYXR0YWNoZWQuIFRvdGFsOiA0OS4wMCBFVVIu"
+         }
+        },
+        {
+         "partId": "0.1",
+         "mimeType": "text/html",
+         "filename": "",
+         "headers": [
+          {
+           "name": "Content-Type",
+           "value": "text/html; charset=\"utf-8\""
+          }
+         ],
+         "body": {
+          "size": 80,
+          "data": "PHA-SW52b2ljZSA8Yj5JTlYtMjAyNi0xMTg8L2I-IGlzIGF0dGFjaGVkLiBUb3RhbDogNDkuMDAgRVVSLjwvcD4"
+         }
+        }
+       ]
+      },
+      {
+       "partId": "1",
+       "mimeType": "application/pdf",
+       "filename": "INV-2026-118.pdf",
+       "headers": [
+        {
+         "name": "Content-Type",
+         "value": "application/pdf; name=\"INV-2026-118.pdf\""
+        },
+        {
+         "name": "Content-Disposition",
+         "value": "attachment; filename=\"INV-2026-118.pdf\""
+        }
+       ],
+       "body": {
+        "size": 18342,
+        "attachmentId": "ANGjdJ-ATTACHMENT-ID-NOT-FETCHED"
+       }
+      }
+     ]
+    }
+   },
+   {
+    "id": "18f0000000000004",
+    "threadId": "18f0000000000004",
+    "labelIds": [
+     "SPAM"
+    ],
+    "snippet": "SNIPPET-NOT-EXPORTED",
+    "historyId": "990",
+    "internalDate": "1793358000000",
+    "sizeEstimate": 1234,
+    "payload": {
+     "partId": "",
+     "mimeType": "text/plain",
+     "filename": "",
+     "headers": [
+      {
+       "name": "From",
+       "value": "Prize <win@spam.example>"
+      },
+      {
+       "name": "To",
+       "value": "me@example.com"
+      },
+      {
+       "name": "Subject",
+       "value": "SPAM-SUBJECT you won"
+      },
+      {
+       "name": "Date",
+       "value": "Fri, 30 Oct 2026 09:00:00 +0100"
+      }
+     ],
+     "body": {
+      "size": 20,
+      "data": "U1BBTS1CT0RZIGNsYWltIG5vdw"
+     }
+    }
+   },
+   {
+    "id": "18f0000000000005",
+    "threadId": "18f0000000000005",
+    "labelIds": [
+     "TRASH"
+    ],
+    "snippet": "SNIPPET-NOT-EXPORTED",
+    "historyId": "990",
+    "internalDate": "1793361600000",
+    "sizeEstimate": 1234,
+    "payload": {
+     "partId": "",
+     "mimeType": "text/plain",
+     "filename": "",
+     "headers": [
+      {
+       "name": "From",
+       "value": "Old Friend <old@example.net>"
+      },
+      {
+       "name": "To",
+       "value": "me@example.com"
+      },
+      {
+       "name": "Subject",
+       "value": "Gamla bilder"
+      },
+      {
+       "name": "Date",
+       "value": "Fri, 30 Oct 2026 09:00:00 +0100"
+      }
+     ],
+     "body": {
+      "size": 30,
+      "data": "SGVyZSBhcmUgdGhlIG9sZCBwaG90b3MsIGZpbmFsbHku"
+     }
+    }
+   },
+   {
+    "id": "18f0000000000006",
+    "threadId": "18f0000000000006",
+    "labelIds": [
+     "INBOX",
+     "UNREAD"
+    ],
+    "snippet": "SNIPPET-NOT-EXPORTED",
+    "historyId": "990",
+    "internalDate": "1793440800000",
+    "sizeEstimate": 1234,
+    "payload": {
+     "partId": "",
+     "mimeType": "text/plain",
+     "filename": "",
+     "headers": [
+      {
+       "name": "From",
+       "value": "Jürgen Groß <jg@example.de>"
+      },
+      {
+       "name": "To",
+       "value": "me@example.com, anna@example.org"
+      },
+      {
+       "name": "Subject",
+       "value": "Grüße aus München"
+      },
+      {
+       "name": "Date",
+       "value": "Fri, 30 Oct 2026 09:00:00 +0100"
+      },
+      {
+       "name": "Content-Type",
+       "value": "text/plain; charset=ISO-8859-1"
+      }
+     ],
+     "body": {
+      "size": 33,
+      "data": "VmllbGUgR3L832UgYXVzIE38bmNoZW4sIEr8cmdlbg"
+     }
+    }
+   }
+  ]
+ },
+ "history_s1_to_s2": [
+  {
+   "id": "1003",
+   "messages": [
+    {
+     "id": "18f0000000000002",
+     "threadId": "18f0000000000002",
+     "labelIds": [
+      "INBOX",
+      "CATEGORY_UPDATES",
+      "STARRED"
+     ]
+    }
+   ],
+   "labelsAdded": [
+    {
+     "message": {
+      "id": "18f0000000000002",
+      "threadId": "18f0000000000002",
+      "labelIds": [
+       "INBOX",
+       "CATEGORY_UPDATES",
+       "STARRED"
+      ]
+     },
+     "labelIds": [
+      "STARRED"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "1004",
+   "messages": [
+    {
+     "id": "18f0000000000003",
+     "threadId": "18f0000000000003",
+     "labelIds": [
+      "INBOX"
+     ]
+    }
+   ],
+   "messagesDeleted": [
+    {
+     "message": {
+      "id": "18f0000000000003",
+      "threadId": "18f0000000000003",
+      "labelIds": [
+       "INBOX"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "1005",
+   "messages": [
+    {
+     "id": "18f0000000000005",
+     "threadId": "18f0000000000005",
+     "labelIds": [
+      "TRASH"
+     ]
+    }
+   ],
+   "labelsAdded": [
+    {
+     "message": {
+      "id": "18f0000000000005",
+      "threadId": "18f0000000000005",
+      "labelIds": [
+       "TRASH"
+      ]
+     },
+     "labelIds": [
+      "TRASH"
+     ]
+    }
+   ],
+   "labelsRemoved": [
+    {
+     "message": {
+      "id": "18f0000000000005",
+      "threadId": "18f0000000000005",
+      "labelIds": [
+       "TRASH"
+      ]
+     },
+     "labelIds": [
+      "INBOX",
+      "UNREAD"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "1006",
+   "messages": [
+    {
+     "id": "18f0000000000006",
+     "threadId": "18f0000000000006",
+     "labelIds": [
+      "INBOX",
+      "UNREAD"
+     ]
+    }
+   ],
+   "messagesAdded": [
+    {
+     "message": {
+      "id": "18f0000000000006",
+      "threadId": "18f0000000000006",
+      "labelIds": [
+       "INBOX",
+       "UNREAD"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "1007",
+   "messages": [
+    {
+     "id": "18f0000000000007",
+     "threadId": "18f0000000000007",
+     "labelIds": [
+      "INBOX"
+     ]
+    }
+   ],
+   "messagesAdded": [
+    {
+     "message": {
+      "id": "18f0000000000007",
+      "threadId": "18f0000000000007",
+      "labelIds": [
+       "INBOX"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "1008",
+   "messages": [
+    {
+     "id": "18f0000000000007",
+     "threadId": "18f0000000000007",
+     "labelIds": [
+      "INBOX"
+     ]
+    }
+   ],
+   "messagesDeleted": [
+    {
+     "message": {
+      "id": "18f0000000000007",
+      "threadId": "18f0000000000007",
+      "labelIds": [
+       "INBOX"
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}
