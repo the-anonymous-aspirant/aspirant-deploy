@@ -15,7 +15,7 @@ read path (C1).
 | non-secret sidecar (obtained_at, scopes, kek version, fingerprint) | `~/secrets/gmail/token.meta.json` | 600 | never |
 | the lake KEK | off-cell (operator), typed or passed one-shot per run | — | never |
 | tools | `scripts/gmail/` in this repo, run through `scripts/gmail/gmail.sh` | — | yes |
-| pulled mail, in clear until the lake ingest encrypts it | `/data/gmail/runs/<run_id>/` on the LUKS volume (`GMAIL_STAGING_DIR` overrides) | 600, dirs 700 | never |
+| pulled mail, in clear until the lake ingest encrypts it; `gmail_pull_and_ingest.sh` deletes the run directory once its ingest has succeeded for real, and after a failed or `--dry-run` ingest keeps it and says `clear export kept at <dir>; re-run to ingest it` | `/data/gmail/runs/<run_id>/` on the LUKS volume (`GMAIL_STAGING_DIR` overrides) | 600, dirs 700 | never |
 | where the next pull starts (`history_id`; no secret) | `/data/gmail/state.json` | 600 | never |
 
 The refresh token is a production credential. It is written only encrypted
@@ -151,6 +151,15 @@ the run directory mounted read-only. A pull that finds no change writes no run
 and the wrapper stops with `no new run to ingest`; a pull that fails (3
 re-consent, 4 transport, 7 lock) stops the chain with that exit code and
 nothing is ingested.
+
+The export under `/data/gmail/runs/<run_id>/` is the mail in clear. After a
+successful real ingest the wrapper deletes that run directory: the lake holds
+the envelope and the inventory row, and a re-ingest of the same bytes would be
+a no-op by content address, so the clear copy has no consumer left. After a
+failed ingest, or with `--dry-run` (which pulls for real and encrypts nothing),
+the run directory is kept so a retry can load it, and the wrapper says
+`clear export kept at <dir>; re-run to ingest it` on stderr. `state.json`
+(the history id, no secret) is never touched.
 
 What lands in the lake, per run:
 

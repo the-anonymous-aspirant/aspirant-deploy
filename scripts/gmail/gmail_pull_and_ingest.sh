@@ -17,7 +17,9 @@
 # 7 another pull holds the lock), in which case nothing is ingested; 2 for a
 # missing KEK or a bad argument; otherwise the ingest's (0 success, 1 partial).
 # A pull that finds no change writes no run directory, and this exits 0 with
-# "no new run to ingest".
+# "no new run to ingest". After a successful real ingest the run directory
+# (the export in clear) is deleted; after a failed or --dry-run ingest it is
+# kept for a retry and named on stderr. state.json is never touched.
 #
 # Overridable for the unit test (tests/gmail_pull_and_ingest_unit.sh), never
 # set in normal use: GMAIL_PULL_CMD, LAKE_INGEST_CMD, LAKE_VERIFY_CMD,
@@ -90,7 +92,25 @@ fi
 ingest_args=()
 if [[ $dry -eq 1 ]]; then ingest_args+=(--dry-run); fi
 echo "gmail_pull_and_ingest: ingesting run_id=$run_id"
+set +e
 $INGEST_CMD "$manifest" ${ingest_args[@]+"${ingest_args[@]}"}
+ingest_rc=$?
+set -e
+
+# The export is the operator's mail in clear. Once the lake holds its envelope
+# and inventory row it has no consumer left (a re-ingest of the same bytes is
+# a no-op by content address), and every agent session on the cell runs as
+# this user, so the clear copy goes the moment the ingest has succeeded for
+# real. A failed or dry-run ingest keeps it so a retry can load it, and says
+# so, because a kept copy must never be a surprise (security review c58623).
+run_dir="$STAGING/runs/$run_id"
+if [[ $ingest_rc -eq 0 && $dry -eq 0 ]]; then
+  rm -rf "$run_dir"
+  echo "gmail_pull_and_ingest: clear export removed ($run_dir); the lake holds the envelope"
+else
+  echo "gmail_pull_and_ingest: clear export kept at $run_dir; re-run to ingest it" >&2
+  if [[ $ingest_rc -ne 0 ]]; then exit "$ingest_rc"; fi
+fi
 
 if [[ $verify -eq 1 ]]; then
   $VERIFY_CMD
