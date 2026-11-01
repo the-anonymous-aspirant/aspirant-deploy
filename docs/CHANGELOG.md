@@ -1,6 +1,7 @@
 # Changelog
 
 ### 2026-11-01
+- Pin `duckdb==1.5.4` (and, in the ingest suite, `cryptography==46.0.3 boto3==1.40.47`, the lake client image's `LAKE_REQUIREMENTS` line) in `tests/lake_ingest_unit.sh` and `tests/lake_catalog_ddl.sh`, with `pip --timeout 120 --retries 5` (system_3 #9526, found on #8810). Unpinned, pip resolved `duckdb-2.0.0-cp311-manylinux_2_28_x86_64.whl` on the cell and `import duckdb` died with `Illegal instruction` (exit 132) before any test ran; pinned, the ingest round-trip passes 70/70 and the DDL checks 6/6. The other container suites install only `cryptography`, `boto3` or `moto` and are unchanged.
 - Publish the client nginx's break-glass listener as `127.0.0.1:8098:8098` and document the admin second factor's configuration (system_3 #8798-A3, #9271). `scripts/deploy-client.sh`'s override gains the loopback-only mapping, with an explicit IPv4 host IP so docker starts no `[::]` proxy. `tests/deploy_client_unit.sh` pins it and rejects an all-interfaces or IPv6 form. `.env.example` names `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`, `CF_ACCESS_ADMIN_EMAIL` and `BREAK_GLASS_TOKEN`, all empty, which keeps the gate `off`.
   - OPERATIONS.md's break-glass step 2 now tunnels to 8098 and signs in at `/admin/login`, and it documents the `break-glass.conf` nginx-secrets drop-in.
   - Step 3 says deleting the Access application no longer brings back the password-only admin login.
