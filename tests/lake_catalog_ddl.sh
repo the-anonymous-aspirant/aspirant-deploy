@@ -24,4 +24,4 @@ docker run --rm \
   -v "$PWD:/repo:ro" \
   -w /repo \
   "$IMAGE" \
-  sh -c "pip install --quiet --disable-pip-version-check duckdb && python tests/lake_catalog_ddl.py"
+  sh -c "pip install --quiet --disable-pip-version-check --timeout 120 --retries 5 duckdb==1.5.4 && python tests/lake_catalog_ddl.py"
