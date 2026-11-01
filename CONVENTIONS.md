@@ -110,6 +110,7 @@ Ports are assigned sequentially. Reserve the next available port when adding a s
 | — | 11434 | Ollama (internal only) | HTTP |
 | 8089 | — | *Next service* | — |
 | 8999 | 80 | Client (alt) | HTTP |
+| 8098 | 8098 | Client break-glass listener (loopback only, system_3 #8798) | HTTP |
 | 41922 | 22 | SSH | TCP |
 
 ### Volume Naming

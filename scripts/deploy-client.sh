@@ -54,6 +54,10 @@ resolve_swap_target() {  # resolve_swap_target <active> [requested] -> slot | "n
   fi
 }
 
+# 8098 is the client nginx's break-glass listener (system_3 #8798, #9270): the
+# one port where the admin sign-in carries the break-glass token. It is
+# published on 127.0.0.1 only, with an explicit IPv4 host IP so docker starts no
+# [::] proxy for it, and is reached over SSH (docs/OPERATIONS.md, break-glass).
 write_override() {  # write_override <slot> [override-file]
   cat > "${2:-$OVERRIDE}" <<EOF
 services:
@@ -61,6 +65,7 @@ services:
     ports:
       - "80:80"
       - "127.0.0.1:8999:80"
+      - "127.0.0.1:8098:8098"
 EOF
 }
 

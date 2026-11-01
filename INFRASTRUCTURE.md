@@ -64,7 +64,7 @@ Full-stack web platform (Go + Vue.js + Python microservices) running on a single
 |---------|-----------|------|----------------|-----------|---------------|-------------|
 | **PostgreSQL** | — | pgvector/pgvector:pg16 | — (pgvector image) | 127.0.0.1:5432 | 5432 | — |
 | **Server** | aspirant-server | Go 1.23 + Gin + GORM | `ghcr.io/.../aspirant-server` | 127.0.0.1:8081 | 8080 | — |
-| **Client (blue/green)** | aspirant-client | Vue 3 + Vuetify + Nginx | `ghcr.io/.../aspirant-client` | 80, 127.0.0.1:8999 | 80 | — |
+| **Client (blue/green)** | aspirant-client | Vue 3 + Vuetify + Nginx | `ghcr.io/.../aspirant-client` | 80, 127.0.0.1:8999, 127.0.0.1:8098 | 80, 8098 | — |
 | **Transcriber** | aspirant-transcriber | Python 3.11 + FastAPI + Whisper | `ghcr.io/.../aspirant-transcriber` | 127.0.0.1:8082 | 8000 | 2 GB |
 | **Commander** | aspirant-commander | Python 3.11 + FastAPI + SQLAlchemy + dateparser | `ghcr.io/.../aspirant-commander` | 127.0.0.1:8083 | 8000 | — |
 | **Translator** | aspirant-translator | Python 3.11 + FastAPI + Argos Translate | `ghcr.io/.../aspirant-translator` | 127.0.0.1:8084 | 8000 | 2 GB |
@@ -74,7 +74,7 @@ Full-stack web platform (Go + Vue.js + Python microservices) running on a single
 | **Tor** | — | Tor SOCKS5 proxy (egress anonymisation for Browser) | `osminogin/tor-simple` (digest-pinned) | — (internal) | 9050 | 256 MB |
 | **Ollama** | — | Ollama (LLM inference) | `ollama/ollama` | — (internal) | 11434 | 6 GB |
 
-**Host-port bindings.** Only port 80 (client nginx) is published on `0.0.0.0`, and the `DOCKER-USER` chain admits only Cloudflare's ranges to it. Every other listed host port, including the server's 8081 and the client's second port 8999 (both loopback-only since system_3 #8801; 8081 used to be the one path to the server around nginx and Cloudflare), is bound to `127.0.0.1` so it is reachable to on-cell debug shells (localhost) and to compose peers via internal DNS, but never from the LAN or WAN. See system_3 #1379 for the container-escape / weak-DB-credential attack chain this closes; the aspirant-server `/api/*` proxy remains the single authenticated ingress for downstream microservices. `browser` is un-published entirely per #1375.
+**Host-port bindings.** Only port 80 (client nginx) is published on `0.0.0.0`, and the `DOCKER-USER` chain admits only Cloudflare's ranges to it. Every other listed host port, including the server's 8081 and the client's second port 8999 (both loopback-only since system_3 #8801; 8081 used to be the one path to the server around nginx and Cloudflare), the client's break-glass listener 8098 (system_3 #8798; see OPERATIONS.md, break-glass), is bound to `127.0.0.1` so it is reachable to on-cell debug shells (localhost) and to compose peers via internal DNS, but never from the LAN or WAN. See system_3 #1379 for the container-escape / weak-DB-credential attack chain this closes; the aspirant-server `/api/*` proxy remains the single authenticated ingress for downstream microservices. `browser` is un-published entirely per #1375.
 
 ### Service Dependencies
 
@@ -307,6 +307,7 @@ The Cloudflare token is read from `~/.config/aspirant/ddns.env` (owner `aspirant
 | 8088 | Advisor API | Local network only |
 | 8089 | Browser API | Local network only |
 | 8999 | Client alt (blue/green) | Localhost only (post-deploy smoke checks) |
+| 8098 | Client break-glass listener | Localhost only, over SSH (OPERATIONS.md, break-glass) |
 | — | Lake skeleton (Garage S3, catalog) | **No host port.** Docker network only (§4 of the data-lake design forbids new public ports) |
 
 ### Internal Docker Network
