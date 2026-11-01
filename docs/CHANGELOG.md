@@ -18,9 +18,9 @@
 - Add `scripts/db-roles.sh` and `scripts/db-roles.sql` (system_3 #9317-A1, #9318; design in #9317 c57820, after security's c57812). They give `transcriber`, `commander`, `advisor` and `browser` each a non-superuser login role, in place of the superuser `DB_USER` they share with server.
   - **Schemas:** each role has a schema of the same name heading its `search_path`. `move <svc>` puts the service's tables there and `unmove <svc>` puts them back. None of the roles gets CREATE on `public`.
   - **Cross-read:** commander reads `voice_messages` through a view in its own schema.
-  - **Refusals:** the script won't proceed with triggers or rules on service tables, duplicate tables, or the wrong move order. It creates `vector` as superuser.
+  - **Refusals:** the script won't proceed with triggers or rules on service tables, functions or operators in service schemas, row-level security, duplicate tables, or the wrong move order. It creates `vector` as superuser.
   - **Passwords:** four new `.env` names, passed to `psql` by name and never printed.
-  - **Test:** `tests/db_roles_unit.sh` (63 checks) runs each service image's real startup database code against a throwaway PG16, before and after the move. It covers the search_path attack as a control, the refusals, rollback and idempotence.
+  - **Test:** `tests/db_roles_unit.sh` (68 checks) runs each service image's real startup database code against a throwaway PG16, before and after the move. It covers the search_path attack as a control, the refusals, rollback and idempotence.
   - Nothing changes for a service until it's moved and switched to its role (#9320).
 
 ### 2026-10-31
