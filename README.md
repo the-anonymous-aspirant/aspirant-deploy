@@ -49,7 +49,7 @@ Central hub for the Aspirant platform — deployment configuration, development 
 
 | Service | Repository | Port | Tech | Database | Volumes |
 |---------|-----------|------|------|----------|---------|
-| **client** | [aspirant-client](https://github.com/the-anonymous-aspirant/aspirant-client) | 80, 8999 | Vue.js 3, Nginx | - | - |
+| **client** | [aspirant-client](https://github.com/the-anonymous-aspirant/aspirant-client) | 80, 8999, 8098 | Vue.js 3, Nginx | - | - |
 | **server** | [aspirant-server](https://github.com/the-anonymous-aspirant/aspirant-server) | 8081→8080 | Go, Gin, GORM | users, roles, messages, game_scores, ludde_feeding_times | filedata |
 | **transcriber** | [aspirant-transcriber](https://github.com/the-anonymous-aspirant/aspirant-transcriber) | 8082→8000 | Python, FastAPI, Whisper | voice_messages | audiodata |
 | **commander** | [aspirant-commander](https://github.com/the-anonymous-aspirant/aspirant-commander) | 8083→8000 | Python, FastAPI | tasks, notes | - |
@@ -199,6 +199,7 @@ Creates two fresh test users, exercises the full goal mapper user flow (tree CRU
 | 8085 | monitor | Both |
 | 8086 | remarkable | Both |
 | 8999 | client (alt) | Both |
+| 8098 | client (break-glass, loopback only) | Production |
 
 ## Environment Variables
 
