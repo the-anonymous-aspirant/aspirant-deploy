@@ -17,9 +17,12 @@ fail() { echo "  [FAIL] $1${2:+ — $2}"; fails=$((fails + 1)); }
 
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/runs/20261101T120000Z-full" "$T/runs/20261101T121500Z-incremental"
-echo '{"dataset_id":"gmail","source":"stub","records":[]}' > "$T/runs/20261101T120000Z-full/manifest.json"
-echo '{"dataset_id":"gmail","source":"stub","records":[]}' > "$T/runs/20261101T121500Z-incremental/manifest.json"
+mkdir -p "$T/runs/20261101T120000Z-full" "$T/runs/20261101T121500Z-incremental" "$T/runs/20261101T130000Z-full"
+for d in 20261101T120000Z-full 20261101T121500Z-incremental 20261101T130000Z-full; do
+  echo '{"dataset_id":"gmail","source":"stub","records":[]}' > "$T/runs/$d/manifest.json"
+  echo '{"messages":[],"deleted_ids":[]}' > "$T/runs/$d/messages.json"
+done
+echo '{"history_id":"1002"}' > "$T/state.json"
 # A synthetic value that cannot be mistaken for a real KEK and that the output
 # checks can grep for.
 FAKE_KEK="deadbeef-synthetic-kek-0000"
@@ -39,6 +42,7 @@ cat > "$T/ingest" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" > "$STUB_LOG.ingest.args"
 if [[ -n "${LAKE_KEK_HEX:-}" ]]; then echo kek-seen > "$STUB_LOG.ingest.kek"; fi
+if [[ "${STUB_INGEST_RC:-0}" -ne 0 ]]; then echo "run stub-run: partial"; exit "$STUB_INGEST_RC"; fi
 echo "run stub-run: success"
 EOF
 cat > "$T/verify" <<'EOF'
@@ -56,6 +60,7 @@ run() {
   rm -f "$T/$name".*
   set +e
   GMAIL_STAGING_DIR="$T" GMAIL_PULL_CMD="$T/pull" LAKE_INGEST_CMD="$T/ingest" LAKE_VERIFY_CMD="$T/verify" \
+    STUB_INGEST_RC="${STUB_INGEST_RC:-0}" \
     bash "$WRAPPER" "$@" > "$T/$name.out" 2> "$T/$name.err" < /dev/null
   rc=$?
   set -e
@@ -73,6 +78,9 @@ if grep -q "$FAKE_KEK" "$T/normal.out" "$T/normal.err"; then fail "the KEK never
 grep -q 'run_id=20261101T120000Z-full' "$T/normal.out" && pass "the pull's summary line is relayed" || fail "summary relayed"
 grep -q 'run stub-run: success' "$T/normal.out" && pass "the ingest's report line is relayed" || fail "ingest report relayed"
 [[ ! -f "$T/normal.verify" ]] && pass "verify-at-rest does not run without --verify" || fail "verify ran unasked"
+[[ ! -e "$T/runs/20261101T120000Z-full" ]] && pass "after a successful real ingest the clear export (run dir) is gone" || fail "run dir kept after success"
+[[ -f "$T/state.json" ]] && pass "state.json survives the deletion" || fail "state.json deleted"
+grep -q 'clear export removed' "$T/normal.out" && pass "the deletion is reported" || fail "deletion not reported"
 
 echo "== flags reach the right half"
 STUB_SUMMARY="gmail pull: run_id=20261101T121500Z-incremental mode=incremental exported=1 deleted=2 history=1002->1008" run flags --full --dry-run --verify
@@ -81,6 +89,17 @@ STUB_SUMMARY="gmail pull: run_id=20261101T121500Z-incremental mode=incremental e
 [[ "$(cat "$T/flags.ingest.args")" == "$T/runs/20261101T121500Z-incremental/manifest.json --dry-run" ]] \
   && pass "--dry-run reaches the ingest after the manifest" || fail "--dry-run placement" "$(cat "$T/flags.ingest.args")"
 [[ -f "$T/flags.verify" ]] && pass "--verify runs verify-at-rest after the ingest" || fail "--verify ran"
+[[ -f "$T/runs/20261101T121500Z-incremental/messages.json" ]] && pass "--dry-run keeps the clear export for a real run" || fail "--dry-run deleted the export"
+grep -q 'clear export kept at' "$T/flags.err" && pass "--dry-run says the export was kept" || fail "--dry-run kept message" "$(cat "$T/flags.err")"
+
+echo "== a failed ingest keeps the export, says so, and exits with the ingest's code"
+STUB_SUMMARY="gmail pull: run_id=20261101T130000Z-full mode=full exported=3 deleted=0 history=-->1003" STUB_INGEST_RC=1 run ingestfail
+[[ $rc -eq 1 ]] && pass "ingest exit 1 propagates as 1" || fail "ingest exit propagates" "rc=$rc"
+[[ -f "$T/runs/20261101T130000Z-full/messages.json" ]] && pass "failed ingest: the clear export is kept for a retry" || fail "failed ingest: export deleted"
+grep -q 'clear export kept at' "$T/ingestfail.err" && pass "failed ingest: says where it is" || fail "failed ingest: kept message"
+[[ -f "$T/state.json" ]] && pass "failed ingest: state.json untouched" || fail "failed ingest: state.json gone"
+[[ ! -f "$T/ingestfail.verify" ]] && pass "failed ingest: no verify" || fail "failed ingest: verify ran"
+unset STUB_INGEST_RC
 
 echo "== a pull that changed nothing ingests nothing"
 STUB_SUMMARY="gmail pull: run_id=20261101T130000Z-incremental mode=incremental exported=0 deleted=0 history=1008->1008 (no change; nothing to ingest)" run nochange
