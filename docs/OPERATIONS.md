@@ -213,40 +213,88 @@ Key-based only (`PasswordAuthentication no`, `AllowUsers aspirant`), so the devi
 
 ### 2. Reach the admin tools through the tunnel
 
-The client nginx that serves the public hostname also listens on the cell's own port 80, as the default server with no `server_name`, so it answers any Host header. Traffic that arrives this way never meets Access, and the DOCKER-USER firewall that limits the public `:80` to Cloudflare's ranges does not apply either: it filters forwarded traffic, and a connection from the cell itself is not forwarded (checked 2026-10-25: `curl http://127.0.0.1/admin/` from the cell answers 200, with or without a Host header).
+Since system_3 #8798, Access protects more than the paths: aspirant-server issues the Admin tier only through `POST /login/admin` (the browser's `/admin/sign-in`). While the gate is on (`/health` reads `"admin_second_factor": "enforced"`), that route needs a Cloudflare Access assertion or the break-glass token, and the ordinary `/login` gives an admin account Member. A tunnel to the cell's port 80 still reaches every page, but its sign-in can't pass the gate.
+
+The way in is the client nginx's break-glass listener, port 8098. It's published as `127.0.0.1:8098` only, by `scripts/deploy-client.sh`'s override. It's the same server block as the public hostname, so everything is behind it: `/admin/`, `/api/` (aspirant-server), `/browser-flows`, `/admin/penpot/`, `/admin/histoire/`. On this listener, and only for a connection that arrives through that loopback publish, nginx adds `X-Aspirant-Break-Glass` with the token to `/admin/sign-in`. The server accepts that in place of the assertion. The password is still required. Any other source on 8098 is refused (a compose sibling reaching the port directly), and so is a client that sends the header itself, on any port.
 
 ```bash
-ssh -p 41922 -L 8080:127.0.0.1:80 aspirant@home.the-aspirant.com
+ssh -p 41922 -L 8080:127.0.0.1:8098 aspirant@home.the-aspirant.com
 # then, in a browser on the laptop:
-#   http://localhost:8080/admin/
+#   http://localhost:8080/admin/login
 ```
 
-Everything the public hostname serves is behind that one port: `/admin/`, `/api/` (aspirant-server), `/browser-flows`, `/admin/penpot/`, `/admin/histoire/`. Sign in with the normal password login. No second port needs forwarding.
+Sign in there with the admin password. No second port needs forwarding. Each break-glass use is logged by aspirant-server with its route and time. The token value is never logged.
 
-Whatever #8798 adds to the sign-in path must keep this step working from loopback without a Cloudflare assertion header, or the break-glass is gone the day Access goes live. Re-run the verify below after #8798 ships.
+Traffic that arrives this way never meets Access. The DOCKER-USER firewall that limits the public `:80` to Cloudflare's ranges doesn't apply either: it filters forwarded traffic, and a connection from the cell itself isn't forwarded (checked 2026-10-25 on `:80`).
+
+#### The break-glass token
+
+The token lives in two places, and they must hold the same value:
+
+- `BREAK_GLASS_TOKEN` in the deploy checkout's `.env`, which aspirant-server reads through `env_file`;
+- the client nginx's secrets drop-in `/data/aspirant/nginx-secrets/break-glass.conf`. It's mounted read-only into both client slots at `/etc/nginx/secrets/`, and nginx loads it with `include /etc/nginx/secrets/*.conf`, after `auth.conf`, the `X-System3-Auth` drop-in from system_3 #3019. Its whole content is one line:
+
+  ```nginx
+  set $break_glass_token "<the BREAK_GLASS_TOKEN value>";
+  ```
+
+To provision it or rotate it (system_3 #8798-B1 does the first one):
+
+```bash
+cd ~/aspirant-deploy
+TOKEN="$(openssl rand -hex 32)"
+# the drop-in: root-owned, 0600, like auth.conf
+printf 'set $break_glass_token "%s";\n' "$TOKEN" | sudo install -m 0600 -o root -g root /dev/stdin /data/aspirant/nginx-secrets/break-glass.conf
+# .env: replace the BREAK_GLASS_TOKEN= line with the same value (edit by hand; never echo it to a terminal you share)
+unset TOKEN
+docker compose up -d server                        # re-reads .env
+docker compose exec client-blue nginx -s reload    # whichever slot is active (./scripts/deploy-client.sh status)
+```
+
+With no drop-in, or an empty `BREAK_GLASS_TOKEN`, break-glass is off. The server never accepts an empty token. The SSH key is still the first factor of this path, so a device that loses its key loses this way in too.
 
 ### 3. Turn the Access application off, or loosen it
 
 Cloudflare dashboard → Zero Trust → Access → Applications. The dashboard signs in with the Cloudflare account's own credentials and second factor, not through Access, so an Access lockout never locks the dashboard.
 
 - **Lost mailbox:** edit the application's policy and change the Include rule to an address you can read. The next PIN goes there.
-- **Bad policy** (no one receives a PIN, or the wrong people pass): fix the policy, or delete the application. Deleting it returns the path to the password login, which stays in place underneath Access.
+- **Bad policy** (no one receives a PIN, or the wrong people pass): fix the policy. **Deleting the application no longer brings back the password-only admin login.** Without Access there's no assertion, and the server's gate refuses `/admin/sign-in`. Step 2 is the way in. To go back to the password alone, empty the three `CF_ACCESS_*` names in `.env` and run `docker compose up -d server`. The mode then reads `off`, and the mode change signs every Admin out once.
 - **Cloudflare outage:** the dashboard is usually unreachable too. Use step 2 and wait; the public site is down regardless, because the root record is proxied.
 
 ### Verify the path while you are not locked out
 
-Run this from the device you would use in a lockout, and repeat it whenever a device key or the Access policy changes.
+Run this from the device you would use in a lockout. Repeat it whenever a device key, the Access policy or the break-glass token changes.
 
 ```bash
 # sshd answers on the direct hostname (a key problem shows as "Permission denied (publickey)"; a stale record or a blocked port as a timeout)
 ssh -p 41922 -o BatchMode=yes -o ConnectTimeout=10 aspirant@home.the-aspirant.com 'hostname'   # aspirant-cell
 
-# the admin UI answers through the tunnel without Cloudflare
-ssh -p 41922 -f -N -o ExitOnForwardFailure=yes -L 8080:127.0.0.1:80 aspirant@home.the-aspirant.com
-curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/admin/    # 200
-curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/api/health # 200
+# 8098 is published on loopback only
+ssh -p 41922 aspirant@home.the-aspirant.com 'ss -Hltn "sport = :8098"'   # one line, 127.0.0.1:8098, and no [::] or 0.0.0.0
+
+# the admin UI answers through the break-glass tunnel without Cloudflare
+ssh -p 41922 -f -N -o ExitOnForwardFailure=yes -L 8080:127.0.0.1:8098 aspirant@home.the-aspirant.com
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/admin/login   # 200
+curl -s http://localhost:8080/api/health | grep -o '"admin_second_factor":"[a-z]*"'   # enforced (off before go-live)
+
+# the gate passes on the tunnel's token. A made-up user tests it without a real password:
+# 401 means the gate passed and the password was refused; 403 means the gate refused.
+curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' \
+  -d '{"username":"break-glass-probe","password":"x"}' http://localhost:8080/admin/sign-in   # 401
 pkill -f 'ssh -p 41922 -f -N -o ExitOnForwardFailure=yes -L 8080'          # close the tunnel
+
+# the same probe through port 80 carries no token, so with the gate on it's refused
+ssh -p 41922 -f -N -o ExitOnForwardFailure=yes -L 8080:127.0.0.1:80 aspirant@home.the-aspirant.com
+curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' \
+  -d '{"username":"break-glass-probe","password":"x"}' http://localhost:8080/admin/sign-in   # 403 (401 while the mode is off)
+pkill -f 'ssh -p 41922 -f -N -o ExitOnForwardFailure=yes -L 8080'
+
+# the header sent through the public hostname grants nothing
+curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'X-Aspirant-Break-Glass: anything' \
+  https://the-aspirant.com/admin/sign-in   # never 200: nginx's 403, or Access's redirect to its login once the application is live
 ```
+
+A `403` on the first `/admin/sign-in` probe means the server didn't accept the token. Check that `.env` and `break-glass.conf` hold the same value, and that both the server and the active client slot were restarted or reloaded after the last change.
 
 ## Testing
 
