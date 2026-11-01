@@ -133,6 +133,54 @@ The output is one line of counts, for example
 `gmail pull: run_id=... mode=incremental exported=2 deleted=3 history=1002->1008 ...`.
 No subject, address, body or token is ever printed.
 
+## Ingest into the lake (on demand, B2)
+
+```bash
+scripts/gmail/gmail_pull_and_ingest.sh            # incremental pull, then ingest the run
+scripts/gmail/gmail_pull_and_ingest.sh --full     # full pull, then ingest
+scripts/gmail/gmail_pull_and_ingest.sh --verify   # ... then scripts/lake-skeleton.sh verify-at-rest
+scripts/gmail/gmail_pull_and_ingest.sh --dry-run  # pull for real; the ingest only reports what it would load
+```
+
+One KEK prompt for both halves (or `LAKE_KEK_HEX` exported one-shot as above).
+The wrapper runs `gmail.sh pull`, reads the `run_id` from its one summary
+line, and hands `/data/gmail/runs/<run_id>/manifest.json` to
+`scripts/lake-skeleton.sh ingest`, which runs `scripts/lake_ingest.py`
+(`docs/data-lake-design/REAL_DATA_INGEST.md`) in the lake client container with
+the run directory mounted read-only. A pull that finds no change writes no run
+and the wrapper stops with `no new run to ingest`; a pull that fails (3
+re-consent, 4 transport, 7 lock) stops the chain with that exit code and
+nothing is ingested.
+
+What lands in the lake, per run:
+
+- one object under `bronze/blobs/sha256/<aa>/<bb>/<sha256>` holding the run's
+  `messages.json` as an `AOBJ` envelope (AES-256-GCM under a fresh DEK, the DEK
+  wrapped under the lake KEK); the plaintext never reaches Garage;
+- one `asset_inventory` row: `dataset_id gmail`, `kind message_export`,
+  `sensitivity high` (`declared`), `wrapped_dek`, `kek_version`,
+  `retention_class keep-forever`, `jurisdiction EU`, `source_path messages.json`;
+- one `ingest_runs` row (`success`, or `failed` when the pre-flight refused for
+  want of a KEK: the runner never falls back to plaintext).
+
+A full run's export is the whole mailbox; an incremental run's export is the
+change since the previous run, with `deleted_ids`. The lake keeps the sequence;
+reading the current mailbox is a fold over it, which the agent read path
+(#8806-C1) owns. Re-ingesting a run is a no-op (content-addressed on the
+export's sha256).
+
+`scripts/lake-skeleton.sh verify-at-rest` (or `--verify`) proves it: every
+`high` row declares an envelope, the stored object starts with `AOBJ`, nothing
+readable sits under a `high` row (a plaintext export would be named `readable
+JSON`), the DEK unwraps under the KEK in custody and decrypts to the row's
+content address, and no uncatalogued object exists.
+
+The dataset's intake record is the `gmail` section of
+`docs/data-lake-design/DATASET_INTAKE.md`; it is `PROPOSED` until the operator
+answers its affirmation block, and the first real load (#8806-E1) waits for
+that and for the security review (#8806-D1). `tests/gmail_lake_ingest_unit.sh`
+runs the whole chain on the synthetic mailbox under an ephemeral KEK.
+
 ## Consent-screen status (decided on #8806)
 
 `gmail.readonly` is a *restricted* scope. In Testing, refresh tokens expire after
