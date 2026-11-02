@@ -40,6 +40,7 @@ import os
 import struct
 
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 # --- constants ---------------------------------------------------------------
@@ -162,6 +163,64 @@ def encrypt_object(plaintext: bytes, dek: bytes) -> bytes:
     nonce = os.urandom(NONCE_LEN)
     body = AESGCM(dek).encrypt(nonce, plaintext, header)
     return header + nonce + body
+
+
+# Default read size for the streaming writer. Resident memory is bounded near
+# one chunk (plus its ciphertext), whatever the object's size.
+STREAM_CHUNK = 8 * 1024 * 1024
+
+
+def encrypt_object_stream(src, dst, dek: bytes, *, chunk_size: int = STREAM_CHUNK,
+                          plaintext_hash=None) -> int:
+    """Encrypt one object under its DEK from a readable stream to a writable one.
+
+    Writes exactly the bytes `encrypt_object` would return for the same DEK and
+    nonce — ``header ‖ nonce ‖ ciphertext ‖ tag``, the 5-byte header as GCM AAD
+    — but holds only one chunk in memory, so a multi-GB ``high`` object can be
+    wrapped on a cell whose RAM is smaller than twice the object (task #9757,
+    #9546-A1). `decrypt_object` opens the result unchanged; the format, and so
+    `FMT_VERSION`, does not change.
+
+    `src` needs ``read(n)``; `dst` needs ``write(b)``. `plaintext_hash`, if
+    given, is ``update()``-d with every plaintext chunk, so a caller can verify
+    a claimed digest in the same pass (nothing is committed by this function:
+    the caller decides what to do with `dst` once the digest is known).
+
+    The nonce is always fresh from ``os.urandom``; there is deliberately no
+    parameter for it, because a caller-chosen GCM nonce is a reuse waiting to
+    happen. Returns the number of plaintext bytes read.
+    """
+    return _encrypt_object_stream(src, dst, dek, os.urandom(NONCE_LEN),
+                                  chunk_size=chunk_size, plaintext_hash=plaintext_hash)
+
+
+def _encrypt_object_stream(src, dst, dek: bytes, nonce: bytes, *, chunk_size: int,
+                           plaintext_hash=None) -> int:
+    """The streaming core, with the nonce explicit so a test can prove the
+    output byte-identical to `encrypt_object`'s layout. Not for callers."""
+    if len(dek) != KEY_LEN:
+        raise EnvelopeError(f"DEK must be {KEY_LEN} bytes, got {len(dek)}")
+    if len(nonce) != NONCE_LEN:
+        raise EnvelopeError(f"nonce must be {NONCE_LEN} bytes, got {len(nonce)}")
+    if chunk_size <= 0:
+        raise EnvelopeError("chunk_size must be positive")
+    header = _AOBJ_HEADER.pack(AOBJ_MAGIC, FMT_VERSION)
+    encryptor = Cipher(algorithms.AES(dek), modes.GCM(nonce)).encryptor()
+    encryptor.authenticate_additional_data(header)
+    dst.write(header)
+    dst.write(nonce)
+    total = 0
+    while True:
+        chunk = src.read(chunk_size)
+        if not chunk:
+            break
+        total += len(chunk)
+        if plaintext_hash is not None:
+            plaintext_hash.update(chunk)
+        dst.write(encryptor.update(chunk))
+    dst.write(encryptor.finalize())
+    dst.write(encryptor.tag)
+    return total
 
 
 def decrypt_object(blob: bytes, dek: bytes) -> bytes:
