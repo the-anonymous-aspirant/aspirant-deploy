@@ -15,8 +15,9 @@ This is the central hub for the Aspirant platform — deployment configuration, 
 | `INFRASTRUCTURE.md` | Deployed services, ports, tables, volumes, DNS |
 | `_template/` | Skeleton files for scaffolding a new service |
 | `.env.example` | Environment variable template |
-| `docs/` | Platform-wide architecture, operations, decisions, changelog |
+| `docs/` | Platform-wide architecture, operations, decisions, changelog (rendered from `docs/changelog.d/`, one fragment per PR) |
 | `scripts/deploy-client.sh` | Blue-green client deploy (swap active slot) |
+| `scripts/changelog.sh` | Check, render and collect the changelog fragments |
 | `tests/integration.sh` | Cross-service integration tests |
 
 ## Before You Start
@@ -52,7 +53,7 @@ Read these in order:
 4. **Implement:** Follow CONVENTIONS.md (health endpoint, logging format, test categories)
 5. **Compose:** Add the service to both `docker-compose.yml` and `docker-compose.dev.yml`
 6. **Validate:** Run `python -m app.main scan ../aspirant-{name}` from aspirant-auditor
-7. **Update:** Add service details to INFRASTRUCTURE.md, log decisions in docs/DECISIONS.md
+7. **Update:** Add service details to INFRASTRUCTURE.md, log decisions in docs/DECISIONS.md, add the PR's fragment under docs/changelog.d/
 8. **Ship:** Create GitHub repo, set up CI, push, PR compose changes, deploy
 
 See `_template/README.md` for the full pre/post-implementation checklist.
@@ -88,6 +89,13 @@ curl localhost:8086/health   # remarkable
 # Convention auditor (from aspirant-auditor repo)
 python -m app.main scan-all ~/git/
 ```
+
+## Changelog
+
+`docs/CHANGELOG.md` is never edited in a feature PR. Add one file per PR under
+`docs/changelog.d/` (format in `docs/changelog.d/README.md`; validate with
+`sh scripts/changelog.sh check`). `scripts/changelog.sh collect` folds the
+fragments into the changelog on a PR of its own. Tests: `sh tests/changelog_unit.sh`.
 
 ## Important
 
