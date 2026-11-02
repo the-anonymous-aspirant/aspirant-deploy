@@ -697,7 +697,8 @@ Rules:
 |----------|----------|----------|
 | Spec | `SPEC.md` | `docs/` |
 | Architecture | `ARCHITECTURE.md` | `docs/` |
-| Changelog | `CHANGELOG.md` | `docs/` |
+| Changelog (rendered; not edited directly) | `CHANGELOG.md` | `docs/` |
+| Changelog fragment (one per PR) | `<YYYY-MM-DD>-<task>[-<slug>].md` | `docs/changelog.d/` |
 | Operations | `OPERATIONS.md` | `docs/` |
 | Decisions | `DECISIONS.md` | `docs/` |
 | Style guide | `STYLE_GUIDE.md` | `docs/` |

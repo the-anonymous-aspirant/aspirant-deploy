@@ -1,5 +1,7 @@
 # Changelog
 
+_New entries are files in [changelog.d/](changelog.d/README.md), one per PR; `scripts/changelog.sh collect` folds them in here._
+
 ### 2026-11-01
 - Publish the client nginx's break-glass listener as `127.0.0.1:8098:8098` and document the admin second factor's configuration (system_3 #8798-A3, #9271). `scripts/deploy-client.sh`'s override gains the loopback-only mapping, with an explicit IPv4 host IP so docker starts no `[::]` proxy. `tests/deploy_client_unit.sh` pins it and rejects an all-interfaces or IPv6 form. `.env.example` names `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`, `CF_ACCESS_ADMIN_EMAIL` and `BREAK_GLASS_TOKEN`, all empty, which keeps the gate `off`.
   - OPERATIONS.md's break-glass step 2 now tunnels to 8098 and signs in at `/admin/login`, and it documents the `break-glass.conf` nginx-secrets drop-in.
