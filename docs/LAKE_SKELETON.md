@@ -188,12 +188,13 @@ skeleton's env file, so `up` ends by comparing the two. When they differ, run
 
 ### The explorer's read-only credentials
 
-`up` issues **two** Garage keys and two catalog identities, not one:
+`up` issues **three** Garage keys, over two buckets, and two catalog identities:
 
 | identity | grant | used by |
 |---|---|---|
-| `lake-skeleton-rw` | `RW` on the bronze bucket | fixtures, verify, the skeleton itself |
-| `lake-skeleton-explorer-ro` | `R` only | `explorer-api` (the mediated bridge, #2409-D2) |
+| `lake-skeleton-rw` | `RW` on the bronze bucket and on the staging bucket | fixtures, verify, the skeleton itself, staging promotion (#4121-E) |
+| `lake-skeleton-explorer-ro` | `R` only, on bronze | `explorer-api` (the mediated bridge, #2409-D2) |
+| `lake-skeleton-explorer-staging-wo` | `W` only, on the staging bucket | `explorer-api`'s upload path (#4121-B) |
 | `ducklake` | catalog owner | the skeleton |
 | `explorer_ro` | `SELECT` only | `explorer-api` |
 
@@ -211,6 +212,30 @@ this document tells you to perform, and nothing would have reported it.
 read-only key and a `CREATE TABLE` with the read-only role, and **fails if
 either succeeds**. It also checks each can still read, because a credential that
 can do nothing is a broken explorer wearing the costume of a working guardrail.
+
+### The staging bucket and the explorer's write-only key
+
+Uploads (#4121) need a key that can write. Garage grants a key per **bucket**,
+with no prefix ACL, so a write key on bronze could overwrite any sealed blob.
+The fence is therefore a second bucket, `lake-skeleton-staging`
+(`LAKE_S3_STAGING_BUCKET`). The explorer's third key can write there and
+nowhere else. The ingest runner stays the only writer to bronze; it reads,
+promotes and deletes out of staging.
+
+The key is write-only, not read-write, on purpose: `sensitivity=high` uploads
+wait in staging, unwrapped, until the operator-attended promotion run, and a
+key that cannot read staging cannot hand them back out of a compromised
+`explorer-api`. The cost, measured on this Garage version (2026-11-02): such a
+key can create, upload, complete and abort a multipart upload, but is denied
+`ListParts` and `ListMultipartUploads`, so resume keeps its own ledger of part
+ETags rather than asking Garage.
+
+`up` re-asserts the grants in both directions on every run, and `verify` proves
+each one by attempting it: a multipart upload into staging must succeed;
+reading or listing staging, and reading or writing bronze, must be denied; the
+runner must be able to read and delete the probe. `explorer-env sync` copies
+`LAKE_S3_STAGING_BUCKET` and `EXPLORER_S3_STAGING_*` into the deploy `.env`
+with the read-only pair, all or nothing.
 
 Credentials (Garage access keys, catalog passwords) are generated at `up` and
 written to `/scratch/lake-skeleton/lake-skeleton.env`, mode 600. They live on
