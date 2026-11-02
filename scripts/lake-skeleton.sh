@@ -45,6 +45,23 @@ KEY_NAME="lake-skeleton-rw"
 RO_KEY_NAME="lake-skeleton-explorer-ro"
 CATALOG_RO_ROLE="explorer_ro"
 
+# The upload staging bucket and the explorer's WRITE-ONLY key on it (system_3
+# #4121-B, #9601).
+#
+# Uploads need a key that can write, and Garage grants per key per BUCKET with
+# no prefix ACL: a write key on bronze could overwrite any sealed blob. So the
+# fence is a separate bucket. The explorer can write only there, and the ingest
+# runner stays the only writer to bronze (#4121 c55765 F2, operator c57337).
+#
+# Write-only, not read-write: sensitivity=high uploads wait in staging,
+# unwrapped, until the operator-attended promotion run (#4121-E). A key that
+# cannot read staging cannot hand them back out of a compromised explorer-api.
+# Measured on Garage v2.3.0 (2026-11-02): such a key can create, upload,
+# complete and abort a multipart upload, and is denied ListParts, so resume
+# keeps its own part ledger (#9547 c59028).
+STAGING_BUCKET="${LAKE_S3_STAGING_BUCKET:-lake-skeleton-staging}"
+STAGING_KEY_NAME="lake-skeleton-explorer-staging-wo"
+
 ENV_FILE="$ROOT/lake-skeleton.env"
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -136,6 +153,10 @@ LAKE_S3_SECRET_KEY=pending
 # The explorer's read-only pair — read by docker-compose.yml's explorer-api.
 EXPLORER_S3_ACCESS_KEY=pending
 EXPLORER_S3_SECRET_KEY=pending
+# The explorer's write-only pair on the staging bucket (#9601).
+LAKE_S3_STAGING_BUCKET=$STAGING_BUCKET
+EXPLORER_S3_STAGING_ACCESS_KEY=pending
+EXPLORER_S3_STAGING_SECRET_KEY=pending
 LAKE_CATALOG_RO_PASSWORD=pending
 LAKE_CATALOG_RO_DSN=pending
 EOF
@@ -186,6 +207,22 @@ bootstrap_garage() {
   garage_cli bucket allow --read "$BUCKET" --key "$RO_KEY_NAME" >/dev/null
   garage_cli bucket deny --write "$BUCKET" --key "$RO_KEY_NAME" >/dev/null 2>&1 || true
 
+  # The staging bucket and its write-only explorer key. Grants are re-asserted
+  # every run for the same reason as above, in BOTH directions: what it may do
+  # (--write on staging) and what it must not (--read on staging, anything on
+  # bronze). A deny on a grant the key never held is a no-op, hence `|| true`.
+  garage_cli bucket info "$STAGING_BUCKET" >/dev/null 2>&1 ||
+    garage_cli bucket create "$STAGING_BUCKET" >/dev/null
+  if ! garage_cli key info "$STAGING_KEY_NAME" >/dev/null 2>&1; then
+    garage_cli key create "$STAGING_KEY_NAME" >/dev/null
+  fi
+  garage_cli bucket allow --write "$STAGING_BUCKET" --key "$STAGING_KEY_NAME" >/dev/null
+  garage_cli bucket deny --read "$STAGING_BUCKET" --key "$STAGING_KEY_NAME" >/dev/null 2>&1 || true
+  garage_cli bucket deny --read --write "$BUCKET" --key "$STAGING_KEY_NAME" >/dev/null 2>&1 || true
+  # The ingest runner promotes out of staging (#4121-E), so it reads and deletes
+  # there. It already writes bronze; this adds no new reach to bronze.
+  garage_cli bucket allow --read --write "$STAGING_BUCKET" --key "$KEY_NAME" >/dev/null
+
   local key_id secret ro_key_id ro_secret
   key_id="$(garage_cli key info "$KEY_NAME" --show-secret | awk '/Key ID:/ {print $3}')"
   secret="$(garage_cli key info "$KEY_NAME" --show-secret | awk '/Secret key:/ {print $3}')"
@@ -200,6 +237,13 @@ bootstrap_garage() {
   # a read-only key changes nothing if the consumer is handed a different one.
   env_set EXPLORER_S3_ACCESS_KEY "$ro_key_id"
   env_set EXPLORER_S3_SECRET_KEY "$ro_secret"
+
+  local st_key_id st_secret
+  st_key_id="$(garage_cli key info "$STAGING_KEY_NAME" --show-secret | awk '/Key ID:/ {print $3}')"
+  st_secret="$(garage_cli key info "$STAGING_KEY_NAME" --show-secret | awk '/Secret key:/ {print $3}')"
+  env_set LAKE_S3_STAGING_BUCKET "$STAGING_BUCKET"
+  env_set EXPLORER_S3_STAGING_ACCESS_KEY "$st_key_id"
+  env_set EXPLORER_S3_STAGING_SECRET_KEY "$st_secret"
 }
 
 # SELECT-only catalog role, for the same reason and with the same history: it
@@ -335,6 +379,9 @@ EXPLORER_ENV_MAP=(
   "EXPLORER_S3_ACCESS_KEY=EXPLORER_S3_ACCESS_KEY"
   "EXPLORER_S3_SECRET_KEY=EXPLORER_S3_SECRET_KEY"
   "LAKE_CATALOG_DSN=LAKE_CATALOG_RO_DSN"
+  "LAKE_S3_STAGING_BUCKET=LAKE_S3_STAGING_BUCKET"
+  "EXPLORER_S3_STAGING_ACCESS_KEY=EXPLORER_S3_STAGING_ACCESS_KEY"
+  "EXPLORER_S3_STAGING_SECRET_KEY=EXPLORER_S3_STAGING_SECRET_KEY"
 )
 
 env_get() {
@@ -365,7 +412,7 @@ explorer_env_check() {
   return "$rc"
 }
 
-# Copies all three or none. The backup goes under $ROOT, on the scratch volume
+# Copies every EXPLORER_ENV_MAP entry or none. The backup goes under $ROOT, on the scratch volume
 # beside the skeleton env, rather than as an untracked secret in the checkout.
 explorer_env_sync() {
   local pair dkey skey value backup
@@ -388,7 +435,7 @@ explorer_env_sync() {
         ;;
     esac
   done
-  # The backup holds every service's secrets, not just these three. Create it
+  # The backup holds every service's secrets, not just the mapped ones. Create it
   # 600 from the start, rather than cp-then-chmod (which leaves it at the
   # source's mode in between), and keep only the newest copy.
   backup="$ROOT/deploy-env.bak-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -427,6 +474,7 @@ case "${1:-}" in
     bootstrap_catalog_role
     echo "lake skeleton up — bucket '$BUCKET' on $ROOT (credentials in $ENV_FILE)"
     echo "explorer read-only credentials issued: '$RO_KEY_NAME' + catalog role '$CATALOG_RO_ROLE'"
+    echo "explorer write-only staging key issued: '$STAGING_KEY_NAME' on bucket '$STAGING_BUCKET'"
     echo "their read-only-ness is PROVEN by 'verify', not asserted here — run it next"
     echo "explorer credentials in $DEPLOY_ENV_FILE:"
     explorer_env_check ||
