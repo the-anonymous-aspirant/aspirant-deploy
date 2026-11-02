@@ -402,6 +402,81 @@ else:
             cat_detail = f"CREATE TABLE denied ({type(exc).__name__})"
         check("Explorer catalog role CANNOT write", cat_denied, cat_detail)
 
+# --- 7. the explorer's staging key is WRITE-ONLY, on staging only (#9601) ----
+#
+# The upload path's key (#4121-B). Same discipline as section 4: every bound is
+# proven by an attempt, not asserted. It must be able to WRITE staging, by the
+# multipart sequence the upload API uses, or the upload path is broken in a way
+# that looks like security working. It must not READ staging, where sensitive
+# uploads wait unwrapped until promotion, and it must not touch bronze at all.
+STAGING_BUCKET = os.environ.get("LAKE_S3_STAGING_BUCKET", "")
+STAGING_KEY = os.environ.get("EXPLORER_S3_STAGING_ACCESS_KEY", "")
+STAGING_SECRET = os.environ.get("EXPLORER_S3_STAGING_SECRET_KEY", "")
+
+
+def denied(fn):
+    """(True, code) when the call is refused, (False, detail) when it is not."""
+    try:
+        fn()
+    except Exception as exc:  # noqa: BLE001 — any refusal is the evidence
+        return True, getattr(exc, "response", {}).get("Error", {}).get("Code", type(exc).__name__)
+    return False, "call SUCCEEDED"
+
+
+if not STAGING_BUCKET or not STAGING_KEY or not STAGING_SECRET:
+    check(
+        "Explorer staging write key is provisioned",
+        False,
+        "LAKE_S3_STAGING_BUCKET / EXPLORER_S3_STAGING_* absent — run 'lake-skeleton.sh up'",
+    )
+else:
+    wo = boto3.client(
+        "s3",
+        endpoint_url=f"http://{ENDPOINT}",
+        aws_access_key_id=STAGING_KEY,
+        aws_secret_access_key=STAGING_SECRET,
+        region_name=REGION,
+    )
+    probe = ".staging-write-probe"
+    try:
+        up = wo.create_multipart_upload(Bucket=STAGING_BUCKET, Key=probe)["UploadId"]
+        etag = wo.upload_part(
+            Bucket=STAGING_BUCKET, Key=probe, UploadId=up, PartNumber=1, Body=b"probe"
+        )["ETag"]
+        wo.complete_multipart_upload(
+            Bucket=STAGING_BUCKET,
+            Key=probe,
+            UploadId=up,
+            MultipartUpload={"Parts": [{"ETag": etag, "PartNumber": 1}]},
+        )
+        wrote, write_detail = True, "create/upload_part/complete succeeded"
+    except Exception as exc:  # noqa: BLE001
+        wrote, write_detail = False, f"{type(exc).__name__}: {exc}"
+    check("Explorer staging key can WRITE staging (multipart)", wrote, write_detail)
+
+    ok, detail = denied(lambda: wo.get_object(Bucket=STAGING_BUCKET, Key=probe))
+    check("Explorer staging key CANNOT read staging", ok, detail)
+    ok, detail = denied(lambda: wo.list_objects_v2(Bucket=STAGING_BUCKET, MaxKeys=1))
+    check("Explorer staging key CANNOT list staging", ok, detail)
+    ok, detail = denied(lambda: wo.list_objects_v2(Bucket=BUCKET, MaxKeys=1))
+    check("Explorer staging key CANNOT read bronze", ok, detail)
+    ok, detail = denied(lambda: wo.put_object(Bucket=BUCKET, Key=".staging-key-probe", Body=b"x"))
+    check("Explorer staging key CANNOT write bronze", ok, detail)
+
+    # The runner promotes out of staging (#4121-E): it must read there. It is
+    # also what cleans up the probe, which the write-only key cannot see.
+    try:
+        got = s3.get_object(Bucket=STAGING_BUCKET, Key=probe)["Body"].read()
+        s3.delete_object(Bucket=STAGING_BUCKET, Key=probe)
+        runner_ok, runner_detail = got == b"probe", f"read {len(got)} bytes, then deleted"
+    except Exception as exc:  # noqa: BLE001
+        runner_ok, runner_detail = False, f"{type(exc).__name__}: {exc}"
+    check("Ingest runner key can read and delete staging", runner_ok, runner_detail)
+
+    if EXPLORER_KEY and EXPLORER_SECRET:
+        ok, detail = denied(lambda: ro.put_object(Bucket=STAGING_BUCKET, Key=".ro-probe", Body=b"x"))
+        check("Explorer read-only key CANNOT write staging", ok, detail)
+
 print()
 if failures:
     print(f"FAILED: {len(failures)} check(s) — {', '.join(failures)}")
