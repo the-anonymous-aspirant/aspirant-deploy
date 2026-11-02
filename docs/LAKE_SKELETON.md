@@ -230,6 +230,17 @@ key can create, upload, complete and abort a multipart upload, but is denied
 `ListParts` and `ListMultipartUploads`, so resume keeps its own ledger of part
 ETags rather than asking Garage.
 
+**Write-only is not append-only.** The same measurement found the key can
+`DeleteObject` (and so overwrite) an object it wrote in staging. Confidentiality
+holds, but a compromised `explorer-api` could replace or delete a staged upload
+between completion and promotion. The integrity of a staged object therefore
+rests on the upload ledger's per-part SHA-256 and on promotion re-verifying the
+whole object against it before it enters bronze (#4121-C/E). `verify` prints
+this as a `[measured]` line on every run, so a Garage upgrade that changes it
+shows up there.
+
+`up` refuses outright if `LAKE_S3_STAGING_BUCKET` names the bronze bucket.
+
 `up` re-asserts the grants in both directions on every run, and `verify` proves
 each one by attempting it: a multipart upload into staging must succeed;
 reading or listing staging, and reading or writing bronze, must be denied; the

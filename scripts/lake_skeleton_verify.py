@@ -415,11 +415,22 @@ STAGING_SECRET = os.environ.get("EXPLORER_S3_STAGING_SECRET_KEY", "")
 
 
 def denied(fn):
-    """(True, code) when the call is refused, (False, detail) when it is not."""
+    """(True, code) only when Garage REFUSES the call; (False, detail) otherwise.
+
+    Only an access refusal counts. A NoSuchBucket, a timeout or a wrong
+    endpoint is also an exception, and reading one of those as "the bound
+    holds" would pass this check on a broken setup (security review, #9601
+    c59052).
+    """
     try:
         fn()
-    except Exception as exc:  # noqa: BLE001 — any refusal is the evidence
-        return True, getattr(exc, "response", {}).get("Error", {}).get("Code", type(exc).__name__)
+    except Exception as exc:  # noqa: BLE001 — classified below, not swallowed
+        resp = getattr(exc, "response", None) or {}
+        code = resp.get("Error", {}).get("Code", "")
+        status = resp.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        if code in ("AccessDenied", "Forbidden", "403") or status == 403:
+            return True, code or "HTTP 403"
+        return False, f"not an access refusal: {type(exc).__name__}: {code or exc}"
     return False, "call SUCCEEDED"
 
 
@@ -462,6 +473,27 @@ else:
     check("Explorer staging key CANNOT read bronze", ok, detail)
     ok, detail = denied(lambda: wo.put_object(Bucket=BUCKET, Key=".staging-key-probe", Body=b"x"))
     check("Explorer staging key CANNOT write bronze", ok, detail)
+
+    # Write-only is not append-only, and this records which it is rather than
+    # assuming (security review, #9601 c59052). If the staging key can delete
+    # (or overwrite) an object it wrote, a compromised explorer-api could swap a
+    # staged upload before promotion. Confidentiality still holds; integrity
+    # then rests on the upload ledger's hashes and on promotion re-verifying
+    # them (#4121-C/E). A measurement, not a pass/fail: either answer is a
+    # fact the promotion step's reviewer has to start from.
+    del_probe = ".staging-delete-probe"
+    try:
+        wo.put_object(Bucket=STAGING_BUCKET, Key=del_probe, Body=b"d")
+        refused, del_detail = denied(lambda: wo.delete_object(Bucket=STAGING_BUCKET, Key=del_probe))
+        print(
+            "  [measured] Explorer staging key DeleteObject on staging: "
+            + (f"DENIED ({del_detail})" if refused else f"ALLOWED ({del_detail})")
+        )
+    finally:
+        try:
+            s3.delete_object(Bucket=STAGING_BUCKET, Key=del_probe)
+        except Exception:  # noqa: BLE001 — cleanup is best-effort
+            pass
 
     # The runner promotes out of staging (#4121-E): it must read there. It is
     # also what cleans up the probe, which the write-only key cannot see.

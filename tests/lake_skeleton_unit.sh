@@ -148,6 +148,20 @@ assert_eq "the staging key name is the one the bootstrap issues" \
 assert_eq "the staging bucket defaults to the name compose defaults to" \
   "lake-skeleton-staging" "$STAGING_BUCKET"
 
+# A staging bucket that IS bronze would hand the explorer's write key bronze.
+# bootstrap_garage must refuse before it makes a single Garage call (#9601,
+# security review c59052). garage_cli is stubbed to record that it was reached.
+GARAGE_CALLS="$TMPDIR_TEST/garage-calls"
+: > "$GARAGE_CALLS"
+rc=0
+(
+  garage_cli() { echo "$*" >> "$GARAGE_CALLS"; }
+  STAGING_BUCKET="$BUCKET"
+  bootstrap_garage 2>/dev/null
+) || rc=$?
+assert_eq "bootstrap refuses when the staging bucket equals bronze" "1" "$rc"
+assert_eq "and makes no Garage call at all" "0" "$(wc -l < "$GARAGE_CALLS")"
+
 
 # --- layer1_check (#4273-B1) --------------------------------------------------
 # Mocked findmnt/lsblk rather than the box's real disk layout: a bash function
