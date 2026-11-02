@@ -174,6 +174,15 @@ wait_healthy() {
 }
 
 bootstrap_garage() {
+  # The staging bucket must never BE bronze. With the two names equal, the
+  # grants below would give the explorer's write key bronze and then take it
+  # back, safe only by the order of two lines. Refuse instead (security review,
+  # #9601 c59052).
+  if [ "$STAGING_BUCKET" = "$BUCKET" ]; then
+    echo "refusing: LAKE_S3_STAGING_BUCKET equals LAKE_S3_BUCKET ('$BUCKET'); staging must be its own bucket" >&2
+    return 1
+  fi
+
   # A fresh Garage node has no layout, and without a layout the S3 API answers
   # nothing. Assigning it is idempotent-by-check rather than by nature: applying
   # a layout twice bumps the version, so only do it when there are no roles yet.
