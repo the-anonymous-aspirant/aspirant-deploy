@@ -269,7 +269,7 @@ Development standards, infrastructure inventory, and project templates live in t
 4. **Implement** — Follow [CONVENTIONS.md](CONVENTIONS.md): health endpoint, logging format, test categories (import, contract, command/output)
 5. **Compose** — Add the service to both `docker-compose.yml` and `docker-compose.dev.yml`
 6. **Validate** — Run the convention auditor: `python -m app.main scan ../aspirant-{name}` from [aspirant-auditor](https://github.com/the-anonymous-aspirant/aspirant-auditor)
-7. **Update docs** — Add service details to INFRASTRUCTURE.md, log decisions in `docs/DECISIONS.md`, update CHANGELOG.md
+7. **Update docs** — Add service details to INFRASTRUCTURE.md, log decisions in `docs/DECISIONS.md`, add this PR's changelog fragment under `docs/changelog.d/` (see [Philosophy → Changelog](DEVELOPMENT_PHILOSOPHY.md#changelog))
 8. **Ship** — Create GitHub repo, set up CI, push, PR compose changes into this repo, deploy
 
 See [`_template/README.md`](_template/README.md) for the full pre/post-implementation checklist.

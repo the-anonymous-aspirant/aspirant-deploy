@@ -1,6 +1,7 @@
 # Changelog
 
 All notable changes to this service, ordered newest first.
+_New entries are files in [changelog.d/](changelog.d/README.md), one per PR; `scripts/changelog.sh collect` folds them in here._
 
 ---
 
