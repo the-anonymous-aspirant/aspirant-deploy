@@ -122,6 +122,22 @@ def main() -> int:
         except env.EnvelopeError:
             check(f"{label} is refused", True)
 
+    # 4b. A source that returns None mid-stream (a non-blocking stream with no
+    #     data yet) is refused, not finished as a valid object over the prefix
+    #     it had read (security review of PR 118, c59571).
+    class _NoneMidStream:
+        def __init__(self) -> None:
+            self.calls = [b"a" * 1000, None, b"b" * 1000, b""]
+
+        def read(self, n: int):
+            return self.calls.pop(0)
+
+    try:
+        env.encrypt_object_stream(_NoneMidStream(), io.BytesIO(), dek, chunk_size=chunk)
+        check("None mid-stream is refused", False)
+    except env.EnvelopeError:
+        check("None mid-stream is refused", True)
+
     # 5. A tampered streamed object fails the tag like a one-shot one.
     out = io.BytesIO()
     env.encrypt_object_stream(io.BytesIO(pt), out, dek, chunk_size=chunk)

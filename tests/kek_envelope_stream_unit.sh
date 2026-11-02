@@ -10,6 +10,9 @@
 # from the module's --self-test, which doubles as the operator's recovery drill
 # and should stay quick.
 #
+# cryptography is pinned to 46.0.3, the version Dockerfile-LakeDuckDB and
+# requirements/gmail.in ship, so the test exercises the runtime library.
+#
 # Usage: ./tests/kek_envelope_stream_unit.sh
 #   Requires docker. Set KEK_TEST_IMAGE to override the base image.
 
@@ -29,6 +32,6 @@ docker run --rm \
   -v "$PWD:/repo:ro" \
   -w /repo \
   "$IMAGE" \
-  sh -c "pip install --quiet --disable-pip-version-check cryptography \
+  sh -c "pip install --quiet --disable-pip-version-check cryptography==46.0.3 \
     && ( cd scripts/kek && python dek_envelope.py --self-test ) \
     && python tests/kek_envelope_stream_test.py"

@@ -189,6 +189,13 @@ def encrypt_object_stream(src, dst, dek: bytes, *, chunk_size: int = STREAM_CHUN
     The nonce is always fresh from ``os.urandom``; there is deliberately no
     parameter for it, because a caller-chosen GCM nonce is a reuse waiting to
     happen. Returns the number of plaintext bytes read.
+
+    A tag only proves the bytes in `dst` were not altered, not that `src` gave
+    up all of its bytes: a source that ends early yields a valid object over a
+    prefix. So before committing `dst` (PUT, rename, deleting the original),
+    a caller must check the returned length or `plaintext_hash` against what it
+    expected. A source that returns ``None`` (non-blocking, no data yet) is
+    refused with `EnvelopeError` rather than read as end of file.
     """
     return _encrypt_object_stream(src, dst, dek, os.urandom(NONCE_LEN),
                                   chunk_size=chunk_size, plaintext_hash=plaintext_hash)
@@ -212,6 +219,14 @@ def _encrypt_object_stream(src, dst, dek: bytes, nonce: bytes, *, chunk_size: in
     total = 0
     while True:
         chunk = src.read(chunk_size)
+        # `None` is "no data right now" from a non-blocking stream, not end of
+        # file. Treating it as EOF would finish a valid, authentic-looking
+        # object over a truncated prefix (security review of PR 118, c59571).
+        if chunk is None:
+            raise EnvelopeError(
+                "source returned None (non-blocking stream?); refusing to finish "
+                "a possibly truncated object"
+            )
         if not chunk:
             break
         total += len(chunk)
