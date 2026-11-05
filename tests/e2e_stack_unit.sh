@@ -34,7 +34,7 @@ case "$1" in
   # Only `docker exec -i` gets piped input (the logins' SQL); draining stdin
   # on any other exec would block forever on an open terminal.
   exec)
-    case " $* " in *" -i "*) cat >/dev/null 2>&1 || true ;; esac
+    case " $* " in *" -i "*) in="$(cat 2>/dev/null || true)"; case "$in" in *"count(*)"*) echo 3 ;; esac ;; esac
     case "$*" in *pg_isready*) [ -n "${STUB_PG_FAIL:-}" ] && exit 1 ;; esac ;;
 esac
 exit 0
@@ -101,6 +101,15 @@ for k in E2E_OWNER=vinoly E2E_ADMIN=e2e_admin E2E_MEMBER=e2e_member; do
   grep -qx "$k" "$DIR/run.env" && ok "login $k" || bad "login $k"
 done
 
+# The bootstrap window is closed: the client (the only publish) starts after
+# the logins are written, so /bootstrap/admin is never reachable while the
+# users table is empty.
+ins="$(grep -n 'exec -i s3e2e-.*-db psql' "$LOG" | head -1 | cut -d: -f1)"
+cli="$(grep -n 'run -d --name s3e2e-.*-client' "$LOG" | head -1 | cut -d: -f1)"
+[ -n "$ins" ] && [ -n "$cli" ] && [ "$ins" -lt "$cli" ] && ok "the client is published only after the logins exist" || bad "the client is published only after the logins exist (insert@$ins client@$cli)"
+# Rule 5, literally: the served server is inspected only with a format.
+! grep -qE '^inspect aspirant-online' "$LOG" && ok "served containers are inspected only with -f" || bad "served containers are inspected only with -f"
+
 # Served images are pinned by ID, not by tag.
 grep -qE 'run -d .*sha256:feedface' "$LOG" && ok "served images run by image ID" || bad "served images run by image ID"
 ! grep -qE 'run -d .*aspirant-(server|client):latest' "$LOG" && ok "no :latest tag is run" || bad "no :latest tag is run"
@@ -121,6 +130,11 @@ FRUN="$(sed -n 's/^e2e-stack: up failed; removing run \([0-9a-f-]*\)$/\1/p' "$FO
 [ -n "$FRUN" ] && ok "a failed up says it is removing its run" || bad "a failed up says it is removing its run ($(tail -2 "$FOUT"))"
 grep -q "label=org.aspirant.e2e-stack.run=$FRUN" "$LOG" && grep -q '^rm -f' "$LOG" && ok "a failed up removes its containers" || bad "a failed up removes its containers"
 [ ! -e "$E2E_STACK_ROOT/$FRUN" ] && ok "a failed up deletes its secrets" || bad "a failed up deletes its secrets"
+
+# A state root that is a symlink is refused (a planted one would redirect the secrets).
+ln -s "$T/elsewhere" "$T/linkroot"
+if E2E_STACK_ROOT="$T/linkroot" PATH="$BIN:$PATH" ./scripts/e2e-stack.sh up >/dev/null 2>&1; then bad "a symlinked state root is refused"; else ok "a symlinked state root is refused"; fi
+[ ! -e "$T/elsewhere" ] && ok "nothing is written through the symlink" || bad "nothing is written through the symlink"
 
 echo "e2e_stack_unit: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
