@@ -124,9 +124,11 @@ cmd_up() {
   docker run -d --name "$net-server" --label "$LABEL=$run" --network "$net" --network-alias server \
     --tmpfs /data:mode=1777 --env-file "$dir/server.env" "$server_img" >/dev/null
 
-  # Healthy from INSIDE the server container: nothing is published yet, so no
-  # one on the host can reach POST /bootstrap/admin, which is open while the
-  # users table is empty (security review on #10015).
+  # Healthy from inside the server container. POST /bootstrap/admin is open
+  # while the users table is empty, and the host CAN reach this container by
+  # its bridge IP even though nothing is published (measured by security on
+  # #10015). Publishing the client only after the logins exist narrows that
+  # window; the count(*) = 3 check below is what closes it. Do not drop it.
   local healthy=0
   for _ in $(seq 1 90); do
     if docker exec "$net-server" wget -qO- http://127.0.0.1:8080/health >/dev/null 2>&1; then
@@ -148,7 +150,9 @@ cmd_up() {
     printf "(now(), now(), '%s', '%s@e2e.invalid', crypt('%s', gen_salt('bf', 10)), (select id from roles where role_name='Admin'), 0, now()),\n" "$E2E_ADMIN" "$E2E_ADMIN" "$E2E_ADMIN_PASSWORD"
     printf "(now(), now(), '%s', '%s@e2e.invalid', crypt('%s', gen_salt('bf', 10)), (select id from roles where role_name='Member'), 0, now());\n" "$E2E_MEMBER" "$E2E_MEMBER" "$E2E_MEMBER_PASSWORD"
   } | docker exec -i "$net-db" psql -q -v ON_ERROR_STOP=1 -U aspirant -d aspirant_db >/dev/null
-  # Exactly our three: anything else means someone else wrote a user.
+  # THE guard against an outside /bootstrap/admin: exactly our three users.
+  # A fourth (or a failed insert on a taken name) dies here, and the EXIT trap
+  # removes the run.
   local users
   users="$(printf 'select count(*) from users;\n' | docker exec -i "$net-db" psql -qAt -U aspirant -d aspirant_db)"
   [ "$users" = 3 ] || die "expected 3 users on the scratch DB, found $users (run $run)"
