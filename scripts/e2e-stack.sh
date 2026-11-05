@@ -61,7 +61,7 @@ cmd_up() {
   local client run dir port
   client="$(served_client)"
   [ -n "$client" ] || die "no running aspirant-online-client container to read the served revision from"
-  docker inspect "$SERVED_SERVER" >/dev/null 2>&1 || die "no $SERVED_SERVER container to read the served revision from"
+  docker inspect -f '{{.Id}}' "$SERVED_SERVER" >/dev/null 2>&1 || die "no $SERVED_SERVER container to read the served revision from"
 
   local server_img client_img server_rev client_rev
   server_img="$(image_of "$SERVED_SERVER")"
@@ -77,6 +77,11 @@ cmd_up() {
   UP_RUN="$run"
   UP_DONE=0
   trap 'if [ "${UP_DONE:-1}" != 1 ]; then echo "e2e-stack: up failed; removing run $UP_RUN" >&2; cmd_down "$UP_RUN" >/dev/null 2>&1 || true; fi' EXIT
+
+  # The state root must be the caller's own directory, never a symlink
+  # (a planted one under a shared /tmp would redirect the secrets).
+  if [ -L "$ROOT" ]; then die "$ROOT is a symlink; set E2E_STACK_ROOT to your own directory"; fi
+  if [ -e "$ROOT" ] && [ "$(stat -c %u "$ROOT")" != "$(id -u)" ]; then die "$ROOT is not owned by you; set E2E_STACK_ROOT to your own directory"; fi
 
   umask 077
   mkdir -p "$dir"
@@ -118,15 +123,19 @@ cmd_up() {
 
   docker run -d --name "$net-server" --label "$LABEL=$run" --network "$net" --network-alias server \
     --tmpfs /data:mode=1777 --env-file "$dir/server.env" "$server_img" >/dev/null
-  docker run -d --name "$net-client" --label "$LABEL=$run" --network "$net" \
-    -p "127.0.0.1:$port:80" "$client_img" >/dev/null
 
+  # Healthy from INSIDE the server container: nothing is published yet, so no
+  # one on the host can reach POST /bootstrap/admin, which is open while the
+  # users table is empty (security review on #10015).
+  local healthy=0
   for _ in $(seq 1 90); do
-    [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/api/health" || true)" = 200 ] && break
+    if docker exec "$net-server" wget -qO- http://127.0.0.1:8080/health >/dev/null 2>&1; then
+      healthy=1
+      break
+    fi
     sleep 1
   done
-  [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/api/health" || true)" = 200 ] ||
-    die "server not healthy through the client edge (run $run)"
+  [ "$healthy" = 1 ] || die "scratch server did not become healthy (run $run)"
 
   # Logins: bcrypt in the scratch DB. The SQL travels on stdin from a
   # builtin printf, so no password is ever on an argv.
@@ -139,6 +148,20 @@ cmd_up() {
     printf "(now(), now(), '%s', '%s@e2e.invalid', crypt('%s', gen_salt('bf', 10)), (select id from roles where role_name='Admin'), 0, now()),\n" "$E2E_ADMIN" "$E2E_ADMIN" "$E2E_ADMIN_PASSWORD"
     printf "(now(), now(), '%s', '%s@e2e.invalid', crypt('%s', gen_salt('bf', 10)), (select id from roles where role_name='Member'), 0, now());\n" "$E2E_MEMBER" "$E2E_MEMBER" "$E2E_MEMBER_PASSWORD"
   } | docker exec -i "$net-db" psql -q -v ON_ERROR_STOP=1 -U aspirant -d aspirant_db >/dev/null
+  # Exactly our three: anything else means someone else wrote a user.
+  local users
+  users="$(printf 'select count(*) from users;\n' | docker exec -i "$net-db" psql -qAt -U aspirant -d aspirant_db)"
+  [ "$users" = 3 ] || die "expected 3 users on the scratch DB, found $users (run $run)"
+
+  # Only now publish the client edge.
+  docker run -d --name "$net-client" --label "$LABEL=$run" --network "$net" \
+    -p "127.0.0.1:$port:80" "$client_img" >/dev/null
+  for _ in $(seq 1 90); do
+    [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/api/health" || true)" = 200 ] && break
+    sleep 1
+  done
+  [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/api/health" || true)" = 200 ] ||
+    die "server not healthy through the client edge (run $run)"
 
   python3 -I "$HERE/e2e_stack_seed.py" "$dir/run.env"
 
