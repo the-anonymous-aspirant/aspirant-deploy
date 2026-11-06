@@ -130,6 +130,38 @@ assert_eq "the read-only key name is the one the bootstrap issues" \
 assert_eq "the read-only catalog role name is the one the bootstrap issues" \
   "explorer_ro" "$CATALOG_RO_ROLE"
 
+# The staging pair (#9601): both compose files must read the names the
+# bootstrap writes, the main one for explorer-api and the skeleton one so that
+# verify can prove the key's bounds. Each with an inert :- default, so a host
+# that has not issued it still renders the whole file.
+for key in LAKE_S3_STAGING_BUCKET EXPLORER_S3_STAGING_ACCESS_KEY EXPLORER_S3_STAGING_SECRET_KEY; do
+  for f in docker-compose.yml docker-compose.lake-skeleton.yml; do
+    if grep -q "\${$key:-" "$f"; then
+      PASS=$((PASS + 1)); echo "[PASS] $f reads $key with an inert default"
+    else
+      FAIL=$((FAIL + 1)); echo "[FAIL] $f does not read $key with an inert :- default"
+    fi
+  done
+done
+assert_eq "the staging key name is the one the bootstrap issues" \
+  "lake-skeleton-explorer-staging-wo" "$STAGING_KEY_NAME"
+assert_eq "the staging bucket defaults to the name compose defaults to" \
+  "lake-skeleton-staging" "$STAGING_BUCKET"
+
+# A staging bucket that IS bronze would hand the explorer's write key bronze.
+# bootstrap_garage must refuse before it makes a single Garage call (#9601,
+# security review c59052). garage_cli is stubbed to record that it was reached.
+GARAGE_CALLS="$TMPDIR_TEST/garage-calls"
+: > "$GARAGE_CALLS"
+rc=0
+(
+  garage_cli() { echo "$*" >> "$GARAGE_CALLS"; }
+  STAGING_BUCKET="$BUCKET"
+  bootstrap_garage 2>/dev/null
+) || rc=$?
+assert_eq "bootstrap refuses when the staging bucket equals bronze" "1" "$rc"
+assert_eq "and makes no Garage call at all" "0" "$(wc -l < "$GARAGE_CALLS")"
+
 
 # --- layer1_check (#4273-B1) --------------------------------------------------
 # Mocked findmnt/lsblk rather than the box's real disk layout: a bash function
@@ -185,7 +217,12 @@ cat > "$SKEL_ENV" <<EOF
 EXPLORER_S3_ACCESS_KEY=GKnewkey
 EXPLORER_S3_SECRET_KEY=newsecret0123
 LAKE_CATALOG_RO_DSN=$NEW_DSN
+LAKE_S3_STAGING_BUCKET=lake-skeleton-staging
+EXPLORER_S3_STAGING_ACCESS_KEY=GKnewstaging
+EXPLORER_S3_STAGING_SECRET_KEY=newstagingsecret0123
 EOF
+# A deploy .env from before #9601: the read-only pair and no staging keys at
+# all, which check must report as missing rather than pass over.
 cat > "$DEPLOY_ENV" <<'EOF'
 UNRELATED=keep-me
 EXPLORER_S3_ACCESS_KEY=GKoldkey
@@ -200,7 +237,8 @@ chmod 644 "$DEPLOY_ENV"  # the mode the cell's deploy .env was found at
 rc=0; out="$(explorer_env_check)" || rc=$?
 assert_rc "check fails when the deploy .env holds the previous credentials" "1" "$rc"
 assert_eq "and names each drifted key" "3" "$(grep -c 'differs from' <<<"$out")"
-if grep -qE 'oldsecret|newsecret|oldpw|newpw' <<<"$out"; then
+assert_eq "and each staging key the deploy .env lacks" "3" "$(grep -c 'is missing from' <<<"$out")"
+if grep -qE 'oldsecret|newsecret|oldpw|newpw|stagingsecret' <<<"$out"; then
   FAIL=$((FAIL + 1)); echo "[FAIL] check output contains a credential value"
 else
   PASS=$((PASS + 1)); echo "[PASS] check output contains no credential value"
@@ -211,6 +249,11 @@ assert_eq "sync copies the catalog DSN under the name compose reads" \
   "LAKE_CATALOG_DSN=$NEW_DSN" "$(grep '^LAKE_CATALOG_DSN=' "$DEPLOY_ENV")"
 assert_eq "sync copies the secret key" \
   "EXPLORER_S3_SECRET_KEY=newsecret0123" "$(grep '^EXPLORER_S3_SECRET_KEY=' "$DEPLOY_ENV")"
+assert_eq "sync adds the staging secret key the deploy .env lacked" \
+  "EXPLORER_S3_STAGING_SECRET_KEY=newstagingsecret0123" \
+  "$(grep '^EXPLORER_S3_STAGING_SECRET_KEY=' "$DEPLOY_ENV")"
+assert_eq "sync adds the staging bucket name" \
+  "LAKE_S3_STAGING_BUCKET=lake-skeleton-staging" "$(grep '^LAKE_S3_STAGING_BUCKET=' "$DEPLOY_ENV")"
 assert_eq "sync leaves other keys alone" "UNRELATED=keep-me" "$(grep '^UNRELATED=' "$DEPLOY_ENV")"
 assert_eq "sync keeps a mode-600 backup of the previous file under ROOT" \
   "600" "$(stat -c %a "$ROOT"/deploy-env.bak-*)"
@@ -231,7 +274,7 @@ printf 'EXPLORER_S3_ACCESS_KEY=GK|bad\n' >> "$SKEL_ENV"
 before="$(cat "$DEPLOY_ENV")"
 rc=0; explorer_env_sync > /dev/null 2>&1 || rc=$?
 assert_rc "sync refuses a skeleton value containing |" "1" "$rc"
-assert_eq "and writes none of the three" "$before" "$(cat "$DEPLOY_ENV")"
+assert_eq "and writes none of the mapped keys" "$before" "$(cat "$DEPLOY_ENV")"
 sed -i '/^EXPLORER_S3_ACCESS_KEY=/d' "$SKEL_ENV"
 printf 'EXPLORER_S3_ACCESS_KEY=GKnewkey\n' >> "$SKEL_ENV"
 
@@ -242,6 +285,15 @@ before="$(cat "$DEPLOY_ENV")"
 rc=0; explorer_env_sync > /dev/null 2>&1 || rc=$?
 assert_rc "sync refuses while a skeleton credential is still pending" "1" "$rc"
 assert_eq "and writes nothing" "$before" "$(cat "$DEPLOY_ENV")"
+
+# A host whose skeleton predates #9601 has the read-only pair issued and the
+# staging pair still 'pending' until its next 'up'. Sync must not half-apply.
+sed -i 's|^EXPLORER_S3_SECRET_KEY=.*|EXPLORER_S3_SECRET_KEY=newsecret0123|' "$SKEL_ENV"
+sed -i 's|^EXPLORER_S3_STAGING_ACCESS_KEY=.*|EXPLORER_S3_STAGING_ACCESS_KEY=pending|' "$SKEL_ENV"
+before="$(cat "$DEPLOY_ENV")"
+rc=0; explorer_env_sync > /dev/null 2>&1 || rc=$?
+assert_rc "sync refuses while the staging key is still pending" "1" "$rc"
+assert_eq "and writes nothing, the read-only pair included" "$before" "$(cat "$DEPLOY_ENV")"
 
 DEPLOY_ENV_FILE="$TMPDIR_TEST/absent-deploy.env"
 rc=0; explorer_env_sync > /dev/null 2>&1 || rc=$?

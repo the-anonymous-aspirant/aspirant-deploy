@@ -115,6 +115,11 @@ services:
       # a skipped proof rather than refuse to render the whole compose file.
       EXPLORER_S3_ACCESS_KEY: ${EXPLORER_S3_ACCESS_KEY:-}
       EXPLORER_S3_SECRET_KEY: ${EXPLORER_S3_SECRET_KEY:-}
+      # The explorer's write-only staging pair, for the same reason: verify
+      # proves it can write staging and can read nothing (#9601).
+      LAKE_S3_STAGING_BUCKET: ${LAKE_S3_STAGING_BUCKET:-lake-skeleton-staging}
+      EXPLORER_S3_STAGING_ACCESS_KEY: ${EXPLORER_S3_STAGING_ACCESS_KEY:-}
+      EXPLORER_S3_STAGING_SECRET_KEY: ${EXPLORER_S3_STAGING_SECRET_KEY:-}
       LAKE_CATALOG_RO_DSN: ${LAKE_CATALOG_RO_DSN:-}
       # KEK for layer-2 envelope encryption of sensitivity=high blobs (§9, #4134).
       # One-shot, off-cell hex — never on disk. Defaulted rather than `:?` so a
