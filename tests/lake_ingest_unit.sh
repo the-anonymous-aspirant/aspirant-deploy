@@ -102,12 +102,18 @@ echo
 if ! command -v docker >/dev/null 2>&1; then
   echo "[SKIP] docker not available; cannot run the ingest round-trip" >&2
 else
+  # Pinned to the lake client image's own versions (Dockerfile-LakeDuckDB's
+  # LAKE_REQUIREMENTS line). An unpinned duckdb wheel died with "Illegal
+  # instruction" on the cell (system_3 #8810, #9526), and the runner that loads
+  # real data runs on exactly these versions. pip gets a timeout and retries
+  # because this uplink drops PyPI reads.
   echo "Running the ingest round-trip in ${IMAGE} ..."
   docker run --rm \
     -v "$PWD:/repo:ro" \
     -w /repo \
     "$IMAGE" \
-    sh -c "pip install --quiet --disable-pip-version-check cryptography boto3 moto duckdb \
+    sh -c "pip install --quiet --disable-pip-version-check --timeout 120 --retries 5 \
+        cryptography==46.0.3 boto3==1.40.47 duckdb==1.5.4 moto \
       && python tests/lake_ingest_roundtrip.py" || fails=$((fails + 1))
 fi
 
