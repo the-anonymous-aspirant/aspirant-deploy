@@ -17,7 +17,8 @@ Skeleton files for starting a new service. Copy this directory, replace all `{pl
 |------|---------|-----------|
 | `docs/SPEC.md` | What we're building and why | [Philosophy → Spec-Driven Development](../DEVELOPMENT_PHILOSOPHY.md#spec-driven-development) |
 | `docs/ARCHITECTURE.md` | How it fits together (with diagrams) | [Philosophy → Architecture File](../DEVELOPMENT_PHILOSOPHY.md#architecture-file) |
-| `docs/CHANGELOG.md` | Timestamped record of changes | [Philosophy → Changelog](../DEVELOPMENT_PHILOSOPHY.md#changelog) |
+| `docs/CHANGELOG.md` | Timestamped record of changes, rendered from `docs/changelog.d/` | [Philosophy → Changelog](../DEVELOPMENT_PHILOSOPHY.md#changelog) |
+| `docs/changelog.d/` | One changelog fragment per PR (`scripts/changelog.sh` renders and collects them) | [Philosophy → Changelog](../DEVELOPMENT_PHILOSOPHY.md#changelog) |
 | `docs/DECISIONS.md` | Why key choices were made | [Philosophy → Required Artifacts](../DEVELOPMENT_PHILOSOPHY.md#required-artifacts) |
 | `docs/OPERATIONS.md` | Setup, run, test, validate, debug, gotchas | [Philosophy → Documentation Standards](../DEVELOPMENT_PHILOSOPHY.md#documentation-standards) |
 | `app/` | Python service source (FastAPI skeleton) | [Conventions → Python Services](../CONVENTIONS.md#python-services) |
@@ -41,7 +42,7 @@ After implementation:
 - [ ] Tests pass (`pytest tests/ -v`)
 - [ ] CI workflow adapted from template (pick correct test variant from CONVENTIONS.md → CI/CD)
 - [ ] INFRASTRUCTURE.md updated with new service details
-- [ ] CHANGELOG.md has an entry for today
+- [ ] docs/changelog.d/ has this PR's fragment (`sh scripts/changelog.sh check` passes)
 - [ ] DECISIONS.md has entries for non-obvious choices
 - [ ] OPERATIONS.md gotchas section filled in
 

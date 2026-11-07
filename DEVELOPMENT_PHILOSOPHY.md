@@ -69,7 +69,7 @@ Every project must produce these artifacts. The first three are created before i
 | **Spec** | What are we building and why? | `docs/{PROJECT}_SPEC.md` | [_template/docs/SPEC.md](_template/docs/SPEC.md) |
 | **Architecture** | How does it fit together? | `docs/{PROJECT}_ARCHITECTURE.md` | [_template/docs/ARCHITECTURE.md](_template/docs/ARCHITECTURE.md) |
 | **Development Plan** | What's the order of work? | Numbered steps in the spec or a separate plan file | — |
-| **Changelog** | What changed and when? | `docs/CHANGELOG.md` | [_template/docs/CHANGELOG.md](_template/docs/CHANGELOG.md) |
+| **Changelog** | What changed and when? | `docs/CHANGELOG.md`, rendered from one fragment per PR in `docs/changelog.d/` | [_template/docs/CHANGELOG.md](_template/docs/CHANGELOG.md) |
 | **Decision Log** | Why were key choices made? | `docs/DECISIONS.md` | [_template/docs/DECISIONS.md](_template/docs/DECISIONS.md) |
 | **Operations Guide** | How to run, test, debug? | `docs/{PROJECT}_OPERATIONS.md` | [_template/docs/OPERATIONS.md](_template/docs/OPERATIONS.md) |
 
@@ -112,7 +112,23 @@ Before writing code, define the implementation order:
 
 ### Changelog
 
-The changelog is a timestamped, human-readable record of what happened:
+The changelog is a timestamped, human-readable record of what happened. A PR
+does not edit `docs/CHANGELOG.md`; it adds **one fragment file** under
+`docs/changelog.d/`, named `<YYYY-MM-DD>-<task>[-<slug>].md`, holding the
+bullet exactly as it will read under that day's heading:
+
+```markdown
+- Added retry endpoint for failed transcriptions (system_3 #1234). Why, and
+  what the operator sees now.
+```
+
+`sh scripts/changelog.sh check` validates the fragments, `render` prints the
+changelog with them merged in under their date headings (newest first, a
+heading created when the day has none), and `collect` writes that rendering to
+`docs/CHANGELOG.md` and deletes the fragments — on a PR of its own, at most one
+open at a time. Two PRs then never touch the same file (system_3 #9455: three
+verified PRs went CONFLICTING on the one shared file in a day). The rendered
+file reads as before:
 
 ```markdown
 ## Changelog
@@ -128,10 +144,11 @@ The changelog is a timestamped, human-readable record of what happened:
 ```
 
 Rules:
-- One entry per day of work (group sub-items as bullets)
+- One fragment per PR; the bullets of a day are grouped under its `### YYYY-MM-DD` heading when rendered
 - Written in past tense
 - Describe *what changed*, not *what you did* ("Added retry endpoint" not "I worked on retries")
 - Keep it concise — the git log has the details
+- Only the collect PR edits `docs/CHANGELOG.md`; the fragment format lives in `docs/changelog.d/README.md`
 
 ---
 
@@ -260,7 +277,7 @@ When an AI agent collaborates on any project following these standards:
 - **Write code that reads like prose** — Prioritize clarity over brevity
 - **One concern per file** — Config in config, models in models, routes in routes
 - **Write tests** — At minimum: import checks, contract tests, command/output tests (see CONVENTIONS.md → Testing)
-- **Update the changelog** — Every implementation session gets a changelog entry
+- **Add a changelog fragment** — Every PR adds one file under `docs/changelog.d/` (see Changelog above); `docs/CHANGELOG.md` is not edited directly
 - **Log decisions** — Record non-obvious architectural choices in DECISIONS.md
 
 ### After Implementation
@@ -289,7 +306,7 @@ When an AI agent collaborates on any project following these standards:
   │   ─────────────────────────────────────────────     │
   │                         │                           │
   │                         ▼                           │
-  │   4. IMPLEMENT      Write code, update changelog    │
+  │   4. IMPLEMENT      Write code + changelog fragment │
   │   ─────────────────────────────────────────────     │
   │                         │                           │
   │                         ▼                           │

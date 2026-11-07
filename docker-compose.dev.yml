@@ -75,9 +75,14 @@ services:
     ports:
       # Loopback publish only. See system_3 #1379.
       - "127.0.0.1:8082:8000"
-    env_file:
-      - .env
     environment:
+      # Only the .env names this service reads, and no `env_file`: the shared
+      # .env also holds JWT_SECRET, which signs session tokens, and the
+      # break-glass token, and those belong to `server` alone (system_3 #9313;
+      # tests/compose_secret_scope_unit.sh).
+      DB_USER: "${DB_USER}"
+      DB_PASSWORD: "${DB_PASSWORD}"
+      DB_NAME: "${DB_NAME}"
       AUDIO_STORAGE_PATH: /data/audio
       WHISPER_MODEL: base
       DB_HOST: postgres
@@ -96,9 +101,16 @@ services:
     ports:
       - "127.0.0.1:8083:8000"
     environment:
+      # Only the .env names this service reads, and no `env_file`: the shared
+      # .env also holds JWT_SECRET, which signs session tokens, and the
+      # break-glass token, and those belong to `server` alone (system_3 #9313;
+      # tests/compose_secret_scope_unit.sh).
+      DB_USER: "${DB_USER}"
+      DB_PASSWORD: "${DB_PASSWORD}"
+      DB_NAME: "${DB_NAME}"
+      VALUATION_BACKFILL_OWNER_ID: "${VALUATION_BACKFILL_OWNER_ID:-}"
+      ASPIRANT_SIGNAL_RO_PASSWORD: "${ASPIRANT_SIGNAL_RO_PASSWORD:-}"
       DB_HOST: postgres
-    env_file:
-      - .env
     depends_on:
       postgres:
         condition: service_healthy
@@ -178,9 +190,14 @@ services:
       dockerfile: Dockerfile-Advisor
     ports:
       - "127.0.0.1:8088:8000"
-    env_file:
-      - .env
     environment:
+      # Only the .env names this service reads, and no `env_file`: the shared
+      # .env also holds JWT_SECRET, which signs session tokens, and the
+      # break-glass token, and those belong to `server` alone (system_3 #9313;
+      # tests/compose_secret_scope_unit.sh).
+      DB_USER: "${DB_USER}"
+      DB_PASSWORD: "${DB_PASSWORD}"
+      DB_NAME: "${DB_NAME}"
       DB_HOST: postgres
       OLLAMA_URL: http://ollama:11434
     volumes:
@@ -201,9 +218,14 @@ services:
     # ingress runs exclusively through aspirant-server's authed proxy.
     ports:
       - "127.0.0.1:8089:8000"
-    env_file:
-      - .env
     environment:
+      # Only the .env names this service reads, and no `env_file`: the shared
+      # .env also holds JWT_SECRET, which signs session tokens, and the
+      # break-glass token, and those belong to `server` alone (system_3 #9313;
+      # tests/compose_secret_scope_unit.sh).
+      DB_USER: "${DB_USER}"
+      DB_PASSWORD: "${DB_PASSWORD}"
+      DB_NAME: "${DB_NAME}"
       DB_HOST: postgres
       BROWSER_FLOW_DATA_DIR: /data/aspirant/browser_flows
       TOR_SOCKS_URL: socks5://tor:9050

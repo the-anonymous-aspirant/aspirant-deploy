@@ -143,6 +143,7 @@ The dev compose file must be self-contained — it should work on a clean machin
 
 - **Include a local PostgreSQL service** — Dev compose includes its own `postgres:16-alpine` container so services don't depend on a remote database
 - **Override `DB_HOST` via `environment:`** — The `environment:` block in compose takes precedence over `env_file:`. Set `DB_HOST: postgres` to route services to the local container instead of whatever remote host is in `.env`
+- **Only `server` takes `env_file: .env`** (system_3 #9313). `.env` holds `JWT_SECRET`, which signs session tokens, and `BREAK_GLASS_TOKEN`. Every other service lists the `.env` names its code reads under `environment:`, interpolated (`DB_PASSWORD: "${DB_PASSWORD}"`), so it receives those and nothing else. `tests/compose_secret_scope_unit.sh` enforces this in every compose file.
 - **Use a separate volume name** — Dev postgres uses `pgdata-dev` (not `pgdata`) to avoid collisions if production compose runs on the same machine
 - **Avoid host port conflicts** — Map the dev postgres to a non-standard host port (e.g., `5433:5432`) since the developer may have a local PostgreSQL on 5432
 - **Add `depends_on` with health checks** — Services that need the database wait for `postgres: condition: service_healthy` before starting
@@ -181,10 +182,11 @@ services:
 
   transcriber:
     build: ...
-    environment:
+    environment:               # no env_file: only the names it reads
       DB_HOST: postgres        # Override .env to use local DB
-    env_file:
-      - .env
+      DB_USER: "${DB_USER}"
+      DB_PASSWORD: "${DB_PASSWORD}"
+      DB_NAME: "${DB_NAME}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -683,7 +685,7 @@ Rules:
 
 - Lives at project root, never committed
 - `.env.example` is committed as a template
-- Secrets are never baked into Docker images (passed at runtime via `env_file`)
+- Secrets are never baked into Docker images. They're passed at runtime: the whole `.env` to `server` through `env_file`, and each other service only the names it reads, through interpolated `environment:` entries (system_3 #9313)
 
 ---
 
@@ -695,7 +697,8 @@ Rules:
 |----------|----------|----------|
 | Spec | `SPEC.md` | `docs/` |
 | Architecture | `ARCHITECTURE.md` | `docs/` |
-| Changelog | `CHANGELOG.md` | `docs/` |
+| Changelog (rendered; not edited directly) | `CHANGELOG.md` | `docs/` |
+| Changelog fragment (one per PR) | `<YYYY-MM-DD>-<task>[-<slug>].md` | `docs/changelog.d/` |
 | Operations | `OPERATIONS.md` | `docs/` |
 | Decisions | `DECISIONS.md` | `docs/` |
 | Style guide | `STYLE_GUIDE.md` | `docs/` |
