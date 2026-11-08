@@ -199,6 +199,12 @@ for name, spec in services.items():
             if str(pairs.get(key)) != value:
                 print(f"{name}: {key} is {pairs.get(key)!r}, want {value!r}")
                 bad += 1
+        # The label a superuser fall-back is caught by (#10325): a literal, so a
+        # lost .env switch cannot take the label with it.
+        label = pairs.get("PGAPPNAME")
+        if str(label) != f"aspirant-{name}" or "$" in str(label):
+            print(f"{name}: PGAPPNAME is {label!r}, want the literal 'aspirant-{name}'")
+            bad += 1
     elif name not in admin_ok and re.search(r"\$\{?DB_PASSWORD\b", text):
         print(f"{name} names the admin DB_PASSWORD")
         bad += 1
@@ -232,7 +238,37 @@ services:
     environment:
       - "PGPASSWORD=${DB_PASSWORD}"
 EOF
-for bad in db_crossed db_admin_only db_other_service; do
+# The label: interpolated from .env, and crossed (otherwise well-formed).
+cat > "$TMPDIR_TEST/db_label_interpolated.yml" <<'EOF2'
+services:
+  transcriber:
+    environment:
+      DB_USER: "${ASPIRANT_TRANSCRIBER_DB_USER:-${DB_USER}}"
+      DB_PASSWORD: "${ASPIRANT_TRANSCRIBER_DB_LOGIN_PASSWORD:-${DB_PASSWORD}}"
+      PGAPPNAME: "${TRANSCRIBER_APPNAME:-aspirant-transcriber}"
+EOF2
+cat > "$TMPDIR_TEST/db_label_crossed.yml" <<'EOF2'
+services:
+  transcriber:
+    environment:
+      DB_USER: "${ASPIRANT_TRANSCRIBER_DB_USER:-${DB_USER}}"
+      DB_PASSWORD: "${ASPIRANT_TRANSCRIBER_DB_LOGIN_PASSWORD:-${DB_PASSWORD}}"
+      PGAPPNAME: aspirant-commander
+EOF2
+cat > "$TMPDIR_TEST/db_label_ok.yml" <<'EOF2'
+services:
+  transcriber:
+    environment:
+      DB_USER: "${ASPIRANT_TRANSCRIBER_DB_USER:-${DB_USER}}"
+      DB_PASSWORD: "${ASPIRANT_TRANSCRIBER_DB_LOGIN_PASSWORD:-${DB_PASSWORD}}"
+      PGAPPNAME: aspirant-transcriber
+EOF2
+if check_db_logins "$TMPDIR_TEST/db_label_ok.yml" >/dev/null; then
+  record yes "positive control (db_label_ok): a literal own label passes"
+else
+  record no "positive control (db_label_ok): a literal own label passes"
+fi
+for bad in db_crossed db_admin_only db_other_service db_label_interpolated db_label_crossed; do
   if check_db_logins "$TMPDIR_TEST/$bad.yml" >/dev/null; then
     record no "negative control ($bad): the login check refuses it"
   else
@@ -314,6 +350,22 @@ if docker compose version >/dev/null 2>&1; then
   else
     record no "resolved: all four switched, none holds the admin DB_PASSWORD"
   fi
+  # The label resolves to its literal both before and after the switch: it is
+  # what tells a fallen-back service apart from server's own superuser sessions.
+  for state in db_none db_all; do
+    labels="$(docker compose --project-directory "$TMPDIR_TEST/$state" config --format json 2>/dev/null \
+      | python3 -c '
+import json, sys
+cfg = json.load(sys.stdin)["services"]
+print(" ".join(str((cfg[s].get("environment") or {}).get("PGAPPNAME")) for s in sys.argv[1].split()))
+' "$DB_SERVICES")"
+    want="aspirant-transcriber aspirant-commander aspirant-advisor aspirant-browser"
+    if [[ "$labels" == "$want" ]]; then
+      record yes "resolved ($state): each DB service carries PGAPPNAME aspirant-<svc>"
+    else
+      record no "resolved ($state): each DB service carries PGAPPNAME aspirant-<svc> (got: $labels)"
+    fi
+  done
 else
   echo "  SKIP  resolved DB logins: docker compose is not available"
 fi
