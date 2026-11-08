@@ -161,6 +161,163 @@ else
   echo "  SKIP  resolved config: docker compose is not available"
 fi
 
+# --- Per-service database logins (system_3 #9317, #9320) --------------------
+# transcriber, commander, advisor and browser each log in as their own role
+# once cut over, and as the admin pair (DB_USER, a superuser) until then and
+# after a rollback. The switch is per service and lives in .env:
+#   ASPIRANT_<SVC>_DB_USER=aspirant_<svc>
+#   ASPIRANT_<SVC>_DB_LOGIN_PASSWORD=${ASPIRANT_<SVC>_DB_PASSWORD}
+# The default stays the admin pair on purpose: auto-pull.sh drives compose from
+# this checkout, so a role default would start a service as its role before
+# `db-roles.sh move` (its startup would create empty tables in its schema), or
+# fail compose outright while the role passwords are unset.
+DB_SERVICES="transcriber commander advisor browser"
+
+# check_db_logins <path>: prints one line per offence, exits non-zero on any.
+check_db_logins() {
+  python3 - "$1" "$DB_SERVICES" <<'EOF'
+import re
+import sys
+import yaml
+
+services = (yaml.safe_load(open(sys.argv[1])) or {}).get("services") or {}
+db_services = sys.argv[2].split()
+admin_ok = {"server", "postgres", *db_services}
+bad = 0
+for name, spec in services.items():
+    env = (spec or {}).get("environment") or {}
+    pairs = dict(env.items() if isinstance(env, dict) else (
+        (e.split("=", 1) + [""])[:2] for e in env))
+    text = " ".join(f"{k}={v}" for k, v in pairs.items())
+    if name in db_services:
+        s = name.upper()
+        want = {
+            "DB_USER": "${ASPIRANT_%s_DB_USER:-${DB_USER}}" % s,
+            "DB_PASSWORD": "${ASPIRANT_%s_DB_LOGIN_PASSWORD:-${DB_PASSWORD}}" % s,
+        }
+        for key, value in want.items():
+            if str(pairs.get(key)) != value:
+                print(f"{name}: {key} is {pairs.get(key)!r}, want {value!r}")
+                bad += 1
+    elif name not in admin_ok and re.search(r"\$\{?DB_PASSWORD\b", text):
+        print(f"{name} names the admin DB_PASSWORD")
+        bad += 1
+    for owner in re.findall(r"ASPIRANT_([A-Z]+)_DB_(?:USER|LOGIN_PASSWORD|PASSWORD)\b", text):
+        if owner.lower() != name:
+            print(f"{name} names {owner.lower()}'s database login")
+            bad += 1
+sys.exit(1 if bad else 0)
+EOF
+}
+
+# Negative controls: a crossed login, a service left on the admin pair with no
+# switch, and an unrelated service reaching for the admin password.
+cat > "$TMPDIR_TEST/db_crossed.yml" <<'EOF'
+services:
+  transcriber:
+    environment:
+      DB_USER: "${ASPIRANT_TRANSCRIBER_DB_USER:-${DB_USER}}"
+      DB_PASSWORD: "${ASPIRANT_COMMANDER_DB_LOGIN_PASSWORD:-${DB_PASSWORD}}"
+EOF
+cat > "$TMPDIR_TEST/db_admin_only.yml" <<'EOF'
+services:
+  advisor:
+    environment:
+      DB_USER: "${DB_USER}"
+      DB_PASSWORD: "${DB_PASSWORD}"
+EOF
+cat > "$TMPDIR_TEST/db_other_service.yml" <<'EOF'
+services:
+  monitor:
+    environment:
+      - "PGPASSWORD=${DB_PASSWORD}"
+EOF
+for bad in db_crossed db_admin_only db_other_service; do
+  if check_db_logins "$TMPDIR_TEST/$bad.yml" >/dev/null; then
+    record no "negative control ($bad): the login check refuses it"
+  else
+    record yes "negative control ($bad): the login check refuses it"
+  fi
+done
+
+for f in docker-compose*.yml; do
+  if out="$(check_db_logins "$f")"; then
+    record yes "$f: each DB service has its own login switch, and no other service names the admin password"
+  else
+    record no "$f: each DB service has its own login switch, and no other service names the admin password"
+    printf '%s\n' "$out" | sed 's/^/        /'
+  fi
+done
+
+# Resolved, three ways: no switch set (today), one switched, all switched.
+# resolve_db <dir> <switched services...>: prints "svc user password" per DB
+# service, from docker compose's own resolution against a sentinel .env.
+resolve_db() {
+  local dir="$1"; shift
+  mkdir -p "$dir"
+  cp docker-compose.yml "$dir/"
+  {
+    grep -oE '\$\{[A-Z_][A-Z0-9_]*' docker-compose.yml | sed 's/^\${//' | sort -u \
+      | grep -vx COMPOSE_PROJECT_NAME \
+      | grep -vE '^ASPIRANT_[A-Z]+_DB_(USER|LOGIN_PASSWORD)$' \
+      | while read -r n; do echo "$n=sentinel-$n"; done
+    for s in $DB_SERVICES; do
+      echo "ASPIRANT_${s^^}_DB_PASSWORD=sentinel-role-$s"
+    done
+    echo "COMPOSE_PROJECT_NAME=secret-scope-test"
+  } | sort -u > "$dir/.env"
+  local s
+  for s in "$@"; do
+    printf 'ASPIRANT_%s_DB_USER=aspirant_%s\n' "${s^^}" "$s" >> "$dir/.env"
+    printf 'ASPIRANT_%s_DB_LOGIN_PASSWORD=${ASPIRANT_%s_DB_PASSWORD}\n' "${s^^}" "${s^^}" >> "$dir/.env"
+  done
+  docker compose --project-directory "$dir" config --format json 2>"$dir/err" \
+    | python3 -c '
+import json, sys
+cfg = json.load(sys.stdin)["services"]
+for s in sys.argv[1].split():
+    e = cfg[s].get("environment") or {}
+    print(s, e.get("DB_USER"), e.get("DB_PASSWORD"))
+' "$DB_SERVICES"
+}
+
+# expect_db <label> <resolved output> <switched services...>
+expect_db() {
+  local label="$1" got="$2"; shift 2
+  local want="" s
+  for s in $DB_SERVICES; do
+    if [[ " $* " == *" $s "* ]]; then
+      want+="$s aspirant_$s sentinel-role-$s"$'\n'
+    else
+      want+="$s sentinel-DB_USER sentinel-DB_PASSWORD"$'\n'
+    fi
+  done
+  if [[ "$got"$'\n' == "$want" ]]; then
+    record yes "$label"
+  else
+    record no "$label"
+    diff <(printf '%s' "$want") <(printf '%s\n' "$got") | sed 's/^/        /' || true
+  fi
+}
+
+if docker compose version >/dev/null 2>&1; then
+  got="$(resolve_db "$TMPDIR_TEST/db_none")"
+  expect_db "resolved: with no switch set, all four keep the admin pair (no change on merge)" "$got"
+  got="$(resolve_db "$TMPDIR_TEST/db_one" commander)"
+  expect_db "resolved: switching commander moves commander alone" "$got" commander
+  # shellcheck disable=SC2086
+  got="$(resolve_db "$TMPDIR_TEST/db_all" $DB_SERVICES)"
+  # shellcheck disable=SC2086
+  expect_db "resolved: all four switched, each holds only its own role password" "$got" $DB_SERVICES
+  if [[ "$got" != *sentinel-DB_PASSWORD* ]]; then
+    record yes "resolved: all four switched, none holds the admin DB_PASSWORD"
+  else
+    record no "resolved: all four switched, none holds the admin DB_PASSWORD"
+  fi
+else
+  echo "  SKIP  resolved DB logins: docker compose is not available"
+fi
+
 echo
 echo "compose_secret_scope_unit: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
