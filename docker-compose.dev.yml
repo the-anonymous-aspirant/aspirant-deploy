@@ -80,8 +80,12 @@ services:
       # .env also holds JWT_SECRET, which signs session tokens, and the
       # break-glass token, and those belong to `server` alone (system_3 #9313;
       # tests/compose_secret_scope_unit.sh).
-      DB_USER: "${DB_USER}"
-      DB_PASSWORD: "${DB_PASSWORD}"
+      # DB login: its own role (aspirant_transcriber) once cut over, i.e. once
+      # ASPIRANT_TRANSCRIBER_DB_USER and _DB_LOGIN_PASSWORD are set in .env;
+      # the admin pair until then and after a rollback (system_3 #9320;
+      # docs/OPERATIONS.md, "Per-service database roles").
+      DB_USER: "${ASPIRANT_TRANSCRIBER_DB_USER:-${DB_USER}}"
+      DB_PASSWORD: "${ASPIRANT_TRANSCRIBER_DB_LOGIN_PASSWORD:-${DB_PASSWORD}}"
       DB_NAME: "${DB_NAME}"
       AUDIO_STORAGE_PATH: /data/audio
       WHISPER_MODEL: base
@@ -105,8 +109,12 @@ services:
       # .env also holds JWT_SECRET, which signs session tokens, and the
       # break-glass token, and those belong to `server` alone (system_3 #9313;
       # tests/compose_secret_scope_unit.sh).
-      DB_USER: "${DB_USER}"
-      DB_PASSWORD: "${DB_PASSWORD}"
+      # DB login: its own role (aspirant_commander) once cut over, i.e. once
+      # ASPIRANT_COMMANDER_DB_USER and _DB_LOGIN_PASSWORD are set in .env;
+      # the admin pair until then and after a rollback (system_3 #9320;
+      # docs/OPERATIONS.md, "Per-service database roles").
+      DB_USER: "${ASPIRANT_COMMANDER_DB_USER:-${DB_USER}}"
+      DB_PASSWORD: "${ASPIRANT_COMMANDER_DB_LOGIN_PASSWORD:-${DB_PASSWORD}}"
       DB_NAME: "${DB_NAME}"
       VALUATION_BACKFILL_OWNER_ID: "${VALUATION_BACKFILL_OWNER_ID:-}"
       ASPIRANT_SIGNAL_RO_PASSWORD: "${ASPIRANT_SIGNAL_RO_PASSWORD:-}"
@@ -195,8 +203,12 @@ services:
       # .env also holds JWT_SECRET, which signs session tokens, and the
       # break-glass token, and those belong to `server` alone (system_3 #9313;
       # tests/compose_secret_scope_unit.sh).
-      DB_USER: "${DB_USER}"
-      DB_PASSWORD: "${DB_PASSWORD}"
+      # DB login: its own role (aspirant_advisor) once cut over, i.e. once
+      # ASPIRANT_ADVISOR_DB_USER and _DB_LOGIN_PASSWORD are set in .env;
+      # the admin pair until then and after a rollback (system_3 #9320;
+      # docs/OPERATIONS.md, "Per-service database roles").
+      DB_USER: "${ASPIRANT_ADVISOR_DB_USER:-${DB_USER}}"
+      DB_PASSWORD: "${ASPIRANT_ADVISOR_DB_LOGIN_PASSWORD:-${DB_PASSWORD}}"
       DB_NAME: "${DB_NAME}"
       DB_HOST: postgres
       OLLAMA_URL: http://ollama:11434
@@ -223,8 +235,12 @@ services:
       # .env also holds JWT_SECRET, which signs session tokens, and the
       # break-glass token, and those belong to `server` alone (system_3 #9313;
       # tests/compose_secret_scope_unit.sh).
-      DB_USER: "${DB_USER}"
-      DB_PASSWORD: "${DB_PASSWORD}"
+      # DB login: its own role (aspirant_browser) once cut over, i.e. once
+      # ASPIRANT_BROWSER_DB_USER and _DB_LOGIN_PASSWORD are set in .env;
+      # the admin pair until then and after a rollback (system_3 #9320;
+      # docs/OPERATIONS.md, "Per-service database roles").
+      DB_USER: "${ASPIRANT_BROWSER_DB_USER:-${DB_USER}}"
+      DB_PASSWORD: "${ASPIRANT_BROWSER_DB_LOGIN_PASSWORD:-${DB_PASSWORD}}"
       DB_NAME: "${DB_NAME}"
       DB_HOST: postgres
       BROWSER_FLOW_DATA_DIR: /data/aspirant/browser_flows
