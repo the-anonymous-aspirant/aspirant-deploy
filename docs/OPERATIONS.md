@@ -227,7 +227,59 @@ Every mode refuses to proceed in any of these cases:
 - a table exists in both places;
 - the order is wrong: move commander before transcriber, and unmove transcriber before commander, because commander reads `voice_messages`.
 
-A superuser session searches only `public`. So a service must already be connecting as its own role when its tables move, and must be back on the superuser when they move back. The cutover is per service: stop it, `move` it, start it as its role (system_3 #9320 has the compose side and the runbook).
+A superuser session searches only `public`. So a service must already be connecting as its own role when its tables move, and must be back on the superuser when they move back. The cutover is per service: stop it, `move` it, start it as its role.
+
+#### Which login a service uses
+
+Each of the four reads `DB_USER`/`DB_PASSWORD` from a per-service switch in `.env` (system_3 #9320):
+
+| `.env` | the service logs in as |
+|---|---|
+| no `ASPIRANT_<SVC>_DB_USER` line (the default) | the admin pair, `DB_USER`/`DB_PASSWORD`: today's behaviour, and the rollback state |
+| `ASPIRANT_<SVC>_DB_USER=aspirant_<svc>` and `ASPIRANT_<SVC>_DB_LOGIN_PASSWORD=${ASPIRANT_<SVC>_DB_PASSWORD}` | its own role |
+
+The default is the admin pair on purpose. `auto-pull.sh` runs compose from this checkout. A role default would start a service as its role before its tables move, and its startup would then create empty tables in its schema. Or, while the role passwords are unset, it would make every compose command fail. The second line is a reference that compose resolves from the line above it, not a second copy of the secret. `db-roles.sh` reads only `ASPIRANT_<SVC>_DB_PASSWORD`. `tests/compose_secret_scope_unit.sh` pins all of this:
+- the switch is the default;
+- one switch moves one service;
+- with all four switched, none of them holds the admin password.
+
+#### Cutover, one service at a time
+
+The order is commander, transcriber, advisor, browser. Commander goes before transcriber because of `move`'s ordering rule above.
+
+```bash
+cd ~/aspirant-deploy
+touch .maintenance-pause            # auto-pull stays out of the way
+./scripts/db-roles.sh               # provision: idempotent; needs the four passwords in .env
+
+svc=commander; S="${svc^^}"         # then transcriber, advisor, browser
+docker compose stop "$svc"
+./scripts/db-roles.sh move "$svc"
+printf 'ASPIRANT_%s_DB_USER=aspirant_%s\nASPIRANT_%s_DB_LOGIN_PASSWORD=${ASPIRANT_%s_DB_PASSWORD}\n' \
+  "$S" "$svc" "$S" "$S" >> .env
+docker compose up -d "$svc"
+docker compose ps "$svc"            # healthy within its start period
+docker compose exec -T postgres sh -c \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "select usename, count(*) from pg_stat_activity group by 1 order by 1"'
+                                    # aspirant_<svc> appears with its connections
+
+rm .maintenance-pause               # after the last service
+```
+
+If a service doesn't come up healthy as its role, roll that one service back (below) before moving on.
+
+#### Rollback of one service
+
+The order is the reverse: transcriber before commander. The service is stopped while its tables move back, so it never runs as the superuser against its own schema, or as its role against `public`.
+
+```bash
+cd ~/aspirant-deploy
+svc=transcriber; S="${svc^^}"
+docker compose stop "$svc"
+sed -i "/^ASPIRANT_${S}_DB_\(USER\|LOGIN_PASSWORD\)=/d" .env
+./scripts/db-roles.sh unmove "$svc"
+docker compose up -d "$svc"         # on the admin pair again
+```
 
 ```bash
 cd ~/aspirant-deploy
