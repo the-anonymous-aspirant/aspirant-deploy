@@ -61,7 +61,7 @@ once promotion succeeds; neither is ever read or written again after that.
 |---|---|---|
 | `claimed_sha256` | yes | What #9547's `complete` step computed over the assembled bytes. **Untrusted** — §2 below re-verifies it with an independent streamed read before anything is promoted. |
 | `bucket` | yes | The intake bucket the operator uploaded into (one of the five #9547 defines: `photos`, `docs`, `finance`, `medical`, `general`). Recorded on the promoted row as `dataset_id = "explorer-upload:<bucket>"` (see "Dataset id" below). |
-| `sensitivity` | yes | `high` / `normal`, per #9547's bucket→sensitivity map (`photos`/`finance`/`medical` → `high`, `docs`/`general` → `normal`). Passed through `catalog.resolve_sensitivity`, so a missing or malformed value still fails closed to `high` here, the same as a real-data manifest. |
+| `sensitivity` | yes | `high` / `normal`, per #9547's bucket→sensitivity map (`photos`/`finance`/`medical` → `high`, `docs`/`general` → `normal`). **Not trusted on its own** (security review c63351): the runner keeps its own copy of the same map and promotes under the STRICTER of this declared value and the map's — a manifest claiming `normal` for a `medical` upload still promotes `high`. Passed through `catalog.resolve_sensitivity` first, so a missing or malformed value also fails closed to `high`, the same as a real-data manifest. |
 | `source_filename` | yes | The name the operator gave the file. Recorded as `asset_inventory.source_path`. |
 | `mime` | yes | The sniffed content type (#9547 validates this against `bucket`, not this runner). Also used to derive `asset_inventory.kind`. |
 | `size_bytes` | yes | The claimed size. **Not trusted for the catalog row** — the row's `size_bytes` is the byte count actually observed on the streamed re-read (§2), the same "size is of the bytes actually handled" property `lake_ingest.py` keeps. Kept in the manifest as part of the upload's own record, and available for a future cross-check. |
@@ -82,13 +82,21 @@ need: a local manifest path is something the operator already trusted by
 writing it down; an upload is a claim made over the network by whatever client
 called #9547, worth exactly as much as the server-side check that confirms it.
 
-`sensitivity=high` promotion re-verifies a *second* time, independently: the
-streamed encrypt pass (§2 below) also hashes the plaintext it reads and
-confirms it still matches `claimed_sha256` before the spooled ciphertext is
-trusted enough to PUT. Two reads, two independent checks — not an
-optimisation away from one, because the object sits in a bucket this runner's
-own key can read and write, and nothing else guarantees the bytes did not
-change between the first GET and the second.
+Every promotion path re-verifies a *second* time, independently, after the
+first check — not an optimisation away from it, because the object sits in a
+bucket this runner's own key can read and write, and nothing guarantees the
+bytes did not change between the first check and the write that follows it
+(security review c63351 on #9758 found this gap on the `normal` path before
+merge):
+
+- `sensitivity=high`: the streamed encrypt pass (§2 below) hashes the
+  plaintext it reads and confirms it still matches `claimed_sha256` before
+  the spooled ciphertext is trusted enough to PUT.
+- `sensitivity=normal`: after the server-side `copy_object`, the runner
+  re-hashes the **destination** — the bronze object — and refuses (deleting
+  the bad bronze object) on a mismatch. This is the authoritative check: the
+  uploader's key cannot write bronze, so a hash of what actually landed there
+  cannot be raced the way a second read of the staging-side object could be.
 
 ### 2. `normal` is a server-side copy; `high` is a streamed `/scratch` spool
 
@@ -120,6 +128,16 @@ A crash between any two steps is recoverable on the next run:
   is already in the catalog's skip set. The next run recognises this (it is
   the one case where a known digest is *not* simply skipped) and finishes the
   delete that the crashed run did not reach.
+
+Each upload's verify-promote-row-delete sequence runs inside one exception
+guard: ANY failure in it — a hash mismatch, a malformed manifest field a
+format check let through, a backend error, anything this runner did not
+specifically anticipate — is recorded against that `upload_id` and the run
+continues to the next one, ending `partial`. Earlier versions of this runner
+caught only the two or three failure shapes its own tests exercised, which
+meant an uploader-shaped edge case (a missing `object`, a non-string
+`claimed_sha256`) could abort the whole run with no ledger row at all
+(security review c63351).
 
 A `high` upload's fail-closed KEK refusal is checked in a pre-flight pass over
 every staged manifest, before a single object GET — the same reasoning as
