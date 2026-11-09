@@ -203,3 +203,18 @@ Two levels, one automated now and one operator-invoked:
   row; the explorer read path unwraps in memory to serve them.
 - The `kek_version` → KEK-from-custody resolver is the one piece #4134 must wire
   to the actual custody medium the operator chose in §3.
+
+## 8. Known residual: swap
+
+§0's "never at rest on the cell's disks" and §10354's fix (the KEK now travels
+to a container by a 0600 tmpfs file, never `-e`) both stop short of swap. This
+cell's `/swap.img` sits on the same unencrypted root LV as `/var/lib/docker`
+(`lsblk`, read 2026-11-09), 4G, full at the time #10354 checked it. Any
+process's memory — including a loaded KEK, in `kek_loader`'s own
+`_LOADED` dict or in a wrapper's tmpfs file if the kernel ever paged tmpfs out
+(it can) — can in principle be written to that unencrypted swap under memory
+pressure. Fixing this means either encrypted swap or `mlock`-ing the KEK's
+pages (and tmpfs pages are already resident, not swappable, by design on most
+configurations, but this has not been verified on this cell). Out of scope
+for #10354; noted here per that task's own residual-scope call so it is not
+mistaken for an oversight.

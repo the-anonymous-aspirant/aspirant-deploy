@@ -122,14 +122,27 @@ services:
       EXPLORER_S3_STAGING_SECRET_KEY: ${EXPLORER_S3_STAGING_SECRET_KEY:-}
       LAKE_CATALOG_RO_DSN: ${LAKE_CATALOG_RO_DSN:-}
       # KEK for layer-2 envelope encryption of sensitivity=high blobs (§9, #4134).
-      # One-shot, off-cell hex — never on disk. Defaulted rather than `:?` so a
-      # skeleton with no high-sensitivity data still seeds; the fixtures loader
-      # fails closed only when it actually reaches a high blob without a KEK. For
-      # the synthetic skeleton a throwaway synthetic KEK is fine.
+      # Defaulted rather than `:?` so a skeleton with no high-sensitivity data
+      # still seeds; the fixtures loader fails closed only when it actually
+      # reaches a high blob without a KEK.
+      #
+      # `seed` writes a throwaway synthetic KEK, for which plain env is fine
+      # and stays as the tests-and-synthetic-skeleton-only path (#10354).
+      # `ingest` (`stage_real_kek` in lake-skeleton.sh) handles a REAL KEK
+      # instead: it unsets `LAKE_KEK_HEX` in its own shell before calling
+      # `compose`, so this line reads empty for that run, and writes the hex
+      # to a 0600 tmpfs file whose path it exports as `LAKE_KEK_FILE_HOST` —
+      # read below by the volume line, never by `-e`.
       LAKE_KEK_HEX: ${LAKE_KEK_HEX:-}
+      LAKE_KEK_FILE: ${LAKE_KEK_FILE_HOST:+/run/secrets/lake_kek}
       LAKE_KEK_FINGERPRINT: ${LAKE_KEK_FINGERPRINT:-}
       LAKE_KEK_VERSION: ${LAKE_KEK_VERSION:-1}
     volumes:
+      # The real-KEK file `stage_real_kek` wrote, read-only (#10354). Falls
+      # back to /dev/null when no real KEK is staged (`seed`, or `ingest`
+      # with none set), which `kek_loader.load_kek_from_file` never reads
+      # because `LAKE_KEK_FILE` above is empty in that case.
+      - ${LAKE_KEK_FILE_HOST:-/dev/null}:/run/secrets/lake_kek:ro
       - ./scripts/lake_skeleton_verify.py:/work/verify.py:ro
       - ./scripts/lake_skeleton_fixtures.py:/work/fixtures.py:ro
       # The at-rest checker (#4299 / #4273-A1), layer 2 of #4273. Mounted at

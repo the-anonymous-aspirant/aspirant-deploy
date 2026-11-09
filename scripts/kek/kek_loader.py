@@ -36,13 +36,23 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 from typing import Callable
 
 KEY_LEN = 32  # AES-256 — must match dek_envelope.KEY_LEN
 FINGERPRINT_HEX_LEN = 16  # sha256(KEK).hexdigest()[:16], per gen-kek.sh
 
 #: One-shot env var a non-interactive launcher sets to the grouped/plain hex.
+#: Kept for tests and the synthetic skeleton only (#10354) — a real KEK now
+#: travels by `ENV_KEK_FILE` instead, because dockerd persists `-e` values to
+#: this container's config under `/var/lib/docker/containers/<id>/`, on disk,
+#: for as long as the container exists (confirmed c63426 on #10354), and
+#: `docker inspect` shows an env var to every member of the `docker` group.
 ENV_KEK_HEX = "LAKE_KEK_HEX"
+#: One-shot env var naming a file to read the hex from instead, once, at
+#: startup. The file's bytes are never logged. Preferred over `ENV_KEK_HEX`
+#: when both are set, since a real KEK should arrive this way (#10354).
+ENV_KEK_FILE = "LAKE_KEK_FILE"
 #: Optional env var carrying the ceremony fingerprint to verify the loaded KEK.
 ENV_KEK_FINGERPRINT = "LAKE_KEK_FINGERPRINT"
 
@@ -144,6 +154,40 @@ def load_kek_from_env(
     return kek
 
 
+def load_kek_from_file(
+    var: str = ENV_KEK_FILE,
+    expected_fingerprint: str | None = None,
+) -> bytes | None:
+    """Load the KEK from a file named by a one-shot env var, or None if unset.
+
+    Read once at startup; the file's contents are never logged. The launcher
+    is responsible for the file's lifetime (write it to tmpfs, delete it on
+    every exit path — #10354). Refuses a file that is group- or world-
+    readable: a key file loose enough for another user on the box to read
+    defeats the point of moving it off `-e` in the first place.
+    """
+    path = os.environ.get(var)
+    if path is None or path == "":
+        return None
+    try:
+        mode = os.stat(path).st_mode
+    except OSError as exc:
+        raise KekLoadError(f"cannot stat KEK file {path!r}: {exc}") from exc
+    if mode & (stat.S_IRGRP | stat.S_IROTH):
+        raise KekLoadError(
+            f"refusing to read KEK file {path!r}: it is group- or "
+            "world-readable (must be 0600 or stricter)"
+        )
+    try:
+        with open(path, "r", encoding="ascii") as fh:
+            text = fh.read()
+    except OSError as exc:
+        raise KekLoadError(f"cannot read KEK file {path!r}: {exc}") from exc
+    kek = parse_grouped_hex(text)
+    _verify_fingerprint(kek, expected_fingerprint)
+    return kek
+
+
 def load_kek_from_token(*_args, **_kwargs) -> bytes:  # pragma: no cover - seam
     """Hardware-token custody path — a named seam, not wired for phase 0b.
 
@@ -200,7 +244,8 @@ def require_kek(
 ) -> bytes:
     """Load the KEK at process start and install it, or raise to abort startup.
 
-    Prefers the one-shot env var (non-interactive start), falls back to the
+    Prefers the KEK file (the real-KEK path, #10354), then the one-shot env
+    var (tests and the synthetic skeleton only), then falls back to the
     hidden prompt (operator over SSH). The fingerprint is taken from the
     `expected_fingerprint` argument or, when absent, the `LAKE_KEK_FINGERPRINT`
     env var. Call this from the process's boot hook and do NOT catch the
@@ -209,7 +254,9 @@ def require_kek(
     if expected_fingerprint is None:
         expected_fingerprint = os.environ.get(ENV_KEK_FINGERPRINT) or None
 
-    kek = load_kek_from_env(expected_fingerprint=expected_fingerprint)
+    kek = load_kek_from_file(expected_fingerprint=expected_fingerprint)
+    if kek is None:
+        kek = load_kek_from_env(expected_fingerprint=expected_fingerprint)
     if kek is None:
         kek = load_kek_written_down(
             expected_fingerprint=expected_fingerprint, prompt=prompt
@@ -287,6 +334,53 @@ def _self_test() -> int:
         )
     finally:
         os.environ.pop(ENV_KEK_HEX, None)
+
+    # File path: unset -> None; a 0600 file -> the KEK; a 0644 file refused.
+    os.environ.pop(ENV_KEK_FILE, None)
+    check("file source returns None when unset", load_kek_from_file() is None)
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(mode="w", delete=False) as tf:
+        tf.write(grouped)
+        tf_path = tf.name
+    try:
+        os.chmod(tf_path, 0o600)
+        os.environ[ENV_KEK_FILE] = tf_path
+        check(
+            "file source returns the KEK when set to a 0600 file",
+            load_kek_from_file(expected_fingerprint=fp) == kek,
+        )
+        os.chmod(tf_path, 0o644)
+        try:
+            load_kek_from_file()
+            check("group/world-readable KEK file is refused", False)
+        except KekLoadError:
+            check("group/world-readable KEK file is refused", True)
+    finally:
+        os.environ.pop(ENV_KEK_FILE, None)
+        os.chmod(tf_path, 0o600)
+        os.unlink(tf_path)
+
+    # require_kek prefers the file over the env var when both are set.
+    with tempfile.NamedTemporaryFile(mode="w", delete=False) as tf:
+        tf.write(grouped)
+        tf_path = tf.name
+    try:
+        os.chmod(tf_path, 0o600)
+        os.environ[ENV_KEK_FILE] = tf_path
+        os.environ[ENV_KEK_HEX] = "00" * KEY_LEN  # a different, wrong key
+        reset_loaded()
+        try:
+            check(
+                "require_kek prefers the file over the env var",
+                require_kek(expected_fingerprint=fp) == kek,
+            )
+        finally:
+            reset_loaded()
+    finally:
+        os.environ.pop(ENV_KEK_FILE, None)
+        os.environ.pop(ENV_KEK_HEX, None)
+        os.unlink(tf_path)
 
     # Fail-closed resolver: raises before any KEK is installed.
     reset_loaded()
