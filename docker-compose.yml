@@ -165,6 +165,14 @@ services:
       # while the dir carries no *.conf; the secret lands at the operator's
       # B4 flip. Read-only: the client must never write secrets.
       - /data/aspirant/nginx-secrets:/etc/nginx/secrets:ro
+    # Dual-homed (system_3 #10353, the penpot-frontend pattern above): still
+    # needs `default` for everything else it proxies, and `explorer_api` is
+    # the one bridge that can reach `explorer-api` at all now that it is off
+    # `default` — `default.conf`'s `set $upstream_explorer_api
+    # explorer-api:8000` resolves only on a network both containers share.
+    networks:
+      - default
+      - explorer_api
 
   client-green:
     logging: *default-logging
@@ -181,6 +189,9 @@ services:
     restart: unless-stopped
     volumes:
       - /data/aspirant/nginx-secrets:/etc/nginx/secrets:ro
+    networks:
+      - default
+      - explorer_api
 
   transcriber:
     logging: *default-logging
@@ -638,7 +649,15 @@ services:
       LAKE_S3_STAGING_ACCESS_KEY_ID: ${EXPLORER_S3_STAGING_ACCESS_KEY:-}
       LAKE_S3_STAGING_SECRET_ACCESS_KEY: ${EXPLORER_S3_STAGING_SECRET_KEY:-}
     networks:
-      - default
+      # NOT `default` (system_3 #10353, the penpot pattern below): this has
+      # no auth of its own ("No auth here on purpose" in nginx/explorer.conf —
+      # the gate is client-nginx's own auth_request in front of it), and
+      # `default` is shared with 14 other containers, any of which could
+      # otherwise call it with no login. Once a KEK is loaded (#8813), that
+      # read would be the operator's decrypted mail. `explorer_api` carries
+      # only the client-nginx slots that proxy `/admin/explorer/api/` and
+      # this service itself — see that network's own comment below.
+      - explorer_api
       - lake
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
@@ -693,6 +712,15 @@ networks:
   # Never mapped to the host. See docker-socket-proxy service comment.
   docker_proxy_net:
     internal: true
+  # explorer-api's own bridge (system_3 #10353, security review #8813 D1),
+  # the penpot pattern above applied the other way round: there, only
+  # penpot-frontend is dual-homed and its backend/postgres/redis are
+  # peers-only; here, `explorer-api` has no peer of its own, so it is the
+  # dual-homed member instead — reachable only from client-blue/-green (the
+  # containers that proxy `/admin/explorer/api/`) and from itself. No other
+  # service joins this network. Re-derive before the explorer gets a
+  # decryption key loosens this further than client-nginx's own admin login.
+  explorer_api:
   # Penpot sub-stack bridge. Only penpot-frontend is dual-homed onto
   # `default` (for the client-nginx vhost proxy); backend, exporter,
   # postgres and redis are reachable solely from penpot peers.
