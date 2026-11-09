@@ -53,6 +53,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -104,6 +105,25 @@ REQUIRED_MANIFEST_FIELDS = (
     "size_bytes", "upload_time",
 )
 
+#: #9547's own bucket -> sensitivity map, duplicated here (security review of
+#: this PR, c63351): the map is applied once at upload time (#9547) but this
+#: runner is the last check before bronze, and a manifest's own `sensitivity`
+#: field is exactly as untrusted as its `claimed_sha256` — both are written by
+#: the same caller. An upload promotes under the STRICTER of its declared
+#: sensitivity and this map, never the looser one. An unrecognised bucket maps
+#: to `high`, matching `catalog.resolve_sensitivity`'s own fail-closed default.
+BUCKET_SENSITIVITY = {
+    "photos": catalog.SENSITIVITY_HIGH,
+    "finance": catalog.SENSITIVITY_HIGH,
+    "medical": catalog.SENSITIVITY_HIGH,
+    "docs": catalog.SENSITIVITY_NORMAL,
+    "general": catalog.SENSITIVITY_NORMAL,
+}
+
+#: `claimed_sha256` must look like a sha256 hex digest before it is ever used
+#: as a dict key or a blob-key component (security review c63351).
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+
 #: Streamed-read chunk size for both the verify pass and the encrypt pass.
 #: Bounds resident memory near one chunk regardless of object size (#9546-A1).
 STREAM_CHUNK = 8 * 1024 * 1024
@@ -131,6 +151,18 @@ class SpoolMismatchError(RuntimeError):
     claimed digest — a second, independent check of the same property
     `verify_staged_object` already checked once, closing the gap between that
     read and this one."""
+
+
+class CopyMismatchError(RuntimeError):
+    """The bronze copy of a `normal` object, re-hashed after `copy_object`,
+    does not match the claimed digest (security review c63351).
+
+    `verify_staged_object`'s read and the server-side copy are two separate
+    moments; anything that overwrites the staged object in between is copied
+    under the content address of the bytes it replaced. Re-hashing the
+    DESTINATION closes this: the uploader's key cannot write bronze, so that
+    read is final regardless of what happened to the staging copy.
+    """
 
 
 def _kind_for(mime: str) -> str:
@@ -204,7 +236,39 @@ def read_manifest(s3, staging_bucket: str, upload_id: str) -> dict[str, Any]:
     missing = [field for field in REQUIRED_MANIFEST_FIELDS if field not in raw]
     if missing:
         raise ManifestError(f"upload {upload_id}: manifest missing required field(s) {missing}")
+
+    # Type/format validation (security review c63351): a manifest is as
+    # untrusted as the upload it describes. Catching a malshaped field here,
+    # where it is one failed upload, is the whole point — the alternative is
+    # discovering it as a TypeError on `in known` or an AttributeError on
+    # `.startswith()` after bronze has already been written.
+    if not isinstance(raw["claimed_sha256"], str) or not _SHA256_HEX_RE.match(raw["claimed_sha256"]):
+        raise ManifestError(
+            f"upload {upload_id}: claimed_sha256 is not a 64-character hex digest: "
+            f"{raw['claimed_sha256']!r}"
+        )
+    for field in ("bucket", "sensitivity", "source_filename", "mime", "upload_time"):
+        if not isinstance(raw[field], str) or not raw[field]:
+            raise ManifestError(f"upload {upload_id}: {field} must be a non-empty string, got {raw[field]!r}")
+    if not isinstance(raw["size_bytes"], int) or isinstance(raw["size_bytes"], bool) or raw["size_bytes"] < 0:
+        raise ManifestError(f"upload {upload_id}: size_bytes must be a non-negative integer, got {raw['size_bytes']!r}")
     return raw
+
+
+def resolve_upload_sensitivity(manifest: dict[str, Any]) -> tuple[str, str]:
+    """The sensitivity an upload promotes under, and why.
+
+    The STRICTER of the manifest's own declared `sensitivity` (fail-closed via
+    `catalog.resolve_sensitivity`) and `BUCKET_SENSITIVITY[bucket]` — never the
+    looser one (security review c63351). Both inputs come from the same
+    untrusted manifest; a writer that declares `normal` for a `medical` upload
+    must not get a plaintext write just because it said so.
+    """
+    declared, declared_source = catalog.resolve_sensitivity(manifest["sensitivity"])
+    mapped = BUCKET_SENSITIVITY.get(manifest["bucket"], catalog.SENSITIVITY_HIGH)
+    if mapped == catalog.SENSITIVITY_HIGH and declared != catalog.SENSITIVITY_HIGH:
+        return catalog.SENSITIVITY_HIGH, f"defaulted:bucket_map_overrides:{manifest['bucket']}"
+    return declared, declared_source
 
 
 def manifests_need_kek(manifests: dict[str, dict[str, Any]]) -> bool:
@@ -214,7 +278,7 @@ def manifests_need_kek(manifests: dict[str, dict[str, Any]]) -> bool:
     refusal possible before any byte moves.
     """
     return any(
-        catalog.resolve_sensitivity(m["sensitivity"])[0] == catalog.SENSITIVITY_HIGH
+        resolve_upload_sensitivity(m)[0] == catalog.SENSITIVITY_HIGH
         for m in manifests.values()
     )
 
@@ -251,12 +315,34 @@ def verify_staged_object(s3, staging_bucket: str, upload_id: str, claimed_sha256
 
 def promote_normal(s3, staging_bucket: str, bucket: str, upload_id: str, digest: str) -> str:
     """Server-side copy: bronze is the destination, this process is never in
-    the data path for a `normal` object."""
+    the data path for the bytes themselves.
+
+    `verify_staged_object`'s earlier read and this copy are two separate
+    moments on the staging side, so the copy is re-verified at its
+    DESTINATION afterward (security review c63351): the uploader's key
+    cannot write bronze, so a hash of the bronze object is final regardless
+    of what happened to the staging copy in between. A mismatch deletes the
+    bronze object and raises — nothing is left half-promoted.
+    """
     key = _blob_key(digest)
     s3.copy_object(
         Bucket=bucket, Key=key,
         CopySource={"Bucket": staging_bucket, "Key": _object_key(upload_id)},
     )
+    verify_body = s3.get_object(Bucket=bucket, Key=key)["Body"]
+    actual = hashlib.sha256()
+    while True:
+        chunk = verify_body.read(STREAM_CHUNK)
+        if not chunk:
+            break
+        actual.update(chunk)
+    if actual.hexdigest() != digest:
+        s3.delete_object(Bucket=bucket, Key=key)
+        raise CopyMismatchError(
+            f"upload {upload_id}: the bronze copy does not match the claimed sha256 "
+            f"— the staged object changed between verify and copy; the bronze object "
+            f"was deleted and nothing was catalogued"
+        )
     return key
 
 
@@ -398,67 +484,73 @@ def promote(
             summary["skipped"] += 1
             continue
 
-        matched, actual_size = verify_staged_object(s3, staging_bucket, upload_id, claimed_sha256)
-        if not matched:
-            summary["failed"].append(
-                {"upload_id": upload_id, "error": "claimed sha256 does not match the staged object's bytes"}
-            )
-            continue
-
-        sensitivity, sensitivity_source = catalog.resolve_sensitivity(manifest["sensitivity"])
+        sensitivity, sensitivity_source = resolve_upload_sensitivity(manifest)
         is_high = sensitivity == catalog.SENSITIVITY_HIGH
 
         if is_high and kek is None:
             # Belt and braces over the pre-flight, as in lake_ingest.py: this
             # reads the resolved decision for the upload actually in hand.
+            # NOT inside the broad per-upload guard below — a systemic
+            # refusal aborts the whole run, it is never "one failed upload".
             finish(catalog.RUN_STATUS_FAILED)
             raise MissingKekError(
                 f"refusing to promote sensitivity=high upload {upload_id} with no KEK loaded"
             )
 
-        if dry_run:
-            known.add(claimed_sha256)
-            summary["written_high" if is_high else "written_normal"] += 1
-            summary["bytes_promoted"] += actual_size
-            continue
+        # Everything from here is per-upload: ANY exception — a verify
+        # mismatch, a spool mismatch, a copy mismatch, or anything this
+        # function did not anticipate (a missing staged object, a backend
+        # error) — is recorded against this upload_id and the run continues
+        # to the next one (property 3; security review c63351 P2, which found
+        # several uncaught-exception paths that previously aborted the whole
+        # run with no ledger row).
+        try:
+            matched, actual_size = verify_staged_object(s3, staging_bucket, upload_id, claimed_sha256)
+            if not matched:
+                raise ValueError("claimed sha256 does not match the staged object's bytes")
 
-        if is_high:
-            try:
+            if dry_run:
+                known.add(claimed_sha256)
+                summary["written_high" if is_high else "written_normal"] += 1
+                summary["bytes_promoted"] += actual_size
+                continue
+
+            if is_high:
                 object_key, wrapped_dek = promote_high(
                     s3, staging_bucket, bucket, upload_id, claimed_sha256, kek, kek_version, spool_dir
                 )
-            except SpoolMismatchError as exc:
-                summary["failed"].append({"upload_id": upload_id, "error": str(exc)})
-                continue
-        else:
-            object_key = promote_normal(s3, staging_bucket, bucket, upload_id, claimed_sha256)
-            wrapped_dek = None
+            else:
+                object_key = promote_normal(s3, staging_bucket, bucket, upload_id, claimed_sha256)
+                wrapped_dek = None
 
-        # Row, then delete — the row is the commit marker (property 2); the
-        # staged copy is cleanup, not the record of what happened.
-        store.add_asset(
-            catalog.asset_row(
-                sha256=claimed_sha256,
-                object_key=object_key,
-                source_path=manifest["source_filename"],
-                mime=manifest["mime"],
-                size_bytes=actual_size,
-                kind=_kind_for(manifest["mime"]),
-                sensitivity=sensitivity,
-                sensitivity_source=sensitivity_source,
-                wrapped_dek=wrapped_dek,
-                ingested_at=promoted_at,
-                ingest_run_id=run_id,
-                dataset_id=f"explorer-upload:{manifest['bucket']}",
-                kek_version=kek_version if is_high else None,
+            # Row, then delete — the row is the commit marker (property 2);
+            # the staged copy is cleanup, not the record of what happened.
+            store.add_asset(
+                catalog.asset_row(
+                    sha256=claimed_sha256,
+                    object_key=object_key,
+                    source_path=manifest["source_filename"],
+                    mime=manifest["mime"],
+                    size_bytes=actual_size,
+                    kind=_kind_for(manifest["mime"]),
+                    sensitivity=sensitivity,
+                    sensitivity_source=sensitivity_source,
+                    wrapped_dek=wrapped_dek,
+                    ingested_at=promoted_at,
+                    ingest_run_id=run_id,
+                    dataset_id=f"explorer-upload:{manifest['bucket']}",
+                    kek_version=kek_version if is_high else None,
+                )
             )
-        )
-        s3.delete_object(Bucket=staging_bucket, Key=_object_key(upload_id))
-        s3.delete_object(Bucket=staging_bucket, Key=_manifest_key(upload_id))
+            s3.delete_object(Bucket=staging_bucket, Key=_object_key(upload_id))
+            s3.delete_object(Bucket=staging_bucket, Key=_manifest_key(upload_id))
 
-        known.add(claimed_sha256)
-        summary["written_high" if is_high else "written_normal"] += 1
-        summary["bytes_promoted"] += actual_size
+            known.add(claimed_sha256)
+            summary["written_high" if is_high else "written_normal"] += 1
+            summary["bytes_promoted"] += actual_size
+        except Exception as exc:  # noqa: BLE001 - property 3: one bad upload, not the whole run
+            summary["failed"].append({"upload_id": upload_id, "error": f"{type(exc).__name__}: {exc}"})
+            continue
 
     if summary["failed"]:
         return finish(catalog.RUN_STATUS_PARTIAL)

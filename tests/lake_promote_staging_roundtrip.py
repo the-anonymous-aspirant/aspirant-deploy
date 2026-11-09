@@ -451,6 +451,175 @@ def test_listing_and_manifest_validation():
 
 
 # --------------------------------------------------------------------------
+# Security review (c63351 on #9758): P1 and the two P2s.
+# --------------------------------------------------------------------------
+
+
+def test_overwrite_between_verify_and_copy_is_caught(kek):
+    """P1: the staged object changes after `verify_staged_object` reads it,
+    before `copy_object` runs. The bronze copy must be re-hashed at its
+    destination and refused, not trusted because an earlier read matched."""
+    s3, bronze, staging = fresh_buckets()
+    store = fresh_store()
+
+    benign = INVOICE
+    swapped = PHOTO
+    stage_upload(s3, staging, "upload-swap", benign, bucket="docs", sensitivity="normal")
+
+    # `verify_staged_object`'s read (a `get_object`) happens first and
+    # matches honestly — the staged bytes are still the benign ones at that
+    # point. The race is between THAT read finishing and `copy_object`
+    # running: `copy_object` is its own server-side S3 operation, not routed
+    # through this client's `get_object` at all, so the swap has to patch
+    # `copy_object` itself to land the bytes a moment before Garage's
+    # server-side copy reads its source.
+    real_copy_object = s3.copy_object
+    target_key = promote_mod._object_key("upload-swap")
+
+    def swapping_copy_object(**kwargs):
+        source = kwargs.get("CopySource") or {}
+        if source.get("Key") == target_key:
+            s3.put_object(Bucket=staging, Key=target_key, Body=swapped)
+        return real_copy_object(**kwargs)
+
+    s3.copy_object = swapping_copy_object
+    try:
+        with tempfile.TemporaryDirectory() as spool_dir:
+            summary = promote_mod.promote(
+                s3=s3, staging_bucket=staging, bucket=bronze, store=store,
+                kek=kek, spool_dir=spool_dir,
+            )
+    finally:
+        s3.copy_object = real_copy_object
+
+    check("the swapped upload is refused, not promoted as the benign digest",
+          summary["written_normal"] == 0, str(summary))
+    check("the run is partial", summary["status"] == catalog.RUN_STATUS_PARTIAL, summary["status"])
+    check("the mismatch is named against the upload_id",
+          [f["upload_id"] for f in summary["failed"]] == ["upload-swap"], str(summary["failed"]))
+    check("nothing was catalogued under the benign digest",
+          len(rows(store, "asset_inventory")) == 0)
+    check("no bronze object survives under the benign digest",
+          promote_mod._blob_key(hashlib.sha256(benign).hexdigest()) not in bronze_keys(s3, bronze))
+    check("no bronze object survives under the swapped digest either (never trusted)",
+          promote_mod._blob_key(hashlib.sha256(swapped).hexdigest()) not in bronze_keys(s3, bronze))
+
+
+def test_malformed_manifest_fields_are_refused_without_aborting_the_run(kek):
+    """P2: a manifest whose fields are the wrong TYPE (not merely missing) is
+    refused in read_manifest, before it can crash something downstream
+    (`in known` on an unhashable claimed_sha256, `.startswith()` on a
+    non-string mime)."""
+    s3, bronze, staging = fresh_buckets()
+    store = fresh_store()
+
+    cases = [
+        ("upload-bad-sha-type", {"claimed_sha256": 12345}),
+        ("upload-bad-sha-shape", {"claimed_sha256": "not-hex-and-wrong-length"}),
+        ("upload-bad-mime-type", {"mime": None}),
+        ("upload-bad-bucket-type", {"bucket": ["photos"]}),
+        ("upload-bad-size-type", {"size_bytes": "4812345"}),
+        ("upload-bad-size-bool", {"size_bytes": True}),
+        ("upload-bad-size-negative", {"size_bytes": -1}),
+    ]
+    for upload_id, override in cases:
+        s3.put_object(Bucket=staging, Key=promote_mod._object_key(upload_id), Body=INVOICE)
+        manifest = {
+            "claimed_sha256": hashlib.sha256(INVOICE).hexdigest(),
+            "bucket": "docs", "sensitivity": "normal", "source_filename": "x.bin",
+            "mime": "application/octet-stream", "size_bytes": len(INVOICE),
+            "upload_time": "2026-11-09T00:00:00Z",
+        }
+        manifest.update(override)
+        s3.put_object(
+            Bucket=staging, Key=promote_mod._manifest_key(upload_id),
+            Body=json.dumps(manifest).encode("utf-8"),
+        )
+    stage_upload(s3, staging, "upload-good", INVOICE, bucket="docs", sensitivity="normal")
+
+    with tempfile.TemporaryDirectory() as spool_dir:
+        summary = promote_mod.promote(
+            s3=s3, staging_bucket=staging, bucket=bronze, store=store,
+            kek=kek, spool_dir=spool_dir,
+        )
+
+    check("the run does not crash and reaches 'partial'",
+          summary["status"] == catalog.RUN_STATUS_PARTIAL, summary["status"])
+    check("every malformed manifest is refused",
+          {f["upload_id"] for f in summary["failed"]} == {c[0] for c in cases}, str(summary["failed"]))
+    check("the good upload still promotes despite seven bad manifests alongside it",
+          summary["written_normal"] == 1, str(summary))
+
+
+def test_missing_staged_object_does_not_abort_the_run(kek):
+    """P2: a manifest exists but its `object` does not (an uploader that
+    crashed between its two PUTs). The verify GET fails; that failure must be
+    recorded against the one upload, not propagate out of `promote`."""
+    s3, bronze, staging = fresh_buckets()
+    store = fresh_store()
+
+    manifest = {
+        "claimed_sha256": hashlib.sha256(PHOTO).hexdigest(),
+        "bucket": "photos", "sensitivity": "high", "source_filename": "x.bin",
+        "mime": "application/octet-stream", "size_bytes": len(PHOTO),
+        "upload_time": "2026-11-09T00:00:00Z",
+    }
+    s3.put_object(
+        Bucket=staging, Key=promote_mod._manifest_key("upload-no-object"),
+        Body=json.dumps(manifest).encode("utf-8"),
+    )
+    # Deliberately no put_object for the object key itself.
+    stage_upload(s3, staging, "upload-good", INVOICE, bucket="docs", sensitivity="normal")
+
+    with tempfile.TemporaryDirectory() as spool_dir:
+        summary = promote_mod.promote(
+            s3=s3, staging_bucket=staging, bucket=bronze, store=store,
+            kek=kek, spool_dir=spool_dir,
+        )
+
+    check("the run does not crash and reaches 'partial'",
+          summary["status"] == catalog.RUN_STATUS_PARTIAL, summary["status"])
+    check("the upload with no staged object is named in the failure list",
+          "upload-no-object" in {f["upload_id"] for f in summary["failed"]}, str(summary["failed"]))
+    check("the good upload still promotes", summary["written_normal"] == 1, str(summary))
+
+
+def test_sensitivity_is_the_stricter_of_declared_and_bucket_map(kek):
+    """P2: a manifest declaring `sensitivity: normal` for a `bucket: medical`
+    upload must still promote as `high` — the bucket map overrides a looser
+    declared value, never the reverse."""
+    s3, bronze, staging = fresh_buckets()
+    store = fresh_store()
+
+    stage_upload(s3, staging, "upload-undersold", PHOTO, bucket="medical", sensitivity="normal")
+
+    with tempfile.TemporaryDirectory() as spool_dir:
+        summary = promote_mod.promote(
+            s3=s3, staging_bucket=staging, bucket=bronze, store=store,
+            kek=kek, spool_dir=spool_dir,
+        )
+
+    check("the medical upload promotes as high despite declaring normal",
+          summary["written_high"] == 1 and summary["written_normal"] == 0, str(summary))
+    row = rows(store, "asset_inventory")[0]
+    raw = s3.get_object(Bucket=bronze, Key=field("asset_inventory", row, "object_key"))["Body"].read()
+    check("the object is actually encrypted, not merely labelled high", raw[:4] == b"AOBJ")
+
+    # The reverse must NOT happen: a 'docs' upload declaring high stays high
+    # (the map's job is to raise the floor, never lower it).
+    s3b, bronzeb, stagingb = fresh_buckets()
+    storeb = fresh_store()
+    stage_upload(s3b, stagingb, "upload-cautious", INVOICE, bucket="docs", sensitivity="high")
+    with tempfile.TemporaryDirectory() as spool_dir:
+        summary2 = promote_mod.promote(
+            s3=s3b, staging_bucket=stagingb, bucket=bronzeb, store=storeb,
+            kek=kek, spool_dir=spool_dir,
+        )
+    check("a 'docs' upload that declares high is not downgraded by the map",
+          summary2["written_high"] == 1 and summary2["written_normal"] == 0, str(summary2))
+
+
+# --------------------------------------------------------------------------
 
 
 @mock_aws
@@ -471,6 +640,14 @@ def main():
     test_staged_object_has_no_catalog_row_before_promotion()
     print("\nlisting + manifest validation:")
     test_listing_and_manifest_validation()
+    print("\nP1: a staged object swapped between verify and copy is caught:")
+    test_overwrite_between_verify_and_copy_is_caught(kek)
+    print("\nP2: malformed manifest fields are refused without aborting the run:")
+    test_malformed_manifest_fields_are_refused_without_aborting_the_run(kek)
+    print("\nP2: a missing staged object does not abort the run:")
+    test_missing_staged_object_does_not_abort_the_run(kek)
+    print("\nP2: sensitivity is the stricter of declared and the bucket map:")
+    test_sensitivity_is_the_stricter_of_declared_and_bucket_map(kek)
 
     print()
     if FAILED:
