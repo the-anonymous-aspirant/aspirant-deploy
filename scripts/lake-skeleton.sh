@@ -5,6 +5,7 @@
 #   lake-skeleton.sh up        bring the stack up and bootstrap bucket + key
 #   lake-skeleton.sh seed      generate the obviously-synthetic fixture set
 #   lake-skeleton.sh ingest M  load REAL records from source manifest M (#4271)
+#   lake-skeleton.sh promote   promote verified staged uploads into bronze (#9546-A2)
 #   lake-skeleton.sh verify    run the acceptance checks (bucket + catalog)
 #   lake-skeleton.sh verify-at-rest
 #                              prove data on disk is envelope-encrypted (#4273)
@@ -117,7 +118,7 @@ env_set() {
 }
 
 seed_config() {
-  mkdir -p "$ROOT"/{config,garage/meta,garage/data,catalog}
+  mkdir -p "$ROOT"/{config,garage/meta,garage/data,catalog,promote-spool}
 
   if [ ! -f "$ROOT/config/garage.toml" ]; then
     cat > "$ROOT/config/garage.toml" <<EOF
@@ -517,6 +518,14 @@ case "${1:-}" in
     export LAKE_INGEST_SOURCE="$manifest_dir"
     compose --profile client run --rm duckdb \
       /work/ingest.py "/source/$(basename "$manifest")" "$@"
+    ;;
+
+  promote)
+    # The staging promotion runner (#9546-A2). A separate verb from `ingest`:
+    # it takes no manifest path, because it reads what it promotes from the
+    # staging bucket itself rather than from a host-mounted source tree.
+    shift
+    compose --profile client run --rm duckdb /work/promote.py "$@"
     ;;
 
   verify)
