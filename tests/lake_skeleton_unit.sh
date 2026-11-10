@@ -299,6 +299,42 @@ DEPLOY_ENV_FILE="$TMPDIR_TEST/absent-deploy.env"
 rc=0; explorer_env_sync > /dev/null 2>&1 || rc=$?
 assert_rc "sync refuses when the deploy .env does not exist" "1" "$rc"
 
+# --- stage_real_kek (#10354): a real KEK never reaches compose's env --------
+# substitution — it goes to a 0600 tmpfs file instead, and LAKE_KEK_HEX is
+# unset in this shell afterward so `compose`'s `${LAKE_KEK_HEX:-}` reads
+# empty for the call that follows.
+
+unset LAKE_KEK_HEX LAKE_KEK_FILE_HOST
+_kek_file=""
+stage_real_kek
+assert_eq "no-op when LAKE_KEK_HEX is unset: no file staged" "" "$_kek_file"
+assert_eq "no-op when LAKE_KEK_HEX is unset: no host path exported" "" "${LAKE_KEK_FILE_HOST:-}"
+
+export XDG_RUNTIME_DIR="$TMPDIR_TEST/runtime"
+mkdir -p "$XDG_RUNTIME_DIR"
+export LAKE_KEK_HEX="feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface"
+_kek_file=""
+stage_real_kek
+if [ -n "$_kek_file" ] && [ -f "$_kek_file" ]; then
+  PASS=$((PASS + 1)); echo "[PASS] a real KEK is staged to a file"
+else
+  FAIL=$((FAIL + 1)); echo "[FAIL] a real KEK is staged to a file"
+fi
+assert_eq "the staged file is 0600" "600" "$(stat -c '%a' "$_kek_file" 2>/dev/null)"
+assert_eq "the staged file holds the real hex" \
+  "feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface" "$(cat "$_kek_file")"
+assert_eq "LAKE_KEK_FILE_HOST is exported to the staged path" "$_kek_file" "${LAKE_KEK_FILE_HOST:-}"
+assert_eq "LAKE_KEK_HEX is unset after staging, so compose never sees it" "" "${LAKE_KEK_HEX:-}"
+
+staged_path="$_kek_file"
+_cleanup_kek_file
+if [ ! -e "$staged_path" ]; then
+  PASS=$((PASS + 1)); echo "[PASS] the staged file is deleted by the cleanup trap"
+else
+  FAIL=$((FAIL + 1)); echo "[FAIL] the staged file is deleted by the cleanup trap"
+fi
+unset LAKE_KEK_FILE_HOST
+
 echo
 if [ "$FAIL" -gt 0 ]; then
   echo "FAILED: $FAIL failed, $PASS passed"

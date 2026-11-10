@@ -82,6 +82,30 @@ compose() {
   docker compose -p "$PROJECT" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"
 }
 
+# Real KEK handling for a verb that takes one (#10354): dockerd persists a
+# container's `-e` values to this cell's unencrypted disk for as long as the
+# container exists, and `docker inspect` shows them to every member of the
+# `docker` group — true for compose's env interpolation too, since that is
+# still `-e` at the daemon level. Called by `ingest` (and due on `promote`
+# once PR 122/#9758 merges — see #10354's PR body). `seed`'s synthetic KEK
+# is unaffected: it never calls this, so its `LAKE_KEK_HEX` still reaches the
+# duckdb service the way it always has, which the task this fix comes from
+# (#10354) keeps as the tests-and-synthetic-skeleton-only path on purpose.
+_kek_file=""
+_cleanup_kek_file() { [[ -n "$_kek_file" ]] && rm -f "$_kek_file"; return 0; }
+
+stage_real_kek() {
+  if [[ -n "${LAKE_KEK_HEX:-}" ]]; then
+    local runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    _kek_file="$(mktemp "$runtime_dir/lake_kek.XXXXXX")"
+    chmod 600 "$_kek_file"
+    printf '%s' "$LAKE_KEK_HEX" >"$_kek_file"
+    export LAKE_KEK_FILE_HOST="$_kek_file"
+    trap _cleanup_kek_file EXIT
+    unset LAKE_KEK_HEX
+  fi
+}
+
 garage_cli() {
   docker exec -e GARAGE_CONFIG_FILE=/etc/garage/garage.toml lake-skeleton-garage /garage "$@"
 }
@@ -516,6 +540,7 @@ case "${1:-}" in
     # function here, and a prefix assignment on a function is not reliably
     # exported to the docker process that has to interpolate it.
     export LAKE_INGEST_SOURCE="$manifest_dir"
+    stage_real_kek
     compose --profile client run --rm duckdb \
       /work/ingest.py "/source/$(basename "$manifest")" "$@"
     ;;
