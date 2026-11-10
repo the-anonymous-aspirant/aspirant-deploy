@@ -30,6 +30,7 @@ from typing import Callable
 from dek_envelope import (
     decrypt_object,
     encrypt_object,
+    encrypt_object_stream,
     generate_dek,
     unwrap_dek,
     wrap_dek,
@@ -56,6 +57,29 @@ def encrypt_for_storage(
     aobj_bytes = encrypt_object(plaintext, dek)
     wrapped = wrap_dek(dek, kek, kek_version)
     return aobj_bytes, base64.b64encode(wrapped).decode("ascii")
+
+
+def encrypt_for_storage_stream(
+    src, dst, kek: bytes, kek_version: int = 1, plaintext_hash=None
+) -> tuple[int, str]:
+    """The streaming sibling of `encrypt_for_storage` (#9546-A2).
+
+    Same sequence — generate a fresh per-object DEK, encrypt, wrap — but reads
+    `src` and writes `dst` a chunk at a time via `encrypt_object_stream`
+    (#9546-A1), so a multi-GB `high` promotion needs no more memory than one
+    chunk. Returns ``(plaintext_bytes_read, wrapped_dek_b64)``.
+
+    `plaintext_hash`, if given, is the same seam `encrypt_object_stream`
+    exposes: update()-d with every plaintext chunk, so a caller already
+    streaming a claimed-digest check can reuse one read instead of two. Per
+    that function's own warning, a tag proves only that `dst` is unaltered —
+    the caller must still check the returned length or `plaintext_hash`
+    against what it expected before treating `dst` as trustworthy.
+    """
+    dek = generate_dek()
+    total = encrypt_object_stream(src, dst, dek, plaintext_hash=plaintext_hash)
+    wrapped = wrap_dek(dek, kek, kek_version)
+    return total, base64.b64encode(wrapped).decode("ascii")
 
 
 def storage_body_and_wrapped_dek(
@@ -155,6 +179,25 @@ def _self_test() -> int:
         "gate leaves a normal blob as plaintext with no wrapped DEK",
         normal_body == plaintext and normal_wrapped is None,
     )
+
+    # The streaming sibling (#9546-A2): same sequence, chunked I/O.
+    import hashlib
+    import io
+
+    src = io.BytesIO(plaintext)
+    dst = io.BytesIO()
+    digest = hashlib.sha256()
+    stream_total, stream_wrapped = encrypt_for_storage_stream(
+        src, dst, kek, kek_version=1, plaintext_hash=digest
+    )
+    stream_aobj = dst.getvalue()
+    check("stream variant reads every plaintext byte", stream_total == len(plaintext))
+    check("stream variant's plaintext_hash matches a direct hash",
+          digest.hexdigest() == hashlib.sha256(plaintext).hexdigest())
+    check("stream variant's stored bytes carry the AOBJ header and no plaintext",
+          stream_aobj[:4] == b"AOBJ" and plaintext not in stream_aobj)
+    check("stream variant round-trips through the same decrypt path",
+          decrypt_from_storage(stream_aobj, stream_wrapped, load_kek) == plaintext)
 
     # A wrong KEK from the resolver must fail the tag, not return garbage.
     from dek_envelope import EnvelopeError
