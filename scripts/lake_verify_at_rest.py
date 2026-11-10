@@ -80,7 +80,9 @@ Against a live lake, through the compose client profile::
 
 Env: ``LAKE_CATALOG_DSN``, ``LAKE_S3_ENDPOINT``, ``LAKE_S3_BUCKET``,
 ``LAKE_S3_REGION``, ``AWS_ACCESS_KEY_ID``, ``AWS_SECRET_ACCESS_KEY``, and
-optionally ``LAKE_KEK_HEX`` (+ ``LAKE_KEK_FINGERPRINT``) for checks 5 and 6.
+optionally ``LAKE_KEK_FILE`` (preferred, #10492) or ``LAKE_KEK_HEX`` (tests
+and the synthetic skeleton only) + ``LAKE_KEK_FINGERPRINT``, for checks 5
+and 6.
 The fingerprint is honoured (#4524, F5): a KEK that does not match it is
 rejected as an input error before anything is verified, instead of every
 ``high`` row being reported as data loss under a mistyped key.
@@ -600,12 +602,18 @@ def _custody_unwrap():
     """
     if not CRYPTO_AVAILABLE:
         return None
-    if not os.environ.get("LAKE_KEK_HEX"):
+    if not os.environ.get("LAKE_KEK_FILE") and not os.environ.get("LAKE_KEK_HEX"):
         return None
-    from kek_loader import ENV_KEK_FINGERPRINT, load_kek_from_env
+    from kek_loader import ENV_KEK_FINGERPRINT, load_kek_from_env, load_kek_from_file
 
-    kek = load_kek_from_env(expected_fingerprint=os.environ.get(ENV_KEK_FINGERPRINT) or None)
-    if kek is None:  # pragma: no cover - LAKE_KEK_HEX was checked above
+    # Prefers the KEK file (the real-KEK path, #10354/#10492) over the
+    # one-shot env var, which stays for tests and the synthetic skeleton —
+    # same precedence as lake_ingest.py's main().
+    _kek_fp = os.environ.get(ENV_KEK_FINGERPRINT) or None
+    kek = load_kek_from_file(expected_fingerprint=_kek_fp)
+    if kek is None:
+        kek = load_kek_from_env(expected_fingerprint=_kek_fp)
+    if kek is None:  # pragma: no cover - a file or hex source was checked above
         return None
     return lambda wrapped: dek_envelope.unwrap_dek(wrapped, kek)
 
@@ -663,7 +671,7 @@ def run_live(argv_json=False) -> int:
     if kek_error is not None:
         green = False
 
-    kek_supplied = bool(os.environ.get("LAKE_KEK_HEX"))
+    kek_supplied = bool(os.environ.get("LAKE_KEK_FILE") or os.environ.get("LAKE_KEK_HEX"))
     if argv_json:
         print(json.dumps({
             "green": green,
