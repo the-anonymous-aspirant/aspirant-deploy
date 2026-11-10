@@ -66,6 +66,12 @@ services:
       - "8999:80"
     depends_on:
       - server
+    # Dual-homed (system_3 #10353): `explorer_api` is the one bridge that can
+    # reach `explorer-api` now that it is off `default` — see that service's
+    # own comment below.
+    networks:
+      - default
+      - explorer_api
 
   transcriber:
     logging: *default-logging
@@ -306,8 +312,11 @@ services:
       LAKE_S3_REGION: garage
       AWS_ACCESS_KEY_ID: ${EXPLORER_S3_ACCESS_KEY:-}
       AWS_SECRET_ACCESS_KEY: ${EXPLORER_S3_SECRET_KEY:-}
+    # Not `default` (system_3 #10353): identical boundary to production's
+    # docker-compose.yml, now that explorer-api has no auth of its own and
+    # `default` here is shared with every other dev service.
     networks:
-      - default
+      - explorer_api
       - lake
 
   explorer:
@@ -345,3 +354,6 @@ networks:
   # Internal-only bridge for the socket-proxy sidecar (see main compose).
   docker_proxy_net:
     internal: true
+  # explorer-api's own bridge (system_3 #10353). See docker-compose.yml for
+  # the boundary rule this mirrors.
+  explorer_api:
