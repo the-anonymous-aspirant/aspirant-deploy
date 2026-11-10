@@ -208,6 +208,10 @@ services:
       # docs/OPERATIONS.md, "Per-service database roles").
       DB_USER: "${ASPIRANT_TRANSCRIBER_DB_USER:-${DB_USER}}"
       DB_PASSWORD: "${ASPIRANT_TRANSCRIBER_DB_LOGIN_PASSWORD:-${DB_PASSWORD}}"
+      # A literal, never from .env: it must survive a lost switch, so a
+      # fall-back to the superuser shows up as aspirant-transcriber under the
+      # admin user in pg_stat_activity (system_3 #10325, security c63252).
+      PGAPPNAME: aspirant-transcriber
       DB_NAME: "${DB_NAME}"
       DB_HOST: "${DB_HOST}"
       AUDIO_STORAGE_PATH: /data/audio
@@ -246,6 +250,10 @@ services:
       # docs/OPERATIONS.md, "Per-service database roles").
       DB_USER: "${ASPIRANT_COMMANDER_DB_USER:-${DB_USER}}"
       DB_PASSWORD: "${ASPIRANT_COMMANDER_DB_LOGIN_PASSWORD:-${DB_PASSWORD}}"
+      # A literal, never from .env: it must survive a lost switch, so a
+      # fall-back to the superuser shows up as aspirant-commander under the
+      # admin user in pg_stat_activity (system_3 #10325, security c63252).
+      PGAPPNAME: aspirant-commander
       DB_NAME: "${DB_NAME}"
       DB_HOST: "${DB_HOST}"
       VALUATION_BACKFILL_OWNER_ID: "${VALUATION_BACKFILL_OWNER_ID:-}"
@@ -361,6 +369,10 @@ services:
       # docs/OPERATIONS.md, "Per-service database roles").
       DB_USER: "${ASPIRANT_ADVISOR_DB_USER:-${DB_USER}}"
       DB_PASSWORD: "${ASPIRANT_ADVISOR_DB_LOGIN_PASSWORD:-${DB_PASSWORD}}"
+      # A literal, never from .env: it must survive a lost switch, so a
+      # fall-back to the superuser shows up as aspirant-advisor under the
+      # admin user in pg_stat_activity (system_3 #10325, security c63252).
+      PGAPPNAME: aspirant-advisor
       DB_NAME: "${DB_NAME}"
       DB_HOST: postgres
       OLLAMA_URL: http://ollama:11434
@@ -399,6 +411,10 @@ services:
       # docs/OPERATIONS.md, "Per-service database roles").
       DB_USER: "${ASPIRANT_BROWSER_DB_USER:-${DB_USER}}"
       DB_PASSWORD: "${ASPIRANT_BROWSER_DB_LOGIN_PASSWORD:-${DB_PASSWORD}}"
+      # A literal, never from .env: it must survive a lost switch, so a
+      # fall-back to the superuser shows up as aspirant-browser under the
+      # admin user in pg_stat_activity (system_3 #10325, security c63252).
+      PGAPPNAME: aspirant-browser
       DB_NAME: "${DB_NAME}"
       DB_HOST: postgres
       BROWSER_FLOW_DATA_DIR: /data/aspirant/browser_flows
