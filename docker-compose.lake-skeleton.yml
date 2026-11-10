@@ -142,6 +142,16 @@ services:
       # safety rests on being unmistakably fake (§11.0), and a --real switch
       # would put that one flag away from being off.
       - ./scripts/lake_ingest.py:/work/ingest.py:ro
+      # The same file, a second time under its real module name. The staging
+      # promoter (#9546-A2) imports `lake_ingest` (its DuckDB catalog-store
+      # wrapper, shared rather than re-derived) by that name on the host, and
+      # a container-only rename would make the import resolve differently in
+      # the two places this script runs.
+      - ./scripts/lake_ingest.py:/work/lake_ingest.py:ro
+      # The staging promotion runner (#9546-A2): promotes verified staged
+      # uploads out of the staging bucket into bronze. Reads from Garage, not
+      # from a host path, so unlike `ingest.py` it needs no /source mount.
+      - ./scripts/lake_promote_staging.py:/work/promote.py:ro
       # The manifest and the tree it names, bind-mounted read-only at a fixed
       # path so `lake-skeleton.sh ingest <path>` needs no per-run compose edit.
       # Defaulted to the repo itself so `compose config` renders without one.
@@ -162,6 +172,12 @@ services:
       # and runs offline. Override LAKE_DUCKDB_EXT_DIR only if the operator's
       # duckdb cache is not at the default $HOME/.duckdb/extensions.
       - ${LAKE_DUCKDB_EXT_DIR:-${HOME}/.duckdb/extensions}:/root/.duckdb/extensions:ro
+      # Read-write: the staging promoter's ciphertext spool for a `high`
+      # object (#9546-A2). On `/scratch` (LUKS at rest, KEK_CEREMONY.md), its
+      # own subdirectory so a reclaim never touches the skeleton's other
+      # state. Plaintext never reaches this path — only the AOBJ ciphertext
+      # `encrypt_for_storage_stream` writes.
+      - ${LAKE_SKELETON_ROOT:-/scratch/lake-skeleton}/promote-spool:/scratch-spool
     networks:
       - lake
 
