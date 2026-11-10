@@ -238,6 +238,8 @@ Each of the four reads `DB_USER`/`DB_PASSWORD` from a per-service switch in `.en
 | no `ASPIRANT_<SVC>_DB_USER` line (the default) | the admin pair, `DB_USER`/`DB_PASSWORD`: today's behaviour, and the rollback state |
 | `ASPIRANT_<SVC>_DB_USER=aspirant_<svc>` and `ASPIRANT_<SVC>_DB_LOGIN_PASSWORD=${ASPIRANT_<SVC>_DB_PASSWORD}` | its own role |
 
+Each of the four also sends a fixed `application_name`, `PGAPPNAME: aspirant-<svc>`, written as a literal in compose rather than read from `.env` (system_3 #10325). It's how `pg_stat_activity`, and security's sweep check (#10326), tell a cut-over service that fell back to the superuser, after losing its two `.env` lines, apart from server's own superuser sessions. Because it's a literal, a lost `.env` can't take the label with it.
+
 The default is the admin pair on purpose. `auto-pull.sh` runs compose from this checkout. A role default would start a service as its role before its tables move, and its startup would then create empty tables in its schema. Or, while the role passwords are unset, it would make every compose command fail. The second line is a reference that compose resolves from the line above it, not a second copy of the secret. `db-roles.sh` reads only `ASPIRANT_<SVC>_DB_PASSWORD`. `tests/compose_secret_scope_unit.sh` pins all of this:
 - the switch is the default;
 - one switch moves one service;
@@ -262,6 +264,10 @@ docker compose ps "$svc"            # healthy within its start period
 docker compose exec -T postgres sh -c \
   'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "select usename, count(*) from pg_stat_activity group by 1 order by 1"'
                                     # aspirant_<svc> appears with its connections
+docker compose exec -T postgres sh -c \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "select application_name, usename, count(*) from pg_stat_activity where application_name like '"'"'aspirant-%'"'"' group by 1,2 order by 1"'
+                                    # aspirant-<svc> appears ONLY under aspirant_<svc>; under the
+                                    # admin user it has fallen back (lost .env lines): roll back or fix
 
 rm .maintenance-pause               # after the last service
 ```
