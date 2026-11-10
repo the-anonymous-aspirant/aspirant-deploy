@@ -82,13 +82,13 @@ compose() {
   docker compose -p "$PROJECT" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"
 }
 
-# Real KEK handling for a verb that takes one (#10354): dockerd persists a
-# container's `-e` values to this cell's unencrypted disk for as long as the
-# container exists, and `docker inspect` shows them to every member of the
-# `docker` group — true for compose's env interpolation too, since that is
-# still `-e` at the daemon level. Called by `ingest` (and due on `promote`
-# once PR 122/#9758 merges — see #10354's PR body). `seed`'s synthetic KEK
-# is unaffected: it never calls this, so its `LAKE_KEK_HEX` still reaches the
+# Real KEK handling for a verb that takes one (#10354, made structural by
+# #10492): dockerd persists a container's `-e` values to this cell's
+# unencrypted disk for as long as the container exists, and `docker inspect`
+# shows them to every member of the `docker` group — true for compose's env
+# interpolation too, since that is still `-e` at the daemon level. Called
+# once, before the verb dispatch below, for every verb except `seed`.
+# `seed`'s synthetic KEK is unaffected: its `LAKE_KEK_HEX` still reaches the
 # duckdb service the way it always has, which the task this fix comes from
 # (#10354) keeps as the tests-and-synthetic-skeleton-only path on purpose.
 _kek_file=""
@@ -97,6 +97,16 @@ _cleanup_kek_file() { [[ -n "$_kek_file" ]] && rm -f "$_kek_file"; return 0; }
 stage_real_kek() {
   if [[ -n "${LAKE_KEK_HEX:-}" ]]; then
     local runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    # Refuse a runtime dir that is not tmpfs (security review c64726 on
+    # #8813, folded in by #10492): a misconfigured caller must not be able to
+    # put the key file on disk just by pointing XDG_RUNTIME_DIR elsewhere.
+    local fstype
+    fstype="$(stat -f -c %T "$runtime_dir" 2>/dev/null || echo "unreadable")"
+    if [[ "$fstype" != "tmpfs" ]]; then
+      echo "refusing: \$XDG_RUNTIME_DIR ($runtime_dir) is not tmpfs (filesystem: $fstype)" \
+           "— a real KEK must never be staged to a persistent disk" >&2
+      exit 1
+    fi
     _kek_file="$(mktemp "$runtime_dir/lake_kek.XXXXXX")"
     chmod 600 "$_kek_file"
     printf '%s' "$LAKE_KEK_HEX" >"$_kek_file"
@@ -495,6 +505,17 @@ if [ "${ASPIRANT_LAKE_SKELETON_LIB:-0}" = "1" ]; then
   return 0 2>/dev/null || true
 fi
 
+# Structural, not per-verb (#10492): every verb below that can reach `compose`
+# with a real KEK loaded gets the tmpfs-file guard, so a future verb cannot
+# forget it the way `promote` and `verify-at-rest` did. `seed` is the one
+# exception — it never takes a real key, and #10354 made that exemption
+# deliberate (its synthetic LAKE_KEK_HEX is tests-and-skeleton-only and must
+# keep reaching `compose`'s env interpolation unstaged). A no-op when
+# LAKE_KEK_HEX is unset.
+if [ "${1:-}" != "seed" ]; then
+  stage_real_kek
+fi
+
 case "${1:-}" in
   up)
     seed_config
@@ -540,7 +561,6 @@ case "${1:-}" in
     # function here, and a prefix assignment on a function is not reliably
     # exported to the docker process that has to interpolate it.
     export LAKE_INGEST_SOURCE="$manifest_dir"
-    stage_real_kek
     compose --profile client run --rm duckdb \
       /work/ingest.py "/source/$(basename "$manifest")" "$@"
     ;;
