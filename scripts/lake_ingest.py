@@ -93,7 +93,12 @@ sys.path.insert(0, os.path.join(_HERE, "kek"))
 sys.path.insert(0, os.path.join(_HERE, "lake"))
 
 from envelope_store import storage_body_and_wrapped_dek  # noqa: E402
-from kek_loader import ENV_KEK_FINGERPRINT, ENV_KEK_HEX, load_kek_from_env  # noqa: E402
+from kek_loader import (  # noqa: E402
+    ENV_KEK_FINGERPRINT,
+    ENV_KEK_HEX,
+    load_kek_from_env,
+    load_kek_from_file,
+)
 
 import catalog  # noqa: E402
 
@@ -574,12 +579,16 @@ def main(argv=None) -> int:
 
     kek_version = int(os.environ.get("LAKE_KEK_VERSION", str(DEFAULT_KEK_VERSION)))
 
-    # Env-only KEK load: this runs non-interactively under compose, so there is
-    # no TTY to prompt on. The launcher passes the off-cell hex through the
-    # one-shot LAKE_KEK_HEX and does not persist it. `None` here is not an
-    # error yet — `ingest`'s pre-flight decides, because a manifest of purely
-    # `normal` records legitimately needs no key.
-    kek = load_kek_from_env(expected_fingerprint=os.environ.get(ENV_KEK_FINGERPRINT) or None)
+    # Non-interactive load: this runs under compose, so there is no TTY to
+    # prompt on. Prefers the file a real-KEK caller staged (LAKE_KEK_FILE,
+    # #10354) over the one-shot env var LAKE_KEK_HEX, which stays for tests
+    # and the synthetic skeleton. `None` here is not an error yet —
+    # `ingest`'s pre-flight decides, because a manifest of purely `normal`
+    # records legitimately needs no key.
+    _kek_fp = os.environ.get(ENV_KEK_FINGERPRINT) or None
+    kek = load_kek_from_file(expected_fingerprint=_kek_fp)
+    if kek is None:
+        kek = load_kek_from_env(expected_fingerprint=_kek_fp)
 
     if args.dry_run:
         summary = ingest(

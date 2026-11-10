@@ -609,6 +609,71 @@ def test_manifest_validation():
               lake_ingest.manifest_needs_kek(undeclared_only))
 
 
+def test_main_resolves_kek_from_file():
+    """`main()`'s own KEK resolution (#10354), not the lower-level `ingest()`
+    every other test here calls with an already-resolved `kek`. A real caller
+    (lake-skeleton.sh's `stage_real_kek`) stages the hex to a file and unsets
+    LAKE_KEK_HEX before invoking this; LAKE_KEK_FILE must win when it is
+    present, and LAKE_KEK_HEX must still work on its own for the tests/
+    synthetic-skeleton path that never calls `stage_real_kek`.
+    """
+    kek = os.urandom(32)
+    grouped = " ".join(kek.hex()[i:i + 4] for i in range(0, 64, 4))
+
+    saved = {
+        v: os.environ.pop(v, None)
+        for v in ("LAKE_KEK_FILE", "LAKE_KEK_HEX", "LAKE_KEK_FINGERPRINT")
+    }
+    try:
+        with tempfile.TemporaryDirectory() as root:
+            manifest_path = write_manifest(root, [("secret.txt", INVOICE, "high")])
+
+            # LAKE_KEK_HEX alone still works — the tests/synthetic-skeleton path.
+            os.environ["LAKE_KEK_HEX"] = grouped
+            rc = lake_ingest.main([manifest_path, "--dry-run"])
+            check("LAKE_KEK_HEX alone resolves a high-sensitivity dry run", rc == 0, f"rc={rc}")
+            del os.environ["LAKE_KEK_HEX"]
+
+            # LAKE_KEK_FILE alone (the real-KEK path) also works.
+            kek_file = os.path.join(root, "kek_hex")
+            with open(kek_file, "w", encoding="ascii") as fh:
+                fh.write(grouped)
+            os.chmod(kek_file, 0o600)
+            os.environ["LAKE_KEK_FILE"] = kek_file
+            rc = lake_ingest.main([manifest_path, "--dry-run"])
+            check("LAKE_KEK_FILE alone resolves a high-sensitivity dry run", rc == 0, f"rc={rc}")
+
+            # LAKE_KEK_FILE wins when both are set, even when LAKE_KEK_HEX is a
+            # different (wrong) key — proves the file is actually consulted,
+            # not merely tolerated alongside an env var doing the real work.
+            os.environ["LAKE_KEK_HEX"] = " ".join(
+                os.urandom(32).hex()[i:i + 4] for i in range(0, 64, 4)
+            )
+            rc = lake_ingest.main([manifest_path, "--dry-run"])
+            check("LAKE_KEK_FILE takes precedence over a conflicting LAKE_KEK_HEX",
+                  rc == 0, f"rc={rc}")
+            del os.environ["LAKE_KEK_FILE"], os.environ["LAKE_KEK_HEX"]
+
+            # Neither set: the fail-closed refusal still fires (unchanged by
+            # #10354 — this is the same path test_refuses_high_without_kek
+            # exercises through ingest() directly; here it is through main().
+            # main() itself does not catch MissingKekError — only the
+            # `if __name__ == "__main__":` block maps it to exit 3 — so the
+            # in-process check is that it raises, not that it returns nonzero.
+            refused = False
+            try:
+                lake_ingest.main([manifest_path, "--dry-run"])
+            except lake_ingest.MissingKekError:
+                refused = True
+            check("neither set: main() still refuses a high-sensitivity manifest", refused)
+    finally:
+        for v, val in saved.items():
+            if val is None:
+                os.environ.pop(v, None)
+            else:
+                os.environ[v] = val
+
+
 # --------------------------------------------------------------------------
 
 
@@ -629,6 +694,8 @@ def main():
     test_a_contract_shaped_catalog_is_accepted_and_appended_to(kek)
     print("\nmanifest validation:")
     test_manifest_validation()
+    print("\nmain()'s own KEK resolution (#10354):")
+    test_main_resolves_kek_from_file()
 
     print()
     if FAILED:
