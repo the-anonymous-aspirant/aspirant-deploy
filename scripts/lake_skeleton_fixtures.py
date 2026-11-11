@@ -321,6 +321,44 @@ con.execute(
 con.execute("USE lake")
 
 
+# Real-data guard (system_3 #10513): `replace()` unconditionally drops and
+# recreates every table it touches, discarding whatever was there regardless
+# of whose data it was. That was fine while this catalog only ever held
+# fixtures. It stopped being fine the day real data first shared it with
+# them — 2026-11-02, this guard's own origin: a reseed silently destroyed six
+# real financial records' catalog rows (and their wrapped DEKs, recoverable
+# only from the dropped table's own prior snapshot, if at all) three days
+# after they were loaded and verified. `asset_inventory` and `ingest_runs`
+# are the only tables `catalog.py`'s schema gives a `dataset_id` column, so
+# they are the only ones this guard can check row-by-row; every `replace()`
+# target is still refused if either shows foreign data, since a catalog
+# in genuine use is not safe to reseed at all, including the tables a seed
+# fixture cannot tag provenance on. See docs/LAKE_SKELETON.md for the
+# longer-term fix (fixtures seed their own catalog/bucket, not this one).
+def _refuse_if_real_data_present():
+    for table in ("asset_inventory", "ingest_runs"):
+        exists = con.execute(
+            "SELECT count(*) FROM information_schema.tables "
+            "WHERE table_name = ?", [table]
+        ).fetchone()[0]
+        if not exists:
+            continue
+        foreign = con.execute(
+            f"SELECT count(*) FROM {table} WHERE dataset_id != ?",  # noqa: S608 — table is one of two literals above
+            [SYNTHETIC_DATASET_ID],
+        ).fetchone()[0]
+        if foreign:
+            sys.exit(
+                f"refusing to seed: {table} holds {foreign} row(s) with a "
+                f"dataset_id other than {SYNTHETIC_DATASET_ID!r} — this "
+                "catalog has real data in it, and `seed` would destroy it. "
+                "See system_3 #10513."
+            )
+
+
+_refuse_if_real_data_present()
+
+
 def replace(table, columns, rows):
     con.execute(f"DROP TABLE IF EXISTS {table}")
     con.execute(f"CREATE TABLE {table} ({columns})")
