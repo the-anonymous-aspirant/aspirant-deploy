@@ -121,10 +121,17 @@ Run from the cell after review. Scripts referenced live in
 1. `sudo scripts/luks-layer1/inventory.sh` — confirm the layout still matches §1.
 2. `sudo scripts/luks-layer1/preflight.sh` — dry-run: readiness checks + the exact
    destructive command sequence. Resolve every `[WARN]` before proceeding.
-3. **`/data` backup gate:** `restic backup /data` → `restic check` → capture the
-   manifest: `find /data -type f -print0 | sort -z | xargs -0 sha256sum >
-   /root/data.pre.sha256`. Do not proceed past this line for `/data` without a
-   verified-restorable backup.
+3. **`/data` backup gate:** `restic backup /data --exclude
+   /data/aspirant/import-failures` → `restic check` → capture the manifest:
+   `find /data -path /data/aspirant/import-failures -prune -o -type f -print0 |
+   sort -z | xargs -0 sha256sum > /root/data.pre.sha256`. Do not proceed past
+   this line for `/data` without a verified-restorable backup.
+   The exclusion is deliberate: that directory holds copies of failed
+   invoice-import uploads (bank documents), which must be gone within 168
+   hours and must be in no backup (system_3 #10536 c65222, #10563). A restic
+   repository outlives that window. They are not restored; re-create the empty
+   directory `aspirant:aspirant 0700` after the restore (docs/OPERATIONS.md,
+   "Failed-import copies").
 4. Encrypt in order: `preflight.sh --confirm scratch`, then `--confirm lake`,
    then the `/data` evacuate→restore by hand (the script refuses to automate the
    1.8T restore without an interactive verified-restore checkpoint).
