@@ -304,6 +304,56 @@ cd ~/aspirant-deploy
 - the rollback;
 - idempotence.
 
+## Failed-import copies
+
+When an invoice-app import fails, aspirant-server writes a failure record and keeps a copy of the uploaded file so the import can be fixed (system_3 #10536). These are the app user's own bank documents: N26 statements and PayPal exports, with names, IBANs and addresses. Security ruled where they may live and how they are removed (system_3 #10536 c65222, and c65555 on #10563).
+
+- **Where:** host `/data/aspirant/import-failures`, mounted at `/data/import-failures` into `server` and no other service. `IMPORT_FAILURE_COPIES_DIR` in `server`'s `environment:` points at it.
+  - Not under `/data/aspirant/assets`: `GET /fetch-object/:etag` serves every file under that root to any Trusted user.
+  - Not under `/data/aspirant/files`: that is the Trusted members' file area.
+  - Not in Postgres: the dumps under `/data/aspirant/backups` keep up to 30 days.
+  - Not in the container's own filesystem: a deploy would lose the copies.
+  - It is in no backup. `scripts/backup-aspirant-dbs.py` (system_3) dumps databases only. The LUKS playbook's one-off `restic backup /data` excludes it.
+  - One read-only exception reaches it: `monitor` mounts all of `/data` at `/host/data:ro` and runs as root, to size each `/data/aspirant/*` directory. That predates the copies and already reaches `files/` and `backups/`. It is reported to security on #10563, and `tests/import_failures_unit.sh` allows exactly that mount and no other.
+- **How long:** the server's window, 168 hours by default (the operator's 7 days). `IMPORT_FAILURE_WINDOW_HOURS` in `.env` can shorten it, but never lengthen it: the server caps it at 168 in code. The server deletes a copy from an hourly sweep. It also deletes any file in the directory older than the window by mtime, whether or not a record points to it.
+- **Backstop:** `scripts/import-failures-backstop.sh` runs hourly from the `aspirant` crontab and deletes every file on the mount older than 168 hours by mtime. It covers the case where the server is down. A file it cannot delete, or a subdirectory it cannot read, exits 1 and is named in its log; the next run retries.
+- **Who reads them:** Admin tier only, through the server's admin list and download, and each download writes an audit row.
+
+### Install (in this order)
+
+The directory must exist, owned by the server's uid, **before** `server` is recreated with the mount. `auto-pull.sh` fast-forwards this checkout and recreates `server` on its next image change, so merging the PR is deploying it. If Docker creates the mount point itself, it is `root:root 0755`. The server (uid 1000) then cannot write to it, so it keeps no copies; it still writes every failure record and logs each refused copy. The backstop also warns about it every hour.
+
+```bash
+# 1. The directory: aspirant is uid 1000, the server container's user.
+install -d -m 0700 -o aspirant -g aspirant /data/aspirant/import-failures
+
+# 2. The backstop cron and its log directory.
+sudo install -d -o aspirant -g aspirant /var/log/aspirant-import-failures
+( crontab -l 2>/dev/null; echo '17 * * * * /home/aspirant/aspirant-deploy/scripts/import-failures-backstop.sh >> /var/log/aspirant-import-failures/backstop.log 2>&1' ) | crontab -
+
+# 3. Merge the PR. auto-pull applies it at server's next image change, or now:
+cd ~/aspirant-deploy && git pull --ff-only && docker compose up -d server
+```
+
+### Verify
+
+```bash
+stat -c '%U %a' /data/aspirant/import-failures                        # aspirant 700
+docker exec aspirant-online-server-1 sh -c 'echo "$IMPORT_FAILURE_COPIES_DIR"; ls -ld /data/import-failures'
+docker inspect aspirant-online-server-1 --format '{{range .Mounts}}{{.Source}} {{end}}' | tr ' ' '\n' | grep import-failures
+/home/aspirant/aspirant-deploy/scripts/import-failures-backstop.sh    # deleted=0 failed=0 unreadable=0 ...
+```
+
+No other container may show `/data/aspirant/import-failures` among its mounts:
+
+```bash
+for c in $(docker ps --format '{{.Names}}'); do docker inspect "$c" --format '{{.Name}} {{range .Mounts}}{{.Source}} {{end}}'; done | grep import-failures
+```
+
+### Rollback
+
+Remove the env line and the mount from `server`, then `docker compose up -d server`. The server then keeps no new copies, and with the directory unset its sweep stamps nothing as deleted. Copies already on the mount are still deleted by the backstop within 168 hours, so leave the cron in place until the directory is empty. Then remove the cron line and the directory.
+
 ## Cloudflare Access lockout: break-glass
 
 The admin paths (`/admin`, `/browser-flows`) sit behind a Cloudflare Access application that sends a One-time PIN to the operator's one address (system_3 decision `corpus/decisions/2026-07-20-admin-auth-second-factor.md`, option D; the applications are created by system_3 #8798). Three things lock the operator out of it: a Cloudflare outage, a lost mailbox, or a bad Access policy. None of them touches SSH, which does not pass through Cloudflare at all: `home.the-aspirant.com` is an unproxied A record pointing straight at the cell (see INFRASTRUCTURE.md, DNS Records) and sshd listens on 41922 (`Port 41922` in `/etc/ssh/sshd_config`). The DDNS cron above keeps that record current. This section is written ahead of the lockout on purpose: the path is only as good as the SSH key you last tested with it.
