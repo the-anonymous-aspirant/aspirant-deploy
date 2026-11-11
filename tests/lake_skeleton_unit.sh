@@ -310,8 +310,13 @@ stage_real_kek
 assert_eq "no-op when LAKE_KEK_HEX is unset: no file staged" "" "$_kek_file"
 assert_eq "no-op when LAKE_KEK_HEX is unset: no host path exported" "" "${LAKE_KEK_FILE_HOST:-}"
 
-export XDG_RUNTIME_DIR="$TMPDIR_TEST/runtime"
-mkdir -p "$XDG_RUNTIME_DIR"
+# Real tmpfs, not $TMPDIR_TEST (mktemp's backing filesystem on this host is
+# ext2/ext3, not tmpfs) — stage_real_kek now refuses a non-tmpfs runtime dir
+# (#10492), and /run/user/<uid> on a real deploy always is tmpfs, so the test
+# has to mirror that rather than the arbitrary disk mktemp -d happens to use.
+TMPFS_RUNTIME_DIR="$(mktemp -d -p /dev/shm lake-skeleton-unit-runtime.XXXXXX)"
+trap 'rm -rf "$TMPDIR_TEST" "$TMPFS_RUNTIME_DIR"' EXIT
+export XDG_RUNTIME_DIR="$TMPFS_RUNTIME_DIR"
 export LAKE_KEK_HEX="feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface"
 _kek_file=""
 stage_real_kek
@@ -334,6 +339,24 @@ else
   FAIL=$((FAIL + 1)); echo "[FAIL] the staged file is deleted by the cleanup trap"
 fi
 unset LAKE_KEK_FILE_HOST
+
+# --- stage_real_kek refuses a non-tmpfs runtime dir (#10492, security review
+#     c64726 on #8813): a misconfigured XDG_RUNTIME_DIR must not let a real
+#     KEK land on disk. Run in a subshell: the refusal is a hard `exit 1`,
+#     which would otherwise kill this whole test script.
+disk_runtime_dir="$TMPDIR_TEST/not-tmpfs-runtime"
+mkdir -p "$disk_runtime_dir"
+rc=0
+( export XDG_RUNTIME_DIR="$disk_runtime_dir"
+  export LAKE_KEK_HEX="feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface"
+  stage_real_kek
+) >/dev/null 2>&1 || rc=$?
+assert_rc "stage_real_kek refuses a non-tmpfs \$XDG_RUNTIME_DIR" "1" "$rc"
+if [ -z "$(find "$disk_runtime_dir" -mindepth 1 2>/dev/null)" ]; then
+  PASS=$((PASS + 1)); echo "[PASS] the refusal writes no file to the non-tmpfs dir"
+else
+  FAIL=$((FAIL + 1)); echo "[FAIL] the refusal writes no file to the non-tmpfs dir"
+fi
 
 echo
 if [ "$FAIL" -gt 0 ]; then
