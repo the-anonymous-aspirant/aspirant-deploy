@@ -127,6 +127,21 @@ services:
       # ADDED here when the relay lands.
       # SMTP_USERNAME: "<the relay account>"
       # SMTP_FROM: "<an address the relay is authorised to send as>"
+      #
+      # Mask the lake's credentials from this service, same reasoning as the
+      # SMTP block above (system_3 #10509, from the #10508 secret-leak
+      # finding): `env_file: .env` below hands the server the explorer-api's
+      # bronze/staging Garage keys and the DuckLake catalog DSN too, and
+      # aspirant-server's Go source reads none of them (no reference at
+      # `6e8dd14`). This is the #9313 bleed for a service that, unlike
+      # browser/advisor/commander/transcriber, still needs env_file for
+      # JWT_SECRET and BREAK_GLASS_TOKEN — so it is masked per-name here
+      # instead of dropping env_file outright.
+      EXPLORER_S3_ACCESS_KEY: ""
+      EXPLORER_S3_SECRET_KEY: ""
+      EXPLORER_S3_STAGING_ACCESS_KEY: ""
+      EXPLORER_S3_STAGING_SECRET_KEY: ""
+      LAKE_CATALOG_DSN: ""
     env_file:
       - .env
     volumes:
