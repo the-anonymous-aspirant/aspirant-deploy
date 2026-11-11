@@ -251,6 +251,7 @@ Requires JWT authentication (Trusted role or above). All endpoints are user-scop
 | `remarkabledata` | `/data/remarkable` | *(service retired 2026-08-17; host data retained pending operator decision)* | Synced reMarkable notebook files + to-device staging |
 | `advisordata` | `/data/advisor` | Advisor | Uploaded documents (contracts, policies, law) |
 | `browserdata` | `/data/aspirant/browser_flows` | Browser | Per-run browser-flow assets (screenshots, DOM snapshots, HAR files), keyed by `run_id` |
+| `/data/aspirant/import-failures` (bind) | `/data/import-failures` | Server only | Copies of failed invoice-import uploads, deleted after 168 h at most; in no backup; mode 0700, uid 1000 (see docs/OPERATIONS.md, "Failed-import copies") |
 | `ollamadata` | `/root/.ollama` | Ollama | LLM model weights (re-downloadable) |
 
 ### Lake Skeleton (phase 0, disposable)

@@ -142,11 +142,27 @@ services:
       EXPLORER_S3_STAGING_ACCESS_KEY: ""
       EXPLORER_S3_STAGING_SECRET_KEY: ""
       LAKE_CATALOG_DSN: ""
+      # Copies of failed invoice-import uploads (system_3 #10536 / #10563,
+      # security ruling c65222). The server keeps each failed file here, under
+      # a server-built name, for its window (168 h at most, enforced in code;
+      # a shorter IMPORT_FAILURE_WINDOW_HOURS may go in .env), then deletes it.
+      # Unset, the server keeps no copies and still writes the failure record.
+      # The directory is the mount below; see docs/OPERATIONS.md "Failed-import
+      # copies" for why it is here and nowhere else.
+      IMPORT_FAILURE_COPIES_DIR: /data/import-failures
     env_file:
       - .env
     volumes:
       - /data/aspirant/files:/data/files
       - /data/aspirant/assets:/data/assets
+      # Failed-import copies: the app user's own bank documents. Mounted into
+      # this service ONLY (tests/import_failures_unit.sh). It is a sibling of
+      # files/ and assets/, never inside either: everything under assets/ is
+      # fetchable by any Trusted user via GET /fetch-object/:etag, and files/
+      # is the Trusted members' file area. It is in no backup. Create it
+      # aspirant:aspirant 0700 BEFORE this service is recreated, or Docker
+      # creates it root-owned and the server (uid 1000) cannot write to it.
+      - /data/aspirant/import-failures:/data/import-failures
     # `condition: service_healthy` is honored by `docker compose up` only.
     # On a HOST REBOOT the Docker daemon restarts unless-stopped containers
     # in parallel and ignores depends_on ordering, so server can start ahead
