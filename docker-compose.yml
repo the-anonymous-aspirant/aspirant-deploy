@@ -150,6 +150,19 @@ services:
       # The directory is the mount below; see docs/OPERATIONS.md "Failed-import
       # copies" for why it is here and nowhere else.
       IMPORT_FAILURE_COPIES_DIR: /data/import-failures
+      # Mask five more names .env carries that this service's Go source never
+      # reads (system_3 #10511, from security's review of #10509's PR 126 —
+      # the same #9313 bleed, for the names that PR left out of scope).
+      # Re-verified at the live server image revision (`af8944a` = origin/main
+      # `af8944a`): `git grep -c <name> -- '*.go'` is 0 for every name below,
+      # with JWT_SECRET (19 hits) as the positive control proving the grep
+      # itself works; no aws-sdk-go or minio-go import either, so no SDK picks
+      # AWS_* up implicitly.
+      PENPOT_DB_PASSWORD: ""
+      PENPOT_SECRET_KEY: ""
+      AWS_ACCESS_KEY_ID: ""
+      AWS_SECRET_ACCESS_KEY: ""
+      REPORT_SEND_TOKEN: ""
     env_file:
       - .env
     volumes:
