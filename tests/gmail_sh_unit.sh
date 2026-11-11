@@ -17,9 +17,14 @@ pass() { echo "  [PASS] $1"; }
 fail() { echo "  [FAIL] $1${2:+ — $2}"; fails=$((fails + 1)); }
 
 T="$(mktemp -d)"
-trap 'rm -rf "$T"' EXIT
+# Real tmpfs, not $T (mktemp's backing filesystem on this host is ext2/ext3,
+# not tmpfs) — gmail.sh now refuses a non-tmpfs runtime dir (#10492), and
+# /run/user/<uid> on a real deploy always is tmpfs, so the test has to
+# mirror that rather than the arbitrary disk mktemp -d happens to use.
+TMPFS_RUNTIME="$(mktemp -d -p /dev/shm gmail-sh-unit-runtime.XXXXXX)"
+trap 'rm -rf "$T" "$TMPFS_RUNTIME"' EXIT
 
-mkdir -p "$T/bin" "$T/secrets" "$T/runtime"
+mkdir -p "$T/bin" "$T/secrets"
 echo '{"fake":"oauth-client"}' > "$T/secrets/gmail-oauth-client.json"
 
 # A fake `docker`: `image inspect` always succeeds (so gmail.sh never tries a
@@ -62,7 +67,7 @@ run_wrapper() {
   set +e
   if [[ -n "$kek" ]]; then
     PATH="$T/bin:$PATH" \
-      XDG_RUNTIME_DIR="$T/runtime" \
+      XDG_RUNTIME_DIR="$TMPFS_RUNTIME" \
       GMAIL_SECRETS_DIR="$T/secrets" \
       STUB_LOG="$T/$name" \
       STUB_RUN_RC="${STUB_RUN_RC:-0}" \
@@ -71,7 +76,7 @@ run_wrapper() {
       "$WRAPPER" status >"$T/$name.stdout" 2>"$T/$name.stderr"
   else
     PATH="$T/bin:$PATH" \
-      XDG_RUNTIME_DIR="$T/runtime" \
+      XDG_RUNTIME_DIR="$TMPFS_RUNTIME" \
       GMAIL_SECRETS_DIR="$T/secrets" \
       STUB_LOG="$T/$name" \
       STUB_RUN_RC="${STUB_RUN_RC:-0}" \
@@ -139,6 +144,33 @@ if [[ -s "$T/nokek.kekfile_path" ]]; then
   fail "no KEK mount is added when LAKE_KEK_HEX is unset" "found: $(cat "$T/nokek.kekfile_path")"
 else
   pass "no KEK mount is added when LAKE_KEK_HEX is unset"
+fi
+
+# --- a non-tmpfs runtime dir is refused outright (#10492, security review
+#     c64726 on #8813): a misconfigured XDG_RUNTIME_DIR must not let a real
+#     KEK land on disk. docker must never even be invoked.
+DISK_RUNTIME="$T/not-tmpfs-runtime"
+mkdir -p "$DISK_RUNTIME"
+rm -f "$T/notmpfs".*
+set +e
+PATH="$T/bin:$PATH" \
+  XDG_RUNTIME_DIR="$DISK_RUNTIME" \
+  GMAIL_SECRETS_DIR="$T/secrets" \
+  STUB_LOG="$T/notmpfs" \
+  LAKE_KEK_HEX="$FAKE_KEK" \
+  LAKE_KEK_FINGERPRINT="nonsecretfp" \
+  "$WRAPPER" status >"$T/notmpfs.stdout" 2>"$T/notmpfs.stderr"
+rc=$?
+set -e
+if [[ "$rc" != "0" ]]; then
+  pass "wrapper refuses a non-tmpfs \$XDG_RUNTIME_DIR"
+else
+  fail "wrapper refuses a non-tmpfs \$XDG_RUNTIME_DIR" "exited 0"
+fi
+if [[ -e "$T/notmpfs.argv" ]]; then
+  fail "docker run is never reached when the runtime dir is refused" "argv: $(cat "$T/notmpfs.argv")"
+else
+  pass "docker run is never reached when the runtime dir is refused"
 fi
 
 echo

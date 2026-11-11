@@ -69,7 +69,12 @@ sys.path.insert(0, os.path.join(_HERE, "kek"))
 sys.path.insert(0, os.path.join(_HERE, "lake"))
 
 from envelope_store import encrypt_for_storage_stream  # noqa: E402
-from kek_loader import ENV_KEK_FINGERPRINT, ENV_KEK_HEX, load_kek_from_env  # noqa: E402
+from kek_loader import (  # noqa: E402
+    ENV_KEK_FINGERPRINT,
+    ENV_KEK_HEX,
+    load_kek_from_env,
+    load_kek_from_file,
+)
 
 import catalog  # noqa: E402
 
@@ -613,7 +618,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
     kek_version = int(os.environ.get("LAKE_KEK_VERSION", str(DEFAULT_KEK_VERSION)))
-    kek = load_kek_from_env(expected_fingerprint=os.environ.get(ENV_KEK_FINGERPRINT) or None)
+
+    # Non-interactive load, same precedence as lake_ingest.py's main(): prefers
+    # the file a real-KEK caller staged (LAKE_KEK_FILE, #10354) over the
+    # one-shot env var LAKE_KEK_HEX, which stays for tests and the synthetic
+    # skeleton. `None` here is not an error yet — the pre-flight below decides,
+    # because a staging area of purely `normal` uploads legitimately needs no key.
+    _kek_fp = os.environ.get(ENV_KEK_FINGERPRINT) or None
+    kek = load_kek_from_file(expected_fingerprint=_kek_fp)
+    if kek is None:
+        kek = load_kek_from_env(expected_fingerprint=_kek_fp)
     spool_dir = os.environ.get("LAKE_SPOOL_DIR", "/scratch-spool")
 
     import boto3

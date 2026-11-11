@@ -62,6 +62,15 @@ cleanup_kek() { [[ -n "$kek_file" ]] && rm -f "$kek_file"; return 0; }
 trap cleanup_kek EXIT
 if [[ -n "${LAKE_KEK_HEX:-}" ]]; then
   runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  # Refuse a runtime dir that is not tmpfs (security review c64726 on #8813,
+  # folded in by #10492): a misconfigured caller must not be able to put the
+  # key file on disk just by pointing XDG_RUNTIME_DIR elsewhere.
+  fstype="$(stat -f -c %T "$runtime_dir" 2>/dev/null || echo "unreadable")"
+  if [[ "$fstype" != "tmpfs" ]]; then
+    echo "refusing: \$XDG_RUNTIME_DIR ($runtime_dir) is not tmpfs (filesystem: $fstype)" \
+         "— a real KEK must never be staged to a persistent disk" >&2
+    exit 1
+  fi
   kek_file="$(mktemp "$runtime_dir/lake_kek.XXXXXX")"
   chmod 600 "$kek_file"
   printf '%s' "$LAKE_KEK_HEX" >"$kek_file"
