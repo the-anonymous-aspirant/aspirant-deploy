@@ -323,6 +323,39 @@ services:
       - /tmp
     mem_limit: 64m
 
+  # A second, separate proxy for the one write capability #10491-A adds
+  # (start/stop a named container from the admin page) — deliberately NOT
+  # the same sidecar as above. `CONTAINERS=1` above is a blanket path-match
+  # on `^/containers`, with no method restriction of its own; flipping
+  # `POST=1` on that same proxy would, through that one rule, also grant
+  # create/remove/rename/kill/exec-create on any container, since the rule
+  # that currently only admits GETs (because nothing else gets past the
+  # top-level POST gate) does not itself distinguish GET from POST once
+  # that gate opens (researched against the real `haproxy.cfg` this image
+  # ships, system_3 #10514). `CONTAINERS=0` here, so this proxy can do
+  # nothing EXCEPT the two explicitly-named actions below — not list, not
+  # inspect, not stats. The container-name allowlist (which services may be
+  # targeted at all) lives in aspirant-monitor's own code, not here: this
+  # proxy would permit start/stop on ANY container id if asked, including
+  # this cell's own infrastructure.
+  docker-socket-proxy-write:
+    logging: *default-logging
+    image: tecnativa/docker-socket-proxy:v0.4.2
+    restart: unless-stopped
+    environment:
+      POST: 1
+      ALLOW_START: 1
+      ALLOW_STOP: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - docker_proxy_net
+    read_only: true
+    tmpfs:
+      - /run
+      - /tmp
+    mem_limit: 64m
+
   monitor:
     logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-monitor:latest
@@ -341,6 +374,11 @@ services:
       - /sys:/host/sys:ro
     environment:
       DOCKER_SOCKET: tcp://docker-socket-proxy:2375
+      # The write-scoped sidecar (system_3 #10514): start/stop only, no list
+      # or inspect. Used only by the new, allowlisted admin start/stop
+      # endpoint -- every other read in this service keeps using
+      # DOCKER_SOCKET above, unchanged.
+      DOCKER_SOCKET_WRITE: tcp://docker-socket-proxy-write:2375
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER:-}
@@ -356,6 +394,7 @@ services:
       - docker_proxy_net
     depends_on:
       - docker-socket-proxy
+      - docker-socket-proxy-write
 
   advisor:
     logging: *default-logging

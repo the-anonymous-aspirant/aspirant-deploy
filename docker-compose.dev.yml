@@ -169,6 +169,25 @@ services:
       - /tmp
     mem_limit: 64m
 
+  # Mirrors docker-compose.yml's own docker-socket-proxy-write -- see that
+  # service's comment for rationale (system_3 #10514).
+  docker-socket-proxy-write:
+    logging: *default-logging
+    image: tecnativa/docker-socket-proxy:v0.4.2
+    environment:
+      POST: 1
+      ALLOW_START: 1
+      ALLOW_STOP: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - docker_proxy_net
+    read_only: true
+    tmpfs:
+      - /run
+      - /tmp
+    mem_limit: 64m
+
   monitor:
     logging: *default-logging
     build:
@@ -182,6 +201,7 @@ services:
       - /sys:/host/sys:ro
     environment:
       DOCKER_SOCKET: tcp://docker-socket-proxy:2375
+      DOCKER_SOCKET_WRITE: tcp://docker-socket-proxy-write:2375
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER:-}
@@ -194,6 +214,7 @@ services:
       - docker_proxy_net
     depends_on:
       - docker-socket-proxy
+      - docker-socket-proxy-write
 
   # Dev build of the Histoire workbench straight from the sibling DS
   # checkout (prod uses the GHCR image published by the DS pre-push hook).
