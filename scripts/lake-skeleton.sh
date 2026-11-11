@@ -517,13 +517,21 @@ case "${1:-}" in
     ;;
 
   seed)
+    # NOT safe to re-run once real data can share this catalog (system_3
+    # #10513: a 2026-11-02 reseed silently destroyed six real financial
+    # records' catalog rows three days after they were loaded, because this
+    # comment used to say the opposite). fixtures.py refuses on its own if
+    # asset_inventory/ingest_runs hold a non-fixture dataset_id, but that is
+    # the backstop, not the premise -- the real fix is giving fixtures their
+    # own catalog/bucket so this verb never shares one with real data again.
     compose --profile client run --rm duckdb /work/fixtures.py
     ;;
 
   ingest)
     # The real-data ingest runner (#4271 / #4238-B1). Separate verb, separate
-    # script: `seed` writes obviously-synthetic fixtures and is safe to re-run
-    # anywhere; this one writes the operator's actual bytes and is not.
+    # script: `seed` writes obviously-synthetic fixtures; this one writes the
+    # operator's actual bytes. Neither is safe to re-run carelessly once both
+    # can share one catalog -- see `seed`'s own comment above.
     #
     # The manifest's own directory is mounted read-only at /source, so relative
     # record paths inside the manifest resolve exactly as they do on the host.
