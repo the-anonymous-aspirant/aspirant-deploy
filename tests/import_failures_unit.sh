@@ -77,11 +77,13 @@ KNOWN_ANCESTORS = {("monitor", "/data", True)}
 
 def locked_down(spec):
     """True iff spec runs as a non-root uid with every capability dropped
-    (the #10568-A3 lockdown KNOWN_ANCESTORS relies on)."""
+    (the #10568-A3 lockdown KNOWN_ANCESTORS relies on). An empty user: "" is
+    root, same as omitting it; group_add can put it back in group aspirant
+    (reads files/, uploads/); privileged undoes the capability bounds."""
     user = spec.get("user")
-    if user is None:
+    if user is None or not str(user).strip():
         return False
-    if any(part in ("0", "root", "1000") for part in str(user).split(":")):
+    if any(part in ("0", "root", "1000", "aspirant") for part in str(user).split(":")):
         return False
     cap_drop = spec.get("cap_drop") or []
     if isinstance(cap_drop, str):
@@ -89,6 +91,10 @@ def locked_down(spec):
     if "ALL" not in cap_drop:
         return False
     if spec.get("cap_add"):
+        return False
+    if spec.get("group_add"):
+        return False
+    if spec.get("privileged"):
         return False
     return True
 
@@ -241,6 +247,27 @@ services:
     user: "65534:65534"
     volumes: ["/data:/host/data:ro"]
 EOF
+write ancestor_monitor_group_add <<'EOF'
+services:
+  server:
+    environment: {IMPORT_FAILURE_COPIES_DIR: /data/import-failures}
+    volumes: ["/data/aspirant/import-failures:/data/import-failures"]
+  monitor:
+    user: "65534:65534"
+    cap_drop: [ALL]
+    group_add: ["1000"]
+    volumes: ["/data:/host/data:ro"]
+EOF
+write ancestor_monitor_empty_user <<'EOF'
+services:
+  server:
+    environment: {IMPORT_FAILURE_COPIES_DIR: /data/import-failures}
+    volumes: ["/data/aspirant/import-failures:/data/import-failures"]
+  monitor:
+    user: ""
+    cap_drop: [ALL]
+    volumes: ["/data:/host/data:ro"]
+EOF
 write long_form_other <<'EOF'
 services:
   server:
@@ -281,7 +308,7 @@ services:
     environment: {IMPORT_FAILURE_COPIES_DIR: /data/import-failures}
 EOF
 
-for bad in other_service ancestor ancestor_new_service ancestor_monitor_rw ancestor_monitor_no_user ancestor_monitor_uid1000 ancestor_monitor_no_capdrop long_form_other under_assets read_only env_mismatch env_missing mount_missing; do
+for bad in other_service ancestor ancestor_new_service ancestor_monitor_rw ancestor_monitor_no_user ancestor_monitor_uid1000 ancestor_monitor_no_capdrop ancestor_monitor_group_add ancestor_monitor_empty_user long_form_other under_assets read_only env_mismatch env_missing mount_missing; do
   if check_file "$TMPDIR_TEST/$bad.yml" yes >/dev/null; then
     record no "negative control ($bad): the check refuses it"
   else
