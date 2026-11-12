@@ -64,7 +64,33 @@ HOST = "/data/aspirant/import-failures"
 # directories do stop it — the mount stays allowed because what it can
 # actually read is now gated by those same file modes, not by this
 # exception. No other service, and no writable variant, is allowed.
+#
+# That safety is conditional, not structural: it holds only while the named
+# service actually carries the non-root `user:` and `cap_drop: [ALL]` this
+# task gave it (security review on #10574, F1). So the exception below is
+# also conditional — honored only when the service's own spec still shows
+# that lockdown; a later PR that drops `user:` or `cap_drop` to get a read
+# working again must re-expose the mount here, not fall back to root
+# silently.
 KNOWN_ANCESTORS = {("monitor", "/data", True)}
+
+
+def locked_down(spec):
+    """True iff spec runs as a non-root uid with every capability dropped
+    (the #10568-A3 lockdown KNOWN_ANCESTORS relies on)."""
+    user = spec.get("user")
+    if user is None:
+        return False
+    if any(part in ("0", "root", "1000") for part in str(user).split(":")):
+        return False
+    cap_drop = spec.get("cap_drop") or []
+    if isinstance(cap_drop, str):
+        cap_drop = [cap_drop]
+    if "ALL" not in cap_drop:
+        return False
+    if spec.get("cap_add"):
+        return False
+    return True
 
 path, require = sys.argv[1], sys.argv[2] == "yes"
 services = (yaml.safe_load(open(path)) or {}).get("services") or {}
@@ -104,9 +130,12 @@ for name, spec in services.items():
         exposes = src == HOST or src.startswith(HOST + "/")
         ancestor = HOST.startswith(src + "/") or src == "/"
         if ancestor:
-            if (name, src, ro) in KNOWN_ANCESTORS:
+            if (name, src, ro) in KNOWN_ANCESTORS and locked_down(spec):
                 print(f"NOTE: {name} mounts {src} read-only, an ancestor of {HOST} "
                       "(known, pre-existing; see KNOWN_ANCESTORS)", file=sys.stderr)
+            elif (name, src, ro) in KNOWN_ANCESTORS:
+                bad.append(f"{name} mounts {src} (ancestor of {HOST}) but is not locked down "
+                           "(user/cap_drop) to honor the KNOWN_ANCESTORS exception")
             else:
                 bad.append(f"{name} mounts {src}, an ancestor of {HOST}")
         if not exposes:
@@ -184,6 +213,34 @@ services:
   monitor:
     volumes: ["/data:/host/data"]
 EOF
+write ancestor_monitor_no_user <<'EOF'
+services:
+  server:
+    environment: {IMPORT_FAILURE_COPIES_DIR: /data/import-failures}
+    volumes: ["/data/aspirant/import-failures:/data/import-failures"]
+  monitor:
+    cap_drop: [ALL]
+    volumes: ["/data:/host/data:ro"]
+EOF
+write ancestor_monitor_uid1000 <<'EOF'
+services:
+  server:
+    environment: {IMPORT_FAILURE_COPIES_DIR: /data/import-failures}
+    volumes: ["/data/aspirant/import-failures:/data/import-failures"]
+  monitor:
+    user: "1000:1000"
+    cap_drop: [ALL]
+    volumes: ["/data:/host/data:ro"]
+EOF
+write ancestor_monitor_no_capdrop <<'EOF'
+services:
+  server:
+    environment: {IMPORT_FAILURE_COPIES_DIR: /data/import-failures}
+    volumes: ["/data/aspirant/import-failures:/data/import-failures"]
+  monitor:
+    user: "65534:65534"
+    volumes: ["/data:/host/data:ro"]
+EOF
 write long_form_other <<'EOF'
 services:
   server:
@@ -224,7 +281,7 @@ services:
     environment: {IMPORT_FAILURE_COPIES_DIR: /data/import-failures}
 EOF
 
-for bad in other_service ancestor ancestor_new_service ancestor_monitor_rw long_form_other under_assets read_only env_mismatch env_missing mount_missing; do
+for bad in other_service ancestor ancestor_new_service ancestor_monitor_rw ancestor_monitor_no_user ancestor_monitor_uid1000 ancestor_monitor_no_capdrop long_form_other under_assets read_only env_mismatch env_missing mount_missing; do
   if check_file "$TMPDIR_TEST/$bad.yml" yes >/dev/null; then
     record no "negative control ($bad): the check refuses it"
   else
@@ -244,6 +301,8 @@ services:
   browser:
     volumes: ["/data/aspirant/files:/data/files"]
   monitor:
+    user: "65534:65534"
+    cap_drop: [ALL]
     volumes: ["/data:/host/data:ro"]
 EOF
 if check_file "$TMPDIR_TEST/good.yml" yes >/dev/null 2>&1; then
