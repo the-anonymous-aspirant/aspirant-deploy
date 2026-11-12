@@ -216,6 +216,8 @@ services:
       ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
       ALERT_EMAIL_FROM: ${ALERT_EMAIL_FROM:-}
       DAILY_REPORT_HOUR: ${DAILY_REPORT_HOUR:-8}
+      # system_3 #10680: the start/stop bearer token, as in docker-compose.yml.
+      CONTROL_TOKEN: ${MONITOR_CONTROL_TOKEN:-}
     networks:
       - default
       - docker_proxy_net

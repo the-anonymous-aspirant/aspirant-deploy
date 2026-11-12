@@ -154,6 +154,34 @@ EOF
     else
       record no "resolved config: server still receives both from .env"
     fi
+    # system_3 #10680: the start/stop token reaches monitor as CONTROL_TOKEN
+    # and server as MONITOR_CONTROL_TOKEN (its env_file), and no one else.
+    control="$(python3 - "$TMPDIR_TEST/resolved.json" <<'EOF'
+import json
+import sys
+
+cfg = json.load(open(sys.argv[1]))["services"]
+
+
+def env(service):
+    return cfg.get(service, {}).get("environment") or {}
+
+
+holders = sorted(
+    f"{name}:{key}"
+    for name in cfg
+    for key, value in env(name).items()
+    if str(value) == "sentinel-MONITOR_CONTROL_TOKEN"
+)
+print(env("monitor").get("CONTROL_TOKEN", ""), env("server").get("MONITOR_CONTROL_TOKEN", ""), " ".join(holders))
+EOF
+)"
+    want="sentinel-MONITOR_CONTROL_TOKEN sentinel-MONITOR_CONTROL_TOKEN monitor:CONTROL_TOKEN server:MONITOR_CONTROL_TOKEN"
+    if [[ "$control" == "$want" ]]; then
+      record yes "resolved config: the control token reaches monitor (CONTROL_TOKEN) and server (MONITOR_CONTROL_TOKEN) only"
+    else
+      record no "resolved config: the control token reaches monitor (CONTROL_TOKEN) and server (MONITOR_CONTROL_TOKEN) only (got: $control)"
+    fi
   else
     record no "resolved config: docker compose config failed ($(head -1 "$TMPDIR_TEST/resolved.err"))"
   fi
