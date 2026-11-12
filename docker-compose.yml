@@ -444,6 +444,12 @@ services:
       # system_3 #8739: bearer token system_3 presents on POST /report/send;
       # unset keeps that endpoint disabled (503). Set in .env, recreate monitor.
       REPORT_SEND_TOKEN: ${REPORT_SEND_TOKEN:-}
+      # system_3 #10680: the start/stop bearer token (#10514). It is the same
+      # value the server sends as MONITOR_CONTROL_TOKEN (it reads that from its
+      # env_file), handed to monitor by this one name and never by env_file.
+      # Unset keeps start/stop disabled (503 control_disabled). Set it in .env,
+      # then recreate monitor and server.
+      CONTROL_TOKEN: ${MONITOR_CONTROL_TOKEN:-}
     networks:
       - default
       - docker_proxy_net
