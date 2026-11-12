@@ -207,7 +207,7 @@ ssh -p 41922 aspirant@home.the-aspirant.com 'ls -l ~/.config/aspirant/ddns.env' 
 - create roles.
 
 Each service role instead:
-- owns that service's tables, kept in its own schema, which heads its `search_path`. Server's tables stay in `public`.
+- owns that service's tables, kept in its own schema, which heads its `search_path`.
 - may read one other table: commander reads `voice_messages` through a view in its own schema.
 
 None of the roles can create anything in `public`. A role that could would be able to plant a function or operator that a superuser session (server, backups, your `psql`) resolves to. That's the CVE-2018-1058 class, and `tests/db_roles_unit.sh` reproduces it as a control. Keeping the tables in `public` with a changed owner isn't enough either, because `CREATE INDEX` needs CREATE on the table's schema even when the index already exists.
@@ -297,6 +297,31 @@ cd ~/aspirant-deploy
 ```
 
 `aspirant_signal_ro`, the system_3 cell-signal reader, keeps its SELECT grant when `processed_valuations` moves, because grants travel with the table. `db-roles.sh` points the role's `search_path` at commander's schema. Its password and grant stay with system_3's `scripts/provision_aspirant_signal_ro.py`.
+
+#### aspirant-server's two roles (system_3 #9324)
+
+Server gets two roles and one schema, `aspirant_server`, rather than one role:
+
+| role | what it can do | who uses it |
+|---|---|---|
+| `aspirant_server_owner` | owns `aspirant_server` and server's tables; may create and alter there, nowhere else | the one-shot migration step (GORM AutoMigrate) |
+| `aspirant_server` | SELECT, INSERT, UPDATE and DELETE on server's tables and `nextval` on their sequences; no DDL, no other schema | the running server |
+
+Neither is a superuser, and neither can create roles or databases. The superuser is left for you and for backups. The long-running, internet-facing process never holds credentials that can drop or alter `users`.
+
+Server's tables are every ordinary table in `public` or `aspirant_server` that isn't a service table, so a table AutoMigrate adds later needs no entry in the SQL. Provision grants the runtime role its DML wherever they are, and default privileges cover the tables the migration role creates later.
+
+`move server` and `unmove server` work like the services' modes. A server on the superuser sees only `public`, and the migration role can alter only tables it owns, so stop server across either one:
+
+```bash
+docker compose stop server
+./scripts/db-roles.sh move server     # rollback: unmove server
+docker compose up -d server
+```
+
+The compose switch that runs the migration step as `aspirant_server_owner` and server as `aspirant_server` is system_3 #9324-B1. The go-live order is #9324-C1.
+
+`aspirant_signal_ro` reads `proxy_request_log`'s five granted columns. That grant travels with the table, and `db-roles.sh` gives the role USAGE on `aspirant_server` once the table is there. Its `search_path` is left alone: system_3 finds the table's schema itself.
 
 `tests/db_roles_unit.sh` boots a throwaway `pgvector/pgvector:pg16` and runs each service image's real startup database code. It runs it first as the superuser, then as the service's role after `move`, and then checks:
 - every refusal above;
