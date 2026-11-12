@@ -1,5 +1,6 @@
 -- Per-service database roles for transcriber, commander, advisor and browser
--- (system_3 #9317-A1, #9318; design #9317 c57820, after security's c57812).
+-- (system_3 #9317-A1, #9318; design #9317 c57820, after security's c57812),
+-- and aspirant-server's two roles (system_3 #9324-A1, #10687; design #9324).
 -- Run by scripts/db-roles.sh as the superuser, which says how the inputs
 -- arrive. Every run is idempotent.
 --
@@ -12,8 +13,16 @@
 -- stays in `public` is not enough either, because CREATE INDEX needs CREATE on
 -- the table's schema even when the index exists; hence the move.
 --
+-- aspirant-server gets two roles and one schema, aspirant_server:
+-- aspirant_server_owner owns the schema and server's tables and is what
+-- GORM's AutoMigrate runs as; aspirant_server, the role the long-running
+-- server connects as, gets DML on those tables and nothing else. Server's
+-- tables are every ordinary table in `public` or `aspirant_server` that is not
+-- a service table, so a table AutoMigrate adds later needs no entry here.
+--
 -- Inputs (psql variables read from the environment with \getenv):
 --   pw_<svc>       the four role passwords
+--   pw_server, pw_server_owner   aspirant-server's runtime and migration roles
 --   move_list      comma-separated services whose tables move to their schema
 --   unmove_list    comma-separated services whose tables move back to public
 
@@ -22,6 +31,8 @@
 \getenv pw_commander ASPIRANT_COMMANDER_DB_PASSWORD
 \getenv pw_advisor ASPIRANT_ADVISOR_DB_PASSWORD
 \getenv pw_browser ASPIRANT_BROWSER_DB_PASSWORD
+\getenv pw_server ASPIRANT_SERVER_DB_PASSWORD
+\getenv pw_server_owner ASPIRANT_SERVER_OWNER_DB_PASSWORD
 \getenv move_list DB_ROLES_MOVE
 \getenv unmove_list DB_ROLES_UNMOVE
 \if :{?move_list}
@@ -76,13 +87,28 @@ CREATE TEMP VIEW located AS
     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
                                   AND n.nspname IN ('public', 'aspirant_' || s.svc);
 
+-- Server's tables, wherever they are: every ordinary table in `public` or
+-- `aspirant_server` that is neither a service table nor an extension's.
+CREATE TEMP VIEW server_located AS
+  SELECT c.relname AS tbl, n.nspname AS schema,
+         CASE n.nspname WHEN 'public' THEN 'public' ELSE 'own' END AS place
+    FROM pg_catalog.pg_class c
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+   WHERE c.relkind IN ('r', 'p')
+     AND n.nspname IN ('public', 'aspirant_server')
+     AND c.relname NOT IN (SELECT tbl FROM pg_temp.service_tables)
+     AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
+                      WHERE d.classid = 'pg_catalog.pg_class'::pg_catalog.regclass
+                        AND d.objid = c.oid AND d.deptype = 'e');
+
 DO $$
 DECLARE
   bad text;
 BEGIN
   SELECT string_agg(DISTINCT r.svc, ', ') INTO bad
     FROM pg_temp.request r
-   WHERE r.svc NOT IN (SELECT svc FROM pg_temp.service_tables);
+   WHERE r.svc NOT IN (SELECT svc FROM pg_temp.service_tables)
+     AND r.svc <> 'server';
   IF bad IS NOT NULL THEN
     RAISE EXCEPTION 'db-roles: unknown service(s): %', bad;
   END IF;
@@ -98,6 +124,17 @@ BEGIN
   IF bad IS NOT NULL THEN
     RAISE EXCEPTION 'db-roles: refusing, service tables carry triggers or rules: %', bad;
   END IF;
+  SELECT string_agg(format('%I.%I', l.schema, l.tbl), ', ') INTO bad
+    FROM pg_temp.server_located l
+    JOIN pg_catalog.pg_class c ON c.relname = l.tbl
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace AND n.nspname = l.schema
+   WHERE EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal)
+      OR EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite w WHERE w.ev_class = c.oid AND w.rulename <> '_RETURN')
+      OR c.relrowsecurity
+      OR EXISTS (SELECT 1 FROM pg_catalog.pg_policy p WHERE p.polrelid = c.oid);
+  IF bad IS NOT NULL THEN
+    RAISE EXCEPTION 'db-roles: refusing, server tables carry triggers, rules or row-level security: %', bad;
+  END IF;
 
   -- The same goes for code a table's owner can attach without a trigger: a
   -- column default, CHECK, generated column, expression index, domain
@@ -109,7 +146,7 @@ BEGIN
     FROM (SELECT pronamespace AS nsp, proname AS name FROM pg_catalog.pg_proc
           UNION ALL SELECT oprnamespace, oprname FROM pg_catalog.pg_operator) x
     JOIN pg_catalog.pg_namespace n ON n.oid = x.nsp
-   WHERE n.nspname IN (SELECT 'aspirant_' || svc FROM pg_temp.service_tables);
+   WHERE n.nspname IN (SELECT 'aspirant_' || svc FROM pg_temp.service_tables UNION ALL SELECT 'aspirant_server');
   IF bad IS NOT NULL THEN
     RAISE EXCEPTION 'db-roles: refusing, service schemas contain functions or operators: %', bad;
   END IF;
@@ -129,6 +166,11 @@ BEGIN
     FROM (SELECT tbl FROM pg_temp.located GROUP BY tbl HAVING count(*) > 1) d;
   IF bad IS NOT NULL THEN
     RAISE EXCEPTION 'db-roles: refusing, tables exist in both public and the service schema: %', bad;
+  END IF;
+  SELECT string_agg(tbl, ', ') INTO bad
+    FROM (SELECT tbl FROM pg_temp.server_located GROUP BY tbl HAVING count(*) > 1) d;
+  IF bad IS NOT NULL THEN
+    RAISE EXCEPTION 'db-roles: refusing, tables exist in both public and aspirant_server: %', bad;
   END IF;
 
   -- Commander reads voice_messages. A commander still on the superuser has
@@ -166,11 +208,29 @@ ALTER ROLE aspirant_commander WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOR
 ALTER ROLE aspirant_advisor WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD :'pw_advisor';
 ALTER ROLE aspirant_browser WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD :'pw_browser';
 
+SELECT format('CREATE ROLE %I', r)
+  FROM (VALUES ('aspirant_server'), ('aspirant_server_owner')) v(r)
+ WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = v.r)
+\gexec
+ALTER ROLE aspirant_server WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD :'pw_server';
+ALTER ROLE aspirant_server_owner WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD :'pw_server_owner';
+
 SELECT format('CREATE SCHEMA IF NOT EXISTS %1$I AUTHORIZATION %1$I', r),
        format('ALTER SCHEMA %1$I OWNER TO %1$I', r),
        format('ALTER ROLE %1$I SET search_path = %1$I, public', r),
        format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), r)
   FROM (SELECT DISTINCT 'aspirant_' || svc AS r FROM pg_temp.service_tables) s
+\gexec
+
+-- Server's schema belongs to the migration role. The runtime role may use it
+-- but not create in it, so it can run no DDL anywhere.
+CREATE SCHEMA IF NOT EXISTS aspirant_server AUTHORIZATION aspirant_server_owner;
+ALTER SCHEMA aspirant_server OWNER TO aspirant_server_owner;
+GRANT USAGE ON SCHEMA aspirant_server TO aspirant_server;
+ALTER ROLE aspirant_server SET search_path = aspirant_server, public;
+ALTER ROLE aspirant_server_owner SET search_path = aspirant_server, public;
+SELECT format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), r)
+  FROM (VALUES ('aspirant_server'), ('aspirant_server_owner')) v(r)
 \gexec
 
 -- Moves, in an order that keeps every view and grant resolvable: commander
@@ -195,6 +255,50 @@ SELECT format('ALTER TABLE %I.%I OWNER TO %I', l.schema, l.tbl, l.schema)
   FROM pg_temp.located l
  WHERE l.place = 'own'
 \gexec
+
+-- Server's moves. Server must be stopped across a move (system_3 #9324): a
+-- server on the superuser searches only `public`, and one on its own roles
+-- needs the migration role to own what AutoMigrate alters. ALTER TABLE ...
+-- OWNER also hands over the sequences the table's columns own.
+SELECT format('ALTER TABLE public.%I SET SCHEMA aspirant_server', l.tbl)
+  FROM pg_temp.server_located l
+ WHERE l.place = 'public'
+   AND EXISTS (SELECT 1 FROM pg_temp.request WHERE op = 'move' AND svc = 'server')
+ ORDER BY l.tbl
+\gexec
+SELECT format('ALTER TABLE aspirant_server.%I SET SCHEMA public', l.tbl),
+       format('ALTER TABLE public.%I OWNER TO %I', l.tbl, current_user)
+  FROM pg_temp.server_located l
+ WHERE l.place = 'own'
+   AND EXISTS (SELECT 1 FROM pg_temp.request WHERE op = 'unmove' AND svc = 'server')
+ ORDER BY l.tbl
+\gexec
+SELECT format('ALTER TABLE aspirant_server.%I OWNER TO aspirant_server_owner', l.tbl)
+  FROM pg_temp.server_located l
+ WHERE l.place = 'own'
+\gexec
+
+-- The runtime role's grants, re-issued wherever server's tables are, so the
+-- role works before the move as well as after it: DML on the tables, and
+-- nextval on the sequences their columns own. The default privileges cover
+-- what AutoMigrate creates in aspirant_server later.
+SELECT format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.%I TO aspirant_server', l.schema, l.tbl)
+  FROM pg_temp.server_located l
+\gexec
+SELECT DISTINCT format('GRANT USAGE, SELECT ON SEQUENCE %I.%I TO aspirant_server', sn.nspname, sq.relname)
+  FROM pg_temp.server_located l
+  JOIN pg_catalog.pg_namespace tn ON tn.nspname = l.schema
+  JOIN pg_catalog.pg_class t ON t.relname = l.tbl AND t.relnamespace = tn.oid
+  JOIN pg_catalog.pg_depend d ON d.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass
+                             AND d.refobjid = t.oid AND d.deptype IN ('a', 'i')
+                             AND d.classid = 'pg_catalog.pg_class'::pg_catalog.regclass
+  JOIN pg_catalog.pg_class sq ON sq.oid = d.objid AND sq.relkind = 'S'
+  JOIN pg_catalog.pg_namespace sn ON sn.oid = sq.relnamespace
+\gexec
+ALTER DEFAULT PRIVILEGES FOR ROLE aspirant_server_owner IN SCHEMA aspirant_server
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO aspirant_server;
+ALTER DEFAULT PRIVILEGES FOR ROLE aspirant_server_owner IN SCHEMA aspirant_server
+  GRANT USAGE, SELECT ON SEQUENCES TO aspirant_server;
 
 -- Commander's one cross-service read. The grant travels with the table. When
 -- voice_messages is in transcriber's schema, commander reaches it through a view
@@ -230,6 +334,20 @@ SELECT CASE l.place
    AND EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'aspirant_signal_ro')
 \gexec
 
+-- The same reader's column grant on proxy_request_log travels with server's
+-- table; it needs only USAGE on the schema the table is in. Its path is left
+-- alone: system_3 finds the table's schema itself (#9324-A3), and putting
+-- aspirant_server on the path would let the migration role plant functions
+-- the reader's sessions resolve.
+SELECT CASE l.place
+         WHEN 'own' THEN 'GRANT USAGE ON SCHEMA aspirant_server TO aspirant_signal_ro'
+         ELSE 'REVOKE USAGE ON SCHEMA aspirant_server FROM aspirant_signal_ro'
+       END
+  FROM pg_temp.server_located l
+ WHERE l.tbl = 'proxy_request_log'
+   AND EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'aspirant_signal_ro')
+\gexec
+
 COMMIT;
 
 \pset footer off
@@ -240,3 +358,8 @@ SELECT 'aspirant_' || l.svc AS role,
   FROM pg_temp.located l
  GROUP BY l.svc
  ORDER BY l.svc;
+SELECT r AS role,
+       (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = r) AS superuser,
+       (SELECT count(*) FROM pg_temp.server_located WHERE place = 'own') AS tables_in_own_schema,
+       (SELECT count(*) FROM pg_temp.server_located WHERE place = 'public') AS tables_in_public
+  FROM (VALUES ('aspirant_server_owner'), ('aspirant_server')) v(r);

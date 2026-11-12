@@ -19,6 +19,9 @@ set -euo pipefail
 #   - the trigger refusal;
 #   - rollback with `unmove`;
 #   - idempotence.
+# aspirant-server (system_3 #9324-A1) runs its real AutoMigrate from its image
+# too: as the superuser in phase 1, then as aspirant_server_owner after
+# `move server`, and its runtime role is held to DML.
 # Running the images, not a model of them, is the point. It is how this test
 # found that a no-op `CREATE INDEX IF NOT EXISTS` needs CREATE on the schema.
 #
@@ -75,7 +78,7 @@ SERVICES=(transcriber commander advisor browser)
 if ! docker version >/dev/null 2>&1; then
   echo "  SKIP  integration: docker is not available"; finish
 fi
-for svc in "${SERVICES[@]}"; do
+for svc in "${SERVICES[@]}" server; do
   if ! docker image inspect "$IMAGE_PREFIX-$svc:latest" >/dev/null 2>&1; then
     echo "  SKIP  integration: image $IMAGE_PREFIX-$svc:latest is not present"; finish
   fi
@@ -84,7 +87,7 @@ done
 DB=aspirant_online_db
 ADMIN_PW="$(openssl rand -hex 16)"
 declare -A ROLE_PW
-for svc in "${SERVICES[@]}"; do ROLE_PW[$svc]="$(openssl rand -hex 16)"; done
+for svc in "${SERVICES[@]}" server server_owner; do ROLE_PW[$svc]="$(openssl rand -hex 16)"; done
 SIGNAL_PW="$(openssl rand -hex 16)"
 
 docker network create "$NET" >/dev/null
@@ -106,14 +109,45 @@ refused() {
 }
 is_super() { [[ "$(psql_as aspirant_admin "SELECT rolsuper FROM pg_roles WHERE rolname = '$1'")" == t ]]; }
 
-# The cell's starting state: vector installed, a server table the services
-# must never reach, and the system_3 signal reader as #6226 provisions it.
+# pg_errors <regex>: how many lines of the postgres log match, so a step can
+# be checked for the privilege errors GORM logs and carries on past.
+pg_errors() { docker logs "$PG" 2>&1 | grep -cE "$1" || true; }
+
+# run_server_migrate <db user> <db password>: boot the real server image until
+# its AutoMigrate has run (main.go logs "migrated successfully" whether or not
+# a migration failed, so callers check the postgres log too), then remove it.
+run_server_migrate() {
+  local name="db-roles-srv-$$" log="$TMPDIR_TEST/server-$1.log" ok=1
+  docker run -d --name "$name" --network "$NET" \
+    -e DB_HOST="$PG" -e DB_PORT=5432 -e DB_NAME="$DB" -e DB_USER="$1" -e DB_PASSWORD="$2" \
+    -e JWT_SECRET="$(openssl rand -hex 32)" "$IMAGE_PREFIX-server:latest" >/dev/null
+  for _ in $(seq 120); do
+    if docker logs "$name" 2>&1 | grep -q "migrated successfully"; then ok=0; break; fi
+    [[ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" == true ]] || break
+    sleep 1
+  done
+  docker logs "$name" >"$log" 2>&1 || true
+  docker rm -f "$name" >/dev/null 2>&1 || true
+  return "$ok"
+}
+
+# server's real users.email is text, for which pg_catalog.lower(text) is an exact
+# match, so the overload controls below cast to varchar: the case a planted
+# lower(varchar) wins, as it did against the varchar column this test used to seed.
+# The cell's starting state: vector installed, server's real tables in
+# `public` from its own AutoMigrate as the superuser (with a user, for the
+# overload control below), and the system_3 signal reader as #6226 provisions it.
+psql_as aspirant_admin "CREATE EXTENSION vector" >/dev/null
+record "$(yes_if run_server_migrate aspirant_admin "$ADMIN_PW")" \
+  "phase 1: server's AutoMigrate runs as the superuser (today's production)"
 psql_as aspirant_admin "
-  CREATE EXTENSION vector;
-  CREATE TABLE users (id int PRIMARY KEY, email varchar);
-  INSERT INTO users VALUES (1, 'Admin@Example.com');
+  INSERT INTO users (username, email) VALUES ('admin', 'Admin@Example.com');
   CREATE ROLE aspirant_signal_ro LOGIN PASSWORD '$SIGNAL_PW';
-  GRANT USAGE ON SCHEMA public TO aspirant_signal_ro" >/dev/null
+  GRANT USAGE ON SCHEMA public TO aspirant_signal_ro;
+  GRANT SELECT (created_at, upstream, latency_ms, status_code, timeout_ms) ON proxy_request_log TO aspirant_signal_ro;
+  INSERT INTO proxy_request_log (route, upstream, status_code, latency_ms, timeout_ms, created_at)
+    VALUES ('/seed', 'seed', 200, 5, 1000, now())" >/dev/null
+SERVER_TABLES="$(psql_as aspirant_admin "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'")"
 
 # Each service's startup database code, as its app/main.py lifespan runs it.
 POLL='with m.engine.connect() as c:
@@ -160,7 +194,7 @@ done
 psql_as aspirant_admin "GRANT SELECT ON processed_valuations TO aspirant_signal_ro" >/dev/null
 
 {
-  for svc in "${SERVICES[@]}"; do
+  for svc in "${SERVICES[@]}" server server_owner; do
     echo "ASPIRANT_${svc^^}_DB_PASSWORD=${ROLE_PW[$svc]}"
   done
 } > "$TMPDIR_TEST/roles.env"
@@ -207,6 +241,15 @@ record "$(yes_if test "$unmoved" = yes)" "provision moves no table"
 nonsuper=yes
 for svc in "${SERVICES[@]}"; do is_super "aspirant_$svc" && nonsuper=no; done
 record "$(yes_if test "$nonsuper" = yes)" "the four roles exist and none is a superuser"
+srv_roles="$(psql_as aspirant_admin "SELECT string_agg(format('%s:%s%s%s%s', rolname, rolsuper, rolcreaterole, rolcreatedb, rolcanlogin), ' ' ORDER BY rolname)
+  FROM pg_roles WHERE rolname IN ('aspirant_server', 'aspirant_server_owner')")"
+record "$(yes_if test "$srv_roles" = "aspirant_server:ffft aspirant_server_owner:ffft")" \
+  "server's two roles exist: login, not superuser, no CREATEROLE or CREATEDB${srv_roles:+ ($srv_roles)}"
+record "$(yes_if test "$(psql_as aspirant_admin "SELECT count(*) FROM pg_tables WHERE schemaname = 'aspirant_server'")" -eq 0)" \
+  "provision moves none of server's $SERVER_TABLES tables"
+record "$(yes_if psql_as aspirant_server "INSERT INTO proxy_request_log (route, upstream) VALUES ('/p', 'p');
+  UPDATE proxy_request_log SET status_code = 200 WHERE route = '/p'; DELETE FROM proxy_request_log WHERE route = '/p'")" \
+  "before the move, server's runtime role has DML on its tables in public, nextval included"
 
 # The attack security reproduced (c57812): a role that can create in `public`
 # plants an overload, and a superuser's ordinary call runs it. First shown
@@ -214,7 +257,7 @@ record "$(yes_if test "$nonsuper" = yes)" "the four roles exist and none is a su
 psql_as aspirant_admin "CREATE ROLE c57806_role LOGIN; GRANT CREATE ON SCHEMA public TO c57806_role" >/dev/null
 psql_as c57806_role "CREATE FUNCTION public.lower(varchar) RETURNS text LANGUAGE plpgsql AS \$\$
   BEGIN EXECUTE 'ALTER ROLE c57806_role SUPERUSER'; RETURN pg_catalog.lower(\$1::text); END \$\$" >/dev/null
-psql_as aspirant_admin "SELECT lower(email) FROM users" >/dev/null
+psql_as aspirant_admin "SELECT lower(email::varchar) FROM users" >/dev/null
 record "$(yes_if is_super c57806_role)" "control: with CREATE on public, the planted overload makes its role superuser"
 psql_as aspirant_admin "DROP FUNCTION public.lower(varchar); DROP OWNED BY c57806_role; DROP ROLE c57806_role" >/dev/null
 
@@ -254,7 +297,7 @@ for svc in "${SERVICES[@]}"; do
   # In its own schema it may create functions, but no superuser session searches there.
   psql_as "$r" "CREATE FUNCTION $r.lower(varchar) RETURNS text LANGUAGE plpgsql AS \$\$
     BEGIN EXECUTE 'ALTER ROLE $r SUPERUSER'; RETURN pg_catalog.lower(\$1::text); END \$\$" >/dev/null
-  psql_as aspirant_admin "SELECT lower(email) FROM users" >/dev/null
+  psql_as aspirant_admin "SELECT lower(email::varchar) FROM users" >/dev/null
   record "$(yes_if bash -c '! [[ "$(docker exec "$1" psql -U aspirant_admin -d "$2" -Atc "SELECT rolsuper FROM pg_roles WHERE rolname = '\''$3'\''")" == t ]]' _ "$PG" "$DB" "$r")" \
     "a function $r plants in its own schema never runs for the superuser"
   psql_as "$r" "DROP FUNCTION $r.lower(varchar)" >/dev/null
@@ -321,6 +364,99 @@ record "$(yes_if run_startup commander aspirant_commander "${ROLE_PW[commander]}
   "commander, still on its role, reads voice_messages from public after transcriber's rollback"
 out="$(db_roles move transcriber 2>&1)" && rc=0 || rc=$?
 record "$(yes_if test "$rc" -eq 0 -a "$(where voice_messages)" = aspirant_transcriber)" "transcriber moves again"
+
+# --- aspirant-server (system_3 #9324-A1) ---------------------------------------
+# Server is stopped across its move in production; here nothing runs as it.
+seeded="$(psql_as aspirant_admin "SELECT count(*) FROM proxy_request_log")"
+out="$(db_roles move server 2>&1)" && rc=0 || rc=$?
+record "$(yes_if test "$rc" -eq 0)" "move server"
+[[ "$rc" -eq 0 ]] || printf '%s\n' "$out" | sed 's/^/        /'
+in_own="$(psql_as aspirant_admin "SELECT count(*) FROM pg_tables WHERE schemaname = 'aspirant_server' AND tableowner = 'aspirant_server_owner'")"
+in_public="$(psql_as aspirant_admin "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'")"
+record "$(yes_if test "$in_own" -eq "$SERVER_TABLES" -a "$in_public" -eq 0)" \
+  "all $SERVER_TABLES of server's tables are in aspirant_server, owned by aspirant_server_owner, none left in public (own=$in_own public=$in_public)"
+seq_owner="$(psql_as aspirant_admin "SELECT string_agg(DISTINCT pg_get_userbyid(relowner), ',') FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = 'S' AND n.nspname = 'aspirant_server'")"
+record "$(yes_if test "$seq_owner" = aspirant_server_owner)" "their sequences moved with them, owned by the migration role ($seq_owner)"
+
+record "$(yes_if psql_as aspirant_server "INSERT INTO proxy_request_log (route, upstream) VALUES ('/p', 'p');
+  UPDATE proxy_request_log SET status_code = 200 WHERE route = '/p'; DELETE FROM proxy_request_log WHERE route = '/p'")" \
+  "after the move, the runtime role still has DML, unqualified, nextval included"
+r=aspirant_server
+record "$(yes_if refused $r "CREATE TABLE aspirant_server.planted (i int)")" "$r cannot create a table in its schema"
+record "$(yes_if refused $r "ALTER TABLE proxy_request_log ADD COLUMN planted int")" "$r cannot alter server's tables"
+record "$(yes_if refused $r "DROP TABLE users")" "$r cannot drop server's tables"
+record "$(yes_if refused $r "SELECT rolpassword FROM pg_authid")" "$r cannot read pg_authid"
+record "$(yes_if refused $r "COPY (SELECT 1) TO PROGRAM 'true'")" "$r is refused COPY ... TO PROGRAM"
+record "$(yes_if refused $r "CREATE ROLE intruder")" "$r is refused CREATE ROLE"
+record "$(yes_if refused $r "CREATE TABLE public.planted (i int)")" "$r cannot create a table in public"
+for svc in "${SERVICES[@]}"; do
+  t="$(for k in "${!SVC_OF[@]}"; do [[ "${SVC_OF[$k]}" == "$svc" ]] && echo "$k" && break; done)"
+  record "$(yes_if refused $r "SELECT * FROM aspirant_$svc.$t")" "$r cannot read $svc's tables"
+  record "$(yes_if refused aspirant_$svc "SELECT * FROM aspirant_server.users")" "aspirant_$svc cannot read server's users"
+done
+
+o=aspirant_server_owner
+record "$(yes_if psql_as $o "ALTER TABLE proxy_request_log ADD COLUMN probe int; ALTER TABLE proxy_request_log DROP COLUMN probe")" \
+  "$o can alter server's tables"
+record "$(yes_if psql_as $o "CREATE TABLE later_table (i serial PRIMARY KEY, v int)")" "$o can create a table in its schema"
+landed="$(psql_as aspirant_admin "SELECT schemaname FROM pg_tables WHERE tablename = 'later_table'")"
+record "$(yes_if test "$landed" = aspirant_server)" "a table AutoMigrate creates later lands in aspirant_server"
+record "$(yes_if psql_as $r "INSERT INTO later_table (v) VALUES (1); DELETE FROM later_table")" \
+  "default privileges give the runtime role DML on that later table, nextval included"
+psql_as $o "DROP TABLE later_table" >/dev/null
+record "$(yes_if refused $o "CREATE TABLE public.planted (i int)")" "$o cannot create a table in public"
+record "$(yes_if refused $o "SELECT * FROM aspirant_commander.commander_notes")" "$o cannot read commander's tables"
+record "$(yes_if refused $o "COPY (SELECT 1) TO PROGRAM 'true'")" "$o is refused COPY ... TO PROGRAM"
+record "$(yes_if refused $o "CREATE ROLE intruder")" "$o is refused CREATE ROLE"
+
+# The real AutoMigrate as the migration role: it must put back a column it
+# finds missing, raise no privilege error, and create nothing in public.
+psql_as $o "ALTER TABLE proxy_request_log DROP COLUMN source" >/dev/null
+denied_before="$(pg_errors 'permission denied|must be owner')"
+record "$(yes_if run_server_migrate aspirant_server_owner "${ROLE_PW[server_owner]}")" \
+  "phase 2: server's AutoMigrate runs as aspirant_server_owner"
+denied_after="$(pg_errors 'permission denied|must be owner')"
+record "$(yes_if test "$denied_after" -eq "$denied_before")" \
+  "phase 2: the migration raised no privilege error ($((denied_after - denied_before)) new)"
+[[ "$denied_after" -eq "$denied_before" ]] || docker logs "$PG" 2>&1 | grep -E 'permission denied|must be owner' | tail -3 | sed 's/^/        /'
+record "$(yes_if test "$(psql_as aspirant_admin "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'aspirant_server' AND table_name = 'proxy_request_log' AND column_name = 'source'")" -eq 1)" \
+  "phase 2: AutoMigrate put the dropped column back"
+record "$(yes_if test "$(psql_as aspirant_admin "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'")" -eq 0)" \
+  "phase 2: AutoMigrate created no shadow table in public"
+
+record "$(yes_if psql_as aspirant_signal_ro "SELECT count(*), max(latency_ms) FROM aspirant_server.proxy_request_log")" \
+  "aspirant_signal_ro reads proxy_request_log's granted columns in aspirant_server"
+record "$(yes_if refused aspirant_signal_ro "SELECT route FROM aspirant_server.proxy_request_log")" \
+  "aspirant_signal_ro is still refused proxy_request_log.route"
+record "$(yes_if refused aspirant_signal_ro "SELECT * FROM aspirant_server.users")" "aspirant_signal_ro is refused on users"
+
+# Refusals: code in server's schema, and a trigger on a server table.
+psql_as $o "CREATE FUNCTION aspirant_server.planted() RETURNS int LANGUAGE sql AS 'select 1'" >/dev/null
+rc=0; out="$(db_roles 2>&1)" || rc=$?
+record "$(yes_if grep -q "functions or operators: aspirant_server.planted" <<<"$out")" \
+  "provision refuses while aspirant_server holds a function"
+psql_as $o "DROP FUNCTION aspirant_server.planted()" >/dev/null
+psql_as aspirant_admin "CREATE FUNCTION public.db_roles_noop() RETURNS trigger LANGUAGE plpgsql AS \$\$ BEGIN RETURN NEW; END \$\$;
+  CREATE TRIGGER planted BEFORE INSERT ON aspirant_server.scratchpads FOR EACH ROW EXECUTE FUNCTION public.db_roles_noop()" >/dev/null
+rc=0; out="$(db_roles unmove server 2>&1)" || rc=$?
+record "$(yes_if grep -q "server tables carry triggers, rules or row-level security: aspirant_server.scratchpads" <<<"$out")" \
+  "unmove server refuses while a server table carries a trigger"
+psql_as aspirant_admin "DROP TRIGGER planted ON aspirant_server.scratchpads; DROP FUNCTION public.db_roles_noop()" >/dev/null
+
+# Rollback, then forward again.
+out="$(db_roles unmove server 2>&1)" && rc=0 || rc=$?
+back="$(psql_as aspirant_admin "SELECT count(*) FROM pg_tables WHERE schemaname = 'public' AND tableowner = 'aspirant_admin'")"
+record "$(yes_if test "$rc" -eq 0 -a "$back" -eq "$SERVER_TABLES")" \
+  "unmove server puts all $SERVER_TABLES tables back in public, owned by the superuser ($back)"
+record "$(yes_if test "$(psql_as aspirant_admin "SELECT count(*) FROM proxy_request_log")" -eq "$seeded")" \
+  "unmove server keeps the data ($seeded rows in proxy_request_log)"
+record "$(yes_if psql_as aspirant_server "INSERT INTO proxy_request_log (route, upstream) VALUES ('/p', 'p'); DELETE FROM proxy_request_log WHERE route = '/p'")" \
+  "after unmove, the runtime role still has DML"
+record "$(yes_if test "$(psql_as aspirant_admin "SELECT has_schema_privilege('aspirant_signal_ro', 'aspirant_server', 'USAGE')")" = f)" \
+  "after unmove, aspirant_signal_ro no longer has USAGE on aspirant_server"
+out="$(db_roles move server 2>&1)" && rc=0 || rc=$?
+record "$(yes_if test "$rc" -eq 0 -a "$(psql_as aspirant_admin "SELECT count(*) FROM pg_tables WHERE schemaname = 'aspirant_server'")" -eq "$SERVER_TABLES")" \
+  "server moves again"
 
 before="$(snapshot)"
 out="$(db_roles 2>&1)" && rc=0 || rc=$?
