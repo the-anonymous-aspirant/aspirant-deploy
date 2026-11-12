@@ -5,7 +5,10 @@ set -euo pipefail
 #
 # transcriber, commander, advisor and browser each get a login role,
 # aspirant_<svc>, and a schema of the same name that heads its search_path, in
-# place of the superuser they share with server today. The SQL is
+# place of the superuser they shared with server. server gets two roles
+# (system_3 #9324-A1): aspirant_server_owner owns schema aspirant_server and
+# its tables and runs AutoMigrate; aspirant_server, which the running server
+# uses, has DML on them only. The SQL is
 # scripts/db-roles.sql. This wrapper reads the role passwords from .env and
 # hands them to psql inside the postgres container by NAME (`docker exec -e
 # NAME`, read there with psql's \getenv), so no value appears on a command
@@ -22,7 +25,9 @@ set -euo pipefail
 #
 # A service must be connecting as its own role (#9320) before its tables move,
 # and as the superuser again before they move back: a superuser session only
-# searches `public`. Move commander before transcriber; unmove transcriber
+# searches `public`. Stop server across its move and unmove (`docker compose
+# stop server`, move, `up -d server`): neither identity can serve on the
+# other's side of it. Move commander before transcriber; unmove transcriber
 # before commander (commander reads voice_messages). The SQL refuses the
 # wrong order, triggers or rules on service tables, and duplicate tables.
 #
@@ -38,8 +43,10 @@ REQUIRED=(
   ASPIRANT_COMMANDER_DB_PASSWORD
   ASPIRANT_ADVISOR_DB_PASSWORD
   ASPIRANT_BROWSER_DB_PASSWORD
+  ASPIRANT_SERVER_DB_PASSWORD
+  ASPIRANT_SERVER_OWNER_DB_PASSWORD
 )
-SERVICES=(transcriber commander advisor browser)
+SERVICES=(transcriber commander advisor browser server)
 
 mode="${1:-provision}"
 [[ $# -gt 0 ]] && shift
