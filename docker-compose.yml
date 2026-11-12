@@ -22,6 +22,12 @@ services:
     # avoids postgres by name, but the kernel killer reads oom_score only.
     oom_score_adj: -900
     restart: unless-stopped
+    # init + exec-form healthcheck (system_3 #10684, mirroring #10677): with
+    # the postmaster as PID 1, a probe that overruns its timeout leaves
+    # pg_isready orphaned; the postmaster adopts it, and when it exits 2
+    # treats it as a crashed backend: every connection dropped, crash
+    # recovery. An init reaps orphans; the exec form spawns no shell.
+    init: true
     environment:
       POSTGRES_USER: ${DB_USER}
       POSTGRES_PASSWORD: "${DB_PASSWORD:?DB_PASSWORD must be set in .env — generate with: openssl rand -base64 32}"
@@ -34,7 +40,7 @@ services:
       # exposed to LAN. See system_3 #1379.
       - "127.0.0.1:5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      test: ["CMD", "pg_isready", "-U", "${DB_USER}", "-d", "${DB_NAME}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -678,8 +684,10 @@ services:
     image: ghcr.io/the-anonymous-aspirant/penpot-postgres:15@sha256:1439cab601c7157f909d6e85b096adc81264bba698b40ad163c15cf4bcad74bb
     restart: unless-stopped
     stop_signal: SIGINT
+    # init + exec-form healthcheck: see postgres above (system_3 #10684).
+    init: true
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U penpot"]
+      test: ["CMD", "pg_isready", "-U", "penpot"]
       interval: 5s
       timeout: 5s
       retries: 10
