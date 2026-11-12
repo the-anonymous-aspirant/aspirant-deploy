@@ -60,6 +60,9 @@ services:
     image: ghcr.io/the-anonymous-aspirant/lake-catalog-postgres:16-alpine@sha256:0fc5c901ec0a3c55ce70b99b040daeb89d5b35b61febbced1b4b24dbc3153ec8
     container_name: lake-skeleton-catalog
     restart: unless-stopped
+    # init + exec-form healthcheck, as docker-compose.yml's postgres
+    # (system_3 #10684): no orphaned pg_isready for the postmaster to adopt.
+    init: true
     environment:
       POSTGRES_USER: ducklake
       POSTGRES_PASSWORD: ${LAKE_CATALOG_PASSWORD:?set LAKE_CATALOG_PASSWORD}
@@ -73,7 +76,7 @@ services:
     networks:
       - lake
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ducklake -d lake_catalog_skeleton"]
+      test: ["CMD", "pg_isready", "-U", "ducklake", "-d", "lake_catalog_skeleton"]
       interval: 10s
       timeout: 5s
       retries: 12
