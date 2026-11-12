@@ -58,10 +58,12 @@ import yaml
 HOST = "/data/aspirant/import-failures"
 # The one ancestor mount allowed, and only read-only: aspirant-monitor's
 # `/data:/host/data:ro`, which its /disk route walks to size each
-# /data/aspirant/* directory. It predates the copies and already reaches
-# files/, assets/ and backups/ (the monitor runs as root, so 0700/0600 do not
-# stop it). Reported to security on system_3 #10563; this entry goes when
-# security rules on it. No other service, and no writable variant, is allowed.
+# /data/aspirant/* directory. It predates the copies. Narrowed by system_3
+# #10568-A3: monitor now runs as a dedicated non-root uid with every
+# capability dropped, so 0700/0600 (import-failures, backups/) and 0700
+# directories do stop it — the mount stays allowed because what it can
+# actually read is now gated by those same file modes, not by this
+# exception. No other service, and no writable variant, is allowed.
 KNOWN_ANCESTORS = {("monitor", "/data", True)}
 
 path, require = sys.argv[1], sys.argv[2] == "yes"

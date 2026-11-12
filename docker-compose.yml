@@ -390,6 +390,17 @@ services:
   monitor:
     logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-monitor:latest
+    # A Python web app run as root (system_3 #10568): dropped to a uid with
+    # no account of its own (not 1000/`aspirant`) and every capability
+    # removed, so a compromise of this service can no longer bypass file
+    # modes under /host/data — it reads exactly what a non-root nobody
+    # could read on the host. `no-new-privileges` stops it regaining
+    # anything via a setuid binary.
+    user: "65534:65534"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
       interval: 30s
