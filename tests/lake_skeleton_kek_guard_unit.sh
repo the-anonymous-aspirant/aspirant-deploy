@@ -109,6 +109,51 @@ else
   echo "[FAIL] seed: LAKE_KEK_HEX was unset — the deliberate synthetic-skeleton exemption regressed"
 fi
 
+# --- seed refuses in a shell that carries a ceremony fingerprint (#10852,
+#     security c67605/c67621 on #10777): a fingerprint means a real-key shell,
+#     and seed hands LAKE_KEK_HEX to docker unstaged. Without a fingerprint the
+#     exemption above still holds, which the check above already pins.
+
+seed_with_fingerprint() {
+  local script="$1" log="$TMPDIR_TEST/docker.log"
+  : > "$log"
+  SEED_RC=0
+  LAKE_KEK_HEX="feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface" \
+    LAKE_KEK_FINGERPRINT="0123456789abcdef" \
+    LAKE_SKELETON_ROOT="$TMPDIR_TEST/root" \
+    DOCKER_FAKE_LOG="$log" \
+    PATH="$FAKE_BIN:$PATH" \
+    bash "$script" seed >"$TMPDIR_TEST/seed_out.log" 2>&1 || SEED_RC=$?
+  SEED_RUN="$(grep ' RUN: ' "$log" || true)"
+}
+
+seed_with_fingerprint ./scripts/lake-skeleton.sh
+if [ "$SEED_RC" -eq 1 ] && [ -z "$SEED_RUN" ] && grep -q "refusing: LAKE_KEK_FINGERPRINT is set" "$TMPDIR_TEST/seed_out.log"; then
+  PASS=$((PASS + 1))
+  echo "[PASS] seed with LAKE_KEK_FINGERPRINT set refuses, and nothing reaches docker"
+else
+  FAIL=$((FAIL + 1))
+  echo "[FAIL] seed with LAKE_KEK_FINGERPRINT set did not refuse cleanly (rc=$SEED_RC, run='$SEED_RUN')"
+fi
+
+# Negative control: with the fingerprint refusal cut out, the same call
+# reaches docker with LAKE_KEK_HEX still SET, the exposure the refusal stops.
+NOFPGUARD="$TMPDIR_TEST/lake-skeleton-no-fingerprint-guard.sh"
+sed '/^    if \[ -n "\${LAKE_KEK_FINGERPRINT:-}" \]; then$/,/^    fi$/d' ./scripts/lake-skeleton.sh > "$NOFPGUARD"
+if diff -q ./scripts/lake-skeleton.sh "$NOFPGUARD" >/dev/null; then
+  FAIL=$((FAIL + 1))
+  echo "[FAIL] negative control: the fingerprint-refusal cut matched nothing"
+else
+  seed_with_fingerprint "$NOFPGUARD"
+  if [[ "$SEED_RUN" == SET* ]]; then
+    PASS=$((PASS + 1))
+    echo "[PASS] negative control: without the refusal, seed hands the real-shell LAKE_KEK_HEX to docker"
+  else
+    FAIL=$((FAIL + 1))
+    echo "[FAIL] negative control: without the refusal, seed still did not reach docker ('$SEED_RUN', rc=$SEED_RC)"
+  fi
+fi
+
 # --- negative control: the same assertion against a copy with the
 #     structural guard call removed must FAIL. If it doesn't, this test
 #     isn't testing the guard at all.
