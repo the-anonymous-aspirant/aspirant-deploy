@@ -106,6 +106,7 @@ Run from a checkout on the cell (`~/aspirant-deploy` post-merge):
 scripts/lake-skeleton.sh up       # start + bootstrap bucket, key, catalog
 scripts/lake-skeleton.sh verify   # acceptance checks
 scripts/lake-skeleton.sh explorer-env sync  # copy the explorer's credentials into .env
+scripts/lake-skeleton.sh explorer-decrypt-up  # recreate explorer-api able to decrypt (needs the KEK)
 scripts/lake-skeleton.sh status   # containers, published ports, disk use
 scripts/lake-skeleton.sh down     # stop, keep data
 scripts/lake-skeleton.sh destroy  # stop and delete every byte it owns
@@ -187,6 +188,47 @@ written to `/scratch/lake-skeleton/lake-skeleton.env`, mode 600. They live on
 the scratch path with everything else, so `destroy` takes them too — a fresh
 `up` mints new ones. Nothing here is a secret worth keeping; the stack it
 authenticates holds only fixtures.
+
+### The explorer's decryption key (#10777)
+
+`explorer-api` serves a `sensitivity=high` object's contents only while it
+holds the lake KEK. Without it, it shows the object's metadata and refuses
+`/content`. That is how every recreate brings it up. To turn decrypt-on-read
+on:
+
+```bash
+read -rs LAKE_KEK_HEX; export LAKE_KEK_HEX   # type the grouped hex; not echoed
+export LAKE_KEK_FINGERPRINT=<ceremony fingerprint, sha256(KEK)[:16]>
+scripts/lake-skeleton.sh explorer-decrypt-up
+```
+
+The verb uses the same staging as `ingest` (`stage_real_kek`):
+1. It writes the key to a 0600 file under `$XDG_RUNTIME_DIR`, and refuses if
+   that directory is not tmpfs.
+2. It unsets `LAKE_KEK_HEX`.
+3. It recreates `explorer-api` from this checkout with
+   `up -d --wait --force-recreate --no-deps`.
+4. Once the service is healthy, it deletes the file.
+
+The container sees:
+- `LAKE_ENVELOPE_DECRYPT=1`;
+- `LAKE_KEK_FILE=/run/secrets/lake_kek`, a read-only mount of that file;
+- the fingerprint.
+
+The key is never in the container's environment: dockerd writes a container's
+environment to the unencrypted root disk, and `docker inspect` shows it to the
+docker group (security c64754 on system_3 #8814).
+
+Healthy means the key is loaded. The explorer loads it in its startup hook,
+before it serves `/health`. A wrong key or fingerprint refuses to boot, and the
+verb exits non-zero and says how to bring the service back without a key.
+
+**Decrypt does not survive a recreate.** After the verb, the key is only in the
+running process. Any `up` without the verb, including an auto-pull of a new
+`explorer-api` image, recreates the service with decrypt off: it keeps serving
+metadata and refusing contents. Turning decrypt back on is always the operator
+running the verb again with the key. That matches the custody rule that the
+key is never at rest on the cell (`docs/data-lake-design/KEK_CEREMONY.md` §3).
 
 ### What `verify` proves
 
