@@ -536,6 +536,78 @@ assert_eq "${ASPIRANT_AUTO_PULL_STATE_DIR}/pull-failures/_" \
 assert_eq "${ASPIRANT_AUTO_PULL_STATE_DIR}/pull-failures/client-blue" \
   "$(pull_failure_file "client-blue")" "pull_failure_file leaves an ordinary service name alone"
 
+# --- deploy_service: server migrates as its own step first (#9324-B2) --------
+#
+# Measured on compose 5.1.0: `up -d --force-recreate server` runs the one-shot
+# server-migrate through depends_on, but removes the running server first, so a
+# failed migration took the site down. deploy_service now runs the migrator as
+# its own `run` and recreates server only on exit 0. This stub records every
+# `compose` call in order, so the tests read the sequence rather than infer it.
+DEPLOY_BIN="$TMPDIR_TEST/deploybin"
+mkdir -p "$DEPLOY_BIN"
+cat > "$DEPLOY_BIN/docker" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  inspect)
+    case "$*" in
+      *Healthcheck*)  printf 'no\n' ;;
+      *State.Status*) printf 'running\n' ;;
+      *State.Health*) printf 'none\n' ;;
+      *)              printf 'sha256:current\n' ;;
+    esac ;;
+  compose)
+    printf '%s\n' "${*:2}" >> "$FAKE_CALLS"
+    if [[ "$2" == "run" ]]; then
+      printf 'Starting Logger\n%s\n' "${FAKE_MIGRATE_LAST:-Migration completed successfully, exiting}"
+      exit "${FAKE_MIGRATE_RC:-0}"
+    fi ;;
+esac
+exit 0
+STUB
+chmod +x "$DEPLOY_BIN/docker"
+
+DEPLOY_LOG="$TMPDIR_TEST/deploy-log.jsonl"
+export FAKE_CALLS="$TMPDIR_TEST/compose-calls.txt"
+
+run_deploy() {
+  local svc="$1" container="$2"
+  : > "$DEPLOY_LOG"; : > "$FAKE_CALLS"; : > "$KNOWN_BAD_FILE"
+  ( PATH="$DEPLOY_BIN:$PATH"; DECISIONS_LOG="$DEPLOY_LOG"; HEALTH_WAIT_SECONDS=0
+    deploy_service "$svc" "$container" "sha256:old" "sha256:new" )
+}
+
+# A good migration: migrate first, then server, with --no-deps so the migrator
+# does not run a second time through depends_on.
+FAKE_MIGRATE_RC=0 run_deploy server aspirant-online-server-1
+assert_eq "run --rm --no-deps -T server-migrate;up -d --force-recreate --no-deps server;" \
+  "$(tr '\n' ';' < "$FAKE_CALLS")" "server deploy runs server-migrate, then recreates server with --no-deps"
+assert_eq "1" "$(grep -cF '"action":"deployed"' "$DEPLOY_LOG")" "a good migration deploys server"
+assert_eq "0" "$(grep -c . "$KNOWN_BAD_FILE")" "a good migration marks nothing bad"
+
+# THE REGRESSION TEST. A failed migration never reaches `up`: the running server
+# is left exactly as it was, and the image is marked bad so the next tick does
+# not retry it.
+FAKE_MIGRATE_RC=1 FAKE_MIGRATE_LAST="database.go:88: AutoMigrate failed: column \"x\" cannot be cast" \
+  run_deploy server aspirant-online-server-1
+assert_eq "run --rm --no-deps -T server-migrate;" \
+  "$(tr '\n' ';' < "$FAKE_CALLS")" "a failed migration never recreates server"
+assert_eq "sha256:new" "$(cat "$KNOWN_BAD_FILE")" "a failed migration marks the image bad"
+line="$(grep -F '"action":"failed_migrate"' "$DEPLOY_LOG" | tail -1 || true)"
+if [[ "$line" == *'server_migrate_failed_marked_bad;rc=1;database.go:88: AutoMigrate failed'* ]]; then
+  PASS=$((PASS + 1)); printf "  PASS  failed_migrate carries the exit code and the migrator's last line\n"
+else
+  FAIL=$((FAIL + 1)); printf "  FAIL  failed_migrate reason unexpected — got %s\n" "$(cat "$DEPLOY_LOG")"
+fi
+assert_eq "0" "$(grep -cF '"action":"deployed"' "$DEPLOY_LOG")" "a failed migration logs no deploy"
+
+# NEGATIVE CONTROL: any other service keeps its single plain recreate, with no
+# migrate step and no --no-deps. Without this, an arm that ran the migrator for
+# every service would pass everything above.
+FAKE_MIGRATE_RC=1 run_deploy commander aspirant-online-commander-1
+assert_eq "up -d --force-recreate commander;" \
+  "$(tr '\n' ';' < "$FAKE_CALLS")" "a non-server service is recreated alone, without a migrate step"
+assert_eq "1" "$(grep -cF '"action":"deployed"' "$DEPLOY_LOG")" "a non-server service still deploys"
+
 # --- gate 3 in cron shape ----------------------------------------------------
 #
 # Run the real script, from a clone that carries it, as cron would: gates run,
