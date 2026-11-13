@@ -338,7 +338,9 @@ Each has its own switch, as the four services do. Neither switch is set until th
 
 `server` keeps `env_file: .env` for `JWT_SECRET` and the break-glass token, so every other database password in `.env`, the four services' and the migration role's, is masked to `""` on it. Switched, the long-running server holds no database credential but its own DML role. `tests/compose_secret_scope_unit.sh` pins the switches, the masks and the resolved result.
 
-`docker compose up -d server` runs `server-migrate` first. When `:latest` points at a newly pulled image, compose recreates `server-migrate` on that image, so the new code migrates its own models. If the migration fails, `server` is not started. That matches a fatal AutoMigrate at boot today. Note that compose has already removed the old `server` container by then, so `up` alone does not keep the old server running through a failed migration. Running `server-migrate` as its own step first, and recreating `server` only if it succeeds, is system_3 #9324-B2 (auto-pull). Until it lands, a manual deploy of a new server image is:
+`docker compose up -d server` runs `server-migrate` first. When `:latest` points at a newly pulled image, compose recreates `server-migrate` on that image, so the new code migrates its own models. If the migration fails, `server` is not started. That matches a fatal AutoMigrate at boot today. Note that compose has already removed the old `server` container by then, so `up` alone does not keep the old server running through a failed migration.
+
+So `auto-pull.sh` does not deploy `server` with `up` alone (system_3 #9324-B2). It runs `server-migrate` as its own step on the pulled image (`docker compose run --rm --no-deps -T server-migrate`). Only if that exits 0 does it recreate `server` with `--no-deps`, so the migrator does not run twice. A failed migration never touches the running server: the image goes into `known-bad.txt`, and the decision is `failed_migrate`, with the migrator's last log line in its reason. A manual deploy of a new server image is the same two steps:
 
 ```bash
 docker compose pull server
