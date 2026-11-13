@@ -62,6 +62,22 @@ services:
       - "127.0.0.1:8081:8080"
     environment:
       GIN_MODE: "release"
+      # DB login: its runtime role (aspirant_server: DML on its own tables, no
+      # DDL) once cut over, i.e. once ASPIRANT_SERVER_DB_USER and
+      # _DB_LOGIN_PASSWORD are set in .env; the admin pair until then and after
+      # a rollback (system_3 #9324-B1, the #9320 switch). These override the
+      # same names env_file hands in below.
+      DB_USER: "${ASPIRANT_SERVER_DB_USER:-${DB_USER}}"
+      DB_PASSWORD: "${ASPIRANT_SERVER_DB_LOGIN_PASSWORD:-${DB_PASSWORD}}"
+      # A literal, never from .env, so a fall-back to the superuser after a lost
+      # switch shows up as aspirant-server under the admin user in
+      # pg_stat_activity (system_3 #10325).
+      PGAPPNAME: aspirant-server
+      # server-migrate (below) ran AutoMigrate as the migration role before
+      # this container started; the runtime role could not run its DDL anyway
+      # (aspirant-server #10688). Before the switch both are the admin pair,
+      # so this changes who migrates, not whether.
+      SKIP_AUTOMIGRATE: "1"
       TRANSCRIBER_URL: http://transcriber:8000
       COMMANDER_URL: http://commander:8000
       TRANSLATOR_URL: http://translator:8000
@@ -169,6 +185,24 @@ services:
       AWS_ACCESS_KEY_ID: ""
       AWS_SECRET_ACCESS_KEY: ""
       REPORT_SEND_TOKEN: ""
+      # Mask every other database login .env carries (system_3 #9324-B1). The
+      # long-running server holds only its own DML credentials: its DB_PASSWORD
+      # above. env_file would otherwise hand it the migration role's password,
+      # which can alter `users`, and each service's role password. Compose
+      # still interpolates these names from .env for the services that use
+      # them; masking is per container.
+      ASPIRANT_SERVER_DB_PASSWORD: ""
+      ASPIRANT_SERVER_DB_LOGIN_PASSWORD: ""
+      ASPIRANT_SERVER_OWNER_DB_PASSWORD: ""
+      ASPIRANT_SERVER_OWNER_DB_LOGIN_PASSWORD: ""
+      ASPIRANT_TRANSCRIBER_DB_PASSWORD: ""
+      ASPIRANT_TRANSCRIBER_DB_LOGIN_PASSWORD: ""
+      ASPIRANT_COMMANDER_DB_PASSWORD: ""
+      ASPIRANT_COMMANDER_DB_LOGIN_PASSWORD: ""
+      ASPIRANT_ADVISOR_DB_PASSWORD: ""
+      ASPIRANT_ADVISOR_DB_LOGIN_PASSWORD: ""
+      ASPIRANT_BROWSER_DB_PASSWORD: ""
+      ASPIRANT_BROWSER_DB_LOGIN_PASSWORD: ""
     env_file:
       - .env
     volumes:
@@ -190,6 +224,37 @@ services:
     # app-level fail-fast (server log.Fatal's on DB-init failure so the
     # restart policy retries), NOT depends_on. Same caveat applies to every
     # service_healthy dependency below. See docs/DECISIONS.md.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      # The schema is migrated before server serves (#9324-B1). A failed
+      # migration leaves server unstarted, as a fatal AutoMigrate at boot does
+      # today. Keeping the OLD server running through a failed migration is
+      # auto-pull's job: it runs server-migrate first, on its own (#9324-B2).
+      server-migrate:
+        condition: service_completed_successfully
+
+  # One-shot: AutoMigrate as server's migration role, then exit (system_3
+  # #9324-B1; aspirant-server #10688 SERVER_MODE=migrate exits non-zero on any
+  # migration error). The same image as server, so a pulled image migrates
+  # with its own models. It reads only DB_*: no env_file, so it never sees
+  # JWT_SECRET or the break-glass token (#9313), and it serves nothing.
+  server-migrate:
+    logging: *default-logging
+    image: ghcr.io/the-anonymous-aspirant/aspirant-server:latest
+    restart: "no"
+    environment:
+      SERVER_MODE: migrate
+      # DB login: the migration role (aspirant_server_owner: owns schema
+      # aspirant_server and server's tables) once cut over, i.e. once
+      # ASPIRANT_SERVER_OWNER_DB_USER and _DB_LOGIN_PASSWORD are set in .env;
+      # the admin pair until then and after a rollback (the #9320 switch).
+      DB_USER: "${ASPIRANT_SERVER_OWNER_DB_USER:-${DB_USER}}"
+      DB_PASSWORD: "${ASPIRANT_SERVER_OWNER_DB_LOGIN_PASSWORD:-${DB_PASSWORD}}"
+      PGAPPNAME: aspirant-server-migrate
+      DB_NAME: "${DB_NAME}"
+      DB_HOST: "${DB_HOST}"
+      DB_PORT: "${DB_PORT}"
     depends_on:
       postgres:
         condition: service_healthy

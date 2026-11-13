@@ -319,7 +319,35 @@ docker compose stop server
 docker compose up -d server
 ```
 
-The compose switch that runs the migration step as `aspirant_server_owner` and server as `aspirant_server` is system_3 #9324-B1. The go-live order is #9324-C1.
+##### The migration step and server's two logins (system_3 #9324-B1)
+
+Server's database work is split across two compose services, from the same image:
+
+| service | runs | logs in as, once switched | `PGAPPNAME` |
+|---|---|---|---|
+| `server-migrate` | `SERVER_MODE=migrate`: AutoMigrate, then exit (non-zero on any migration error); `restart: "no"`, no `env_file` | `aspirant_server_owner` | `aspirant-server-migrate` |
+| `server` | serves, with `SKIP_AUTOMIGRATE=1`; waits for `server-migrate` to complete successfully | `aspirant_server` | `aspirant-server` |
+
+Each has its own switch, as the four services do. Neither switch is set until the go-live, so both use the admin pair and the split changes who migrates, not what:
+
+| `.env` | `server-migrate` | `server` |
+|---|---|---|
+| no `ASPIRANT_SERVER_*_DB_USER` lines (the default, and the rollback state) | `DB_USER`/`DB_PASSWORD` | `DB_USER`/`DB_PASSWORD` |
+| `ASPIRANT_SERVER_OWNER_DB_USER=aspirant_server_owner` and `ASPIRANT_SERVER_OWNER_DB_LOGIN_PASSWORD=${ASPIRANT_SERVER_OWNER_DB_PASSWORD}` | `aspirant_server_owner` | (unchanged) |
+| `ASPIRANT_SERVER_DB_USER=aspirant_server` and `ASPIRANT_SERVER_DB_LOGIN_PASSWORD=${ASPIRANT_SERVER_DB_PASSWORD}` | (unchanged) | `aspirant_server` |
+
+`server` keeps `env_file: .env` for `JWT_SECRET` and the break-glass token, so every other database password in `.env`, the four services' and the migration role's, is masked to `""` on it. Switched, the long-running server holds no database credential but its own DML role. `tests/compose_secret_scope_unit.sh` pins the switches, the masks and the resolved result.
+
+`docker compose up -d server` runs `server-migrate` first. When `:latest` points at a newly pulled image, compose recreates `server-migrate` on that image, so the new code migrates its own models. If the migration fails, `server` is not started. That matches a fatal AutoMigrate at boot today. Note that compose has already removed the old `server` container by then, so `up` alone does not keep the old server running through a failed migration. Running `server-migrate` as its own step first, and recreating `server` only if it succeeds, is system_3 #9324-B2 (auto-pull). Until it lands, a manual deploy of a new server image is:
+
+```bash
+docker compose pull server
+docker compose run --rm --no-deps server-migrate && docker compose up -d --force-recreate --no-deps server
+```
+
+A finished one-shot is not in `docker compose ps`, so `auto-pull.sh` never treats `server-migrate` as a service of its own.
+
+The go-live order, moving the tables and then setting both switches, is #9324-C1.
 
 `aspirant_signal_ro` reads `proxy_request_log`'s five granted columns. That grant travels with the table, and `db-roles.sh` gives the role USAGE on `aspirant_server` once the table is there. Its `search_path` is left alone: system_3 finds the table's schema itself.
 

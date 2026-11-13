@@ -210,13 +210,17 @@ import yaml
 
 services = (yaml.safe_load(open(sys.argv[1])) or {}).get("services") or {}
 db_services = sys.argv[2].split()
-admin_ok = {"server", "postgres", *db_services}
+admin_ok = {"server", "server-migrate", "postgres", *db_services}
+# Whose login each service may name: its own, and server's two roles split
+# between server (runtime) and server-migrate (owner) (#9324-B1).
+own_logins = {"server": {"server"}, "server-migrate": {"server_owner"}}
 bad = 0
 for name, spec in services.items():
     env = (spec or {}).get("environment") or {}
     pairs = dict(env.items() if isinstance(env, dict) else (
         (e.split("=", 1) + [""])[:2] for e in env))
-    text = " ".join(f"{k}={v}" for k, v in pairs.items())
+    # A mask (an empty value, as on server) hands the container nothing.
+    text = " ".join(f"{k}={v}" for k, v in pairs.items() if str(v) != "")
     if name in db_services:
         s = name.upper()
         want = {
@@ -236,8 +240,8 @@ for name, spec in services.items():
     elif name not in admin_ok and re.search(r"\$\{?DB_PASSWORD\b", text):
         print(f"{name} names the admin DB_PASSWORD")
         bad += 1
-    for owner in re.findall(r"ASPIRANT_([A-Z]+)_DB_(?:USER|LOGIN_PASSWORD|PASSWORD)\b", text):
-        if owner.lower() != name:
+    for owner in re.findall(r"ASPIRANT_([A-Z_]+?)_DB_(?:USER|LOGIN_PASSWORD|PASSWORD)\b", text):
+        if owner.lower() not in own_logins.get(name, {name}):
             print(f"{name} names {owner.lower()}'s database login")
             bad += 1
 sys.exit(1 if bad else 0)
@@ -323,7 +327,7 @@ resolve_db() {
   {
     grep -oE '\$\{[A-Z_][A-Z0-9_]*' docker-compose.yml | sed 's/^\${//' | sort -u \
       | grep -vx COMPOSE_PROJECT_NAME \
-      | grep -vE '^ASPIRANT_[A-Z]+_DB_(USER|LOGIN_PASSWORD)$' \
+      | grep -vE '^ASPIRANT_[A-Z_]+_DB_(USER|LOGIN_PASSWORD)$' \
       | while read -r n; do echo "$n=sentinel-$n"; done
     for s in $DB_SERVICES; do
       echo "ASPIRANT_${s^^}_DB_PASSWORD=sentinel-role-$s"
@@ -396,6 +400,151 @@ print(" ".join(str((cfg[s].get("environment") or {}).get("PGAPPNAME")) for s in 
   done
 else
   echo "  SKIP  resolved DB logins: docker compose is not available"
+fi
+
+# --- aspirant-server's split (system_3 #9324-B1) -----------------------------
+# A one-shot server-migrate runs AutoMigrate as the migration role
+# (aspirant_server_owner) and exits; server serves as the runtime role
+# (aspirant_server, DML only) with SKIP_AUTOMIGRATE and waits for it. Both keep
+# the admin pair until their switch is in .env:
+#   ASPIRANT_SERVER_DB_USER=aspirant_server
+#   ASPIRANT_SERVER_DB_LOGIN_PASSWORD=${ASPIRANT_SERVER_DB_PASSWORD}
+#   ASPIRANT_SERVER_OWNER_DB_USER=aspirant_server_owner
+#   ASPIRANT_SERVER_OWNER_DB_LOGIN_PASSWORD=${ASPIRANT_SERVER_OWNER_DB_PASSWORD}
+# server still needs env_file (JWT_SECRET), so every other database password
+# .env carries is masked on it: switched, it holds only its own.
+
+# check_server_split <path>: prints one line per offence, exits non-zero on any.
+check_server_split() {
+  python3 - "$1" "$DB_SERVICES" <<'EOF'
+import sys
+import yaml
+
+services = (yaml.safe_load(open(sys.argv[1])) or {}).get("services") or {}
+bad = []
+def env_of(spec):
+    env = (spec or {}).get("environment") or {}
+    return dict(env.items() if isinstance(env, dict) else (
+        (e.split("=", 1) + [""])[:2] for e in env))
+server, migrate = services.get("server"), services.get("server-migrate")
+if not server or not migrate:
+    print("server or server-migrate is missing")
+    sys.exit(1)
+se, me = env_of(server), env_of(migrate)
+want_server = {
+    "DB_USER": "${ASPIRANT_SERVER_DB_USER:-${DB_USER}}",
+    "DB_PASSWORD": "${ASPIRANT_SERVER_DB_LOGIN_PASSWORD:-${DB_PASSWORD}}",
+    "PGAPPNAME": "aspirant-server",
+    "SKIP_AUTOMIGRATE": "1",
+}
+want_migrate = {
+    "SERVER_MODE": "migrate",
+    "DB_USER": "${ASPIRANT_SERVER_OWNER_DB_USER:-${DB_USER}}",
+    "DB_PASSWORD": "${ASPIRANT_SERVER_OWNER_DB_LOGIN_PASSWORD:-${DB_PASSWORD}}",
+    "PGAPPNAME": "aspirant-server-migrate",
+}
+for label, env, want in (("server", se, want_server), ("server-migrate", me, want_migrate)):
+    for key, value in want.items():
+        if str(env.get(key)) != value:
+            bad.append(f"{label}: {key} is {env.get(key)!r}, want {value!r}")
+masked = ["ASPIRANT_SERVER_DB_PASSWORD", "ASPIRANT_SERVER_DB_LOGIN_PASSWORD",
+          "ASPIRANT_SERVER_OWNER_DB_PASSWORD", "ASPIRANT_SERVER_OWNER_DB_LOGIN_PASSWORD"]
+for svc in sys.argv[2].split():
+    masked += [f"ASPIRANT_{svc.upper()}_DB_PASSWORD", f"ASPIRANT_{svc.upper()}_DB_LOGIN_PASSWORD"]
+for key in masked:
+    if key not in se or str(se[key]) != "":
+        bad.append(f"server: {key} is not masked to an empty value")
+if migrate.get("env_file"):
+    bad.append("server-migrate carries an env_file")
+if migrate.get("image") != server.get("image"):
+    bad.append(f"server-migrate image {migrate.get('image')!r} is not server's {server.get('image')!r}")
+if str(migrate.get("restart")) != "no":
+    bad.append(f"server-migrate restart is {migrate.get('restart')!r}, want 'no'")
+dep = ((server.get("depends_on") or {}).get("server-migrate") or {}) if isinstance(server.get("depends_on"), dict) else {}
+if dep.get("condition") != "service_completed_successfully":
+    bad.append("server does not wait for server-migrate to complete successfully")
+for b in bad:
+    print(b)
+sys.exit(1 if bad else 0)
+EOF
+}
+
+if check_server_split docker-compose.yml >/dev/null; then
+  record yes "docker-compose.yml: server-migrate migrates as the owner and server serves as the runtime role, masked, after it"
+else
+  record no "docker-compose.yml: server-migrate migrates as the owner and server serves as the runtime role, masked, after it"
+  check_server_split docker-compose.yml | sed 's/^/        /'
+fi
+# Negative controls, each one break of the real file.
+split_control() {  # split_control <name> <python edit of the loaded yaml dict `d`>
+  python3 - docker-compose.yml "$TMPDIR_TEST/split_$1.yml" "$2" <<'EOF'
+import sys
+import yaml
+d = yaml.safe_load(open(sys.argv[1]))
+exec(sys.argv[3])
+yaml.safe_dump(d, open(sys.argv[2], "w"))
+EOF
+  if check_server_split "$TMPDIR_TEST/split_$1.yml" >/dev/null; then
+    record no "negative control (split_$1): the split check refuses it"
+  else
+    record yes "negative control (split_$1): the split check refuses it"
+  fi
+}
+split_control unmasked 'del d["services"]["server"]["environment"]["ASPIRANT_SERVER_OWNER_DB_PASSWORD"]'
+split_control migrate_env_file 'd["services"]["server-migrate"]["env_file"] = [".env"]'
+split_control no_wait 'del d["services"]["server"]["depends_on"]["server-migrate"]'
+split_control no_skip 'del d["services"]["server"]["environment"]["SKIP_AUTOMIGRATE"]'
+split_control swapped 'e = d["services"]["server"]["environment"]; e["DB_PASSWORD"] = "${ASPIRANT_SERVER_OWNER_DB_LOGIN_PASSWORD:-${DB_PASSWORD}}"'
+
+if docker compose version >/dev/null 2>&1; then
+  # resolve_server <dir> <switched...>: "svc user password credentials-held" for
+  # server and server-migrate, from compose's own resolution (env_file merged).
+  resolve_server() {
+    local dir="$1"; shift
+    mkdir -p "$dir"
+    cp docker-compose.yml "$dir/"
+    {
+      grep -oE '\$\{[A-Z_][A-Z0-9_]*' docker-compose.yml | sed 's/^\${//' | sort -u \
+        | grep -vx COMPOSE_PROJECT_NAME \
+        | grep -vE '^ASPIRANT_[A-Z_]+_DB_(USER|LOGIN_PASSWORD)$' \
+        | while read -r n; do echo "$n=sentinel-$n"; done
+      for s in $DB_SERVICES server server_owner; do
+        echo "ASPIRANT_${s^^}_DB_PASSWORD=sentinel-role-$s"
+      done
+      echo "COMPOSE_PROJECT_NAME=secret-scope-test"
+    } | sort -u > "$dir/.env"
+    local s
+    for s in "$@"; do
+      printf 'ASPIRANT_%s_DB_USER=aspirant_%s\n' "${s^^}" "$s" >> "$dir/.env"
+      printf 'ASPIRANT_%s_DB_LOGIN_PASSWORD=${ASPIRANT_%s_DB_PASSWORD}\n' "${s^^}" "${s^^}" >> "$dir/.env"
+    done
+    docker compose --project-directory "$dir" config --format json 2>"$dir/err" \
+      | python3 -c '
+import json, sys
+cfg = json.load(sys.stdin)["services"]
+for s in ("server", "server-migrate"):
+    e = cfg[s].get("environment") or {}
+    held = sorted({str(v) for v in e.values() if str(v).startswith("sentinel-role-") or str(v) == "sentinel-DB_PASSWORD"})
+    print(s, e.get("DB_USER"), e.get("DB_PASSWORD"), ",".join(held) or "-", "jwt" if e.get("JWT_SECRET") else "nojwt")
+'
+  }
+  got="$(resolve_server "$TMPDIR_TEST/server_none")"
+  want=$'server sentinel-DB_USER sentinel-DB_PASSWORD sentinel-DB_PASSWORD jwt\nserver-migrate sentinel-DB_USER sentinel-DB_PASSWORD sentinel-DB_PASSWORD nojwt'
+  if [[ "$got" == "$want" ]]; then
+    record yes "resolved: with no server switch, both keep the admin pair (no change on merge), and server-migrate has no JWT_SECRET"
+  else
+    record no "resolved: with no server switch, both keep the admin pair (got: $got)"
+  fi
+  # shellcheck disable=SC2086
+  got="$(resolve_server "$TMPDIR_TEST/server_all" server server_owner $DB_SERVICES)"
+  want=$'server aspirant_server sentinel-role-server sentinel-role-server jwt\nserver-migrate aspirant_server_owner sentinel-role-server_owner sentinel-role-server_owner nojwt'
+  if [[ "$got" == "$want" ]]; then
+    record yes "resolved: switched, server holds only its runtime password (no admin, owner or service password) and server-migrate only the owner's"
+  else
+    record no "resolved: switched, server holds only its runtime password (got: $got)"
+  fi
+else
+  echo "  SKIP  resolved server split: docker compose is not available"
 fi
 
 echo
