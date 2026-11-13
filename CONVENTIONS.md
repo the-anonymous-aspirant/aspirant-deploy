@@ -578,6 +578,30 @@ docker compose -f docker-compose.dev.yml exec {service} pytest tests/ -v
 go test ./... -v
 ```
 
+**Go services on the cell.** The cell has no host Go toolchain, so a Go service's tests run in a container, the same way aspirant-server's `verify-aspirant` surface runs them. Copy this; don't vary it:
+
+```bash
+# Once per Go version: golang plus poppler-utils (aspirant-server's PDF tests need pdftotext).
+docker image inspect aspirant-server-gotest:1.27.3-poppler >/dev/null 2>&1 || \
+  docker build -q -t aspirant-server-gotest:1.27.3-poppler ~/.local/share/aspirant-gotest
+
+# From the repo root (aspirant-server's Go module is in server/).
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e GOCACHE=/tmp/gocache \
+  -v "$PWD:/src" -w /src/server -v aspirant-go-modcache:/go/pkg/mod \
+  aspirant-server-gotest:1.27.3-poppler sh -c "go vet ./... && go test ./..."
+```
+
+- **One shared cache volume: `aspirant-go-modcache`** (the module download cache). Never invent another volume name for a Go cache. On 2026-11-13 the root disk paged at 85.1% with 11 near-identical Go caches under 11 invented names, 2.53 GB (system_3 #10774). The daily `docker_prune_sweep` now removes any dangling Go-cache volume other than `aspirant-go-modcache` once it is 7 days old (system_3 #10812).
+- **No build-cache volume.** `GOCACHE=/tmp/gocache` keeps the build cache inside the throwaway container. A new named volume is created root-owned, and the non-root `--user` cannot write to it, so a `-v <name>:/gocache` mount fails with `permission denied` before a single test runs.
+- **The image** is built from two lines kept untracked at `~/.local/share/aspirant-gotest/Dockerfile`:
+
+  ```dockerfile
+  FROM golang:1.27.3
+  RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils && rm -rf /var/lib/apt/lists/*
+  ```
+
+  If that file is missing, recreate it from these lines. The tag names the Go version; bump both together.
+
 ### Test Dependencies
 
 Add test dependencies to `requirements.txt` under a comment block:
