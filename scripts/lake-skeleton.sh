@@ -547,6 +547,21 @@ case "${1:-}" in
     # asset_inventory/ingest_runs hold a non-fixture dataset_id, but that is
     # the backstop, not the premise -- the real fix is giving fixtures their
     # own catalog/bucket so this verb never shares one with real data again.
+    #
+    # Refuses in a shell that carries a ceremony fingerprint (system_3 #10852,
+    # security c67605/c67621 on #10777). seed is the one verb that skips
+    # stage_real_kek, so its LAKE_KEK_HEX reaches compose's env interpolation
+    # and lands in a container's environment on the unencrypted root disk.
+    # That is fine for the synthetic key it is meant for. A fingerprint in the
+    # environment means a real-key shell (the synthetic seed never sets one),
+    # so a seed from there could put the real KEK on disk and encrypt fixtures
+    # under it.
+    if [ -n "${LAKE_KEK_FINGERPRINT:-}" ]; then
+      echo "refusing: LAKE_KEK_FINGERPRINT is set, so this shell may hold the real KEK," \
+           "which seed would hand to docker unstaged. Open a fresh terminal, or run" \
+           "'unset LAKE_KEK_HEX LAKE_KEK_FINGERPRINT', then seed again." >&2
+      exit 1
+    fi
     compose --profile client run --rm duckdb /work/fixtures.py
     ;;
 
