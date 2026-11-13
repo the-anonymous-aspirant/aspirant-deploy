@@ -12,6 +12,8 @@
 #   lake-skeleton.sh explorer-env [check|sync]
 #                              compare (or copy) the explorer's credentials
 #                              into the deploy .env (system_3 #9074)
+#   lake-skeleton.sh explorer-decrypt-up
+#                              recreate explorer-api with decrypt-on-read (#10777)
 #   lake-skeleton.sh status    show containers, published ports, and disk use
 #   lake-skeleton.sh down      stop the stack, keep the scratch data
 #   lake-skeleton.sh destroy   stop the stack and delete every byte it owns
@@ -636,6 +638,47 @@ case "${1:-}" in
     esac
     ;;
 
+  explorer-decrypt-up)
+    # Turn decrypt-on-read on for the deploy's explorer-api with the operator's
+    # KEK (system_3 #10777; security c64754 on #8814). `stage_real_kek`, called
+    # above for every verb but `seed`, has already written LAKE_KEK_HEX to a
+    # 0600 file on tmpfs, exported its path as LAKE_KEK_FILE_HOST, unset
+    # LAKE_KEK_HEX, and set the EXIT trap that deletes the file.
+    # docker-compose.yml's explorer-api reads only that path: decrypt on, the
+    # file mounted read-only, and no key in the container's environment.
+    if [ -z "${LAKE_KEK_FILE_HOST:-}" ]; then
+      echo "refusing: no key staged. Run it in a subshell, so the key leaves no trace" \
+           "in your terminal: ( read -rs LAKE_KEK_HEX; export LAKE_KEK_HEX;" \
+           "export LAKE_KEK_FINGERPRINT=<fingerprint>; $0 explorer-decrypt-up )" >&2
+      exit 1
+    fi
+    # Required, not optional: with the ceremony fingerprint, a mistyped or
+    # wrong key is a refusal to boot rather than a key that decrypts nothing.
+    if [ -z "${LAKE_KEK_FINGERPRINT:-}" ]; then
+      echo "refusing: LAKE_KEK_FINGERPRINT is not set (the ceremony fingerprint," \
+           "sha256(KEK)[:16])" >&2
+      exit 1
+    fi
+    export LAKE_KEK_FINGERPRINT
+    # The deploy checkout's own compose run, as the operator's plain `up`, so
+    # its project name and override file apply. --wait returns once the
+    # service is healthy. uvicorn serves /health only after the startup hook
+    # loaded the key, so healthy means the key is in memory and the file may
+    # go. A wrong or unreadable key never reaches healthy.
+    deploy_dir="${ASPIRANT_DEPLOY_DIR:-$SRC_DIR}"
+    if ! (cd "$deploy_dir" && docker compose --profile explorer up -d --wait --wait-timeout 180 \
+          --force-recreate --no-deps explorer-api); then
+      echo "explorer-api did not become healthy with the key (a wrong key or" \
+           "fingerprint refuses to boot). Without a key it comes back with decrypt" \
+           "off: (cd $deploy_dir && docker compose --profile explorer up -d" \
+           "--force-recreate explorer-api)" >&2
+      exit 1
+    fi
+    echo "explorer-api is up with decrypt-on-read. The staged key file is deleted now;"
+    echo "the key stays only in the running process. Any later recreate (a plain 'up',"
+    echo "an auto-pull) brings explorer-api back with decrypt off: run this verb again."
+    ;;
+
   status)
     compose ps
     echo
@@ -659,7 +702,7 @@ case "${1:-}" in
     ;;
 
   *)
-    sed -n '3,19p' "${BASH_SOURCE[0]}"
+    sed -n '3,21p' "${BASH_SOURCE[0]}"
     exit 1
     ;;
 esac
