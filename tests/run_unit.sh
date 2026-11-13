@@ -20,16 +20,24 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # Suites that fail on main for a reason outside the PR under test, each with
 # the task that owns the fix. They still run and print, but they cannot fail
 # this script. If one starts passing, this script fails, so its entry is
-# removed rather than left to hide a later regression.
-declare -A KNOWN_FAILING=(
-  [lake_client_publish_unit.sh]="system_3 #10808: since #4475 the compose builds the lake client locally, so there is no pinned line to repin"
-)
+# removed rather than left to hide a later regression. An entry naming a
+# suite that no longer exists fails it too: system_3 #10808 deleted
+# lake_client_publish_unit.sh while its entry stayed behind, and nothing
+# noticed.
+declare -A KNOWN_FAILING=()
 
 self="$(basename "${BASH_SOURCE[0]}")"
 passed=()
 failed=()
 known_failed=()
 stale_known=()
+
+for name in "${!KNOWN_FAILING[@]}"; do
+  if [ ! -f "tests/$name" ]; then
+    echo "=== $name: listed as known-failing, but no such suite exists; remove its entry"
+    stale_known+=("$name")
+  fi
+done
 
 for f in tests/*_unit.sh; do
   name="$(basename "$f")"
@@ -64,7 +72,7 @@ echo
 echo "run_unit: ${#passed[@]} passed, ${#failed[@]} failed, ${#known_failed[@]} known-failing, ${#stale_known[@]} stale known-failing entries"
 for n in "${failed[@]}"; do echo "  FAILED: $n"; done
 for n in "${known_failed[@]}"; do echo "  known-failing: $n (${KNOWN_FAILING[$n]})"; done
-for n in "${stale_known[@]}"; do echo "  passes but listed as known-failing: $n"; done
+for n in "${stale_known[@]}"; do echo "  stale known-failing entry (passes, or no such suite): $n"; done
 
 # A run with no suite at all is not a pass.
 if [ "${#passed[@]}" -eq 0 ]; then
