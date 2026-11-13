@@ -199,6 +199,9 @@ Two things now exist that did not:
   verify, publish, repin, re-verify as one command, with the push gated on an
   explicit flag *and* a probed `write:packages` scope, and the repin welded to
   the push so it cannot be the step that is skipped.
+  **Retired 2026-11-13 (system_3 #10808).** Since #4475 the skeleton builds the
+  image locally, no consumer pulls it from GHCR, and
+  `tests/lake_client_image_unit.sh` now fails on the pin this script wrote.
 
 Neither closes the automation gap this document's option (a) describes; they
 make the manual lane correct and loud while the poller question is open. The

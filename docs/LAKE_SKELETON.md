@@ -52,8 +52,8 @@ change under a normal PR, so it is the one we build rather than pin. Editing tha
 Dockerfile takes effect immediately, with no push-to-GHCR-and-repin step: the
 running image is always the current Dockerfile. That closes the gap that made
 `seed`/`ingest` die for three days behind an un-republished digest (#4134/#4290).
-Publishing the image to GHCR is now needed only if a consumer *outside* this
-skeleton wants it — see § Republishing the client image.
+No consumer outside this skeleton pulls it from GHCR, so the publish lane was
+retired (system_3 #10808): see § The client image is built locally.
 
 ### Versions and why these ones
 
@@ -64,80 +64,14 @@ skeleton wants it — see § Republishing the client image.
 | DuckLake | v1.0 | [ducklake.select](https://ducklake.select/) stable. |
 | Catalog Postgres | `16-alpine` | Matches the fleet's existing Postgres major. |
 
-### Republishing the client image
+### The client image is built locally (#4475)
 
-**The skeleton no longer needs this (#4475).** `docker-compose.lake-skeleton.yml`
-builds `Dockerfile-LakeDuckDB` locally, so a change to the Dockerfile — a pip
-pin, a baked extension, the base tag — takes effect on the next
-`lake-skeleton.sh` run with no republish. This section covers the *separate*
-case where the image is wanted on GHCR for a consumer outside this skeleton.
-
-`scripts/publish-lake-client.sh` does all four, in order, as one command
-(#4441). Use it rather than the steps by hand: the repin is not a step you can
-forget in it, because the push and the repin are the same action.
-
-```bash
-# Build a candidate and check it BEFORE it is anywhere public. Needs no
-# credential; safe for anyone, including an agent, to run.
-./scripts/publish-lake-client.sh
-
-# Read the outward-facing half without running any of it.
-./scripts/publish-lake-client.sh --push --dry-run
-
-# Build, verify, publish, repin docker-compose.lake-skeleton.yml, re-verify.
-# Refuses up front unless the gh token carries write:packages.
-./scripts/publish-lake-client.sh --push
-```
-
-Then commit the `docker-compose.lake-skeleton.yml` change the script wrote —
-the push is only half of the landing.
-
-The tag tracks the DuckDB version, and the script **derives** it from the
-`duckdb==` pin in `Dockerfile-LakeDuckDB` rather than taking it as an
-argument, so a `duckdb==` bump automatically means a new tag as well as a new
-digest. A hand-typed tag is how one tag comes to name two images, which is how
-the pin stops being a rollback point.
-
-<details>
-<summary>The same four steps by hand, if the script is unavailable</summary>
-
-```bash
-# 1. Build, and check the result BEFORE it is anywhere public.
-docker build -f Dockerfile-LakeDuckDB -t aspirant-lake-duckdb:candidate .
-LAKE_CLIENT_IMAGE=aspirant-lake-duckdb:candidate ./tests/lake_client_image_unit.sh
-
-# 2. Publish. Needs a GHCR credential with write:packages — an outward-facing
-#    step, and the one part of this an agent does not do unasked.
-docker tag aspirant-lake-duckdb:candidate \
-  ghcr.io/the-anonymous-aspirant/aspirant-lake-duckdb:<duckdb-version>
-docker push ghcr.io/the-anonymous-aspirant/aspirant-lake-duckdb:<duckdb-version>
-
-# 3. Repin: put the published digest in docker-compose.lake-skeleton.yml.
-docker buildx imagetools inspect \
-  ghcr.io/the-anonymous-aspirant/aspirant-lake-duckdb:<duckdb-version> \
-  --format '{{.Manifest.Digest}}'
-
-# 4. Confirm the pin, not the local build, is what now satisfies the Dockerfile.
-./tests/lake_client_image_unit.sh
-```
-
-</details>
-
-### Why the publish is gated and the repin is not
-
-Pushing to GHCR is outward-facing, so `--push` needs both an explicit flag and
-a `write:packages` scope on the `gh` token, and it checks for the scope
-*before* it builds — a refusal costs nothing and writes nothing. As of
-2026-08-28 that scope is absent on this box (`gh auth status` reports `gist`,
-`read:org`, `repo`), which is the still-open operator question in
-`docs/IMAGE_PUBLISH_DECISION.md` §2. Until it is provisioned, `--push` refuses
-and says so; `--dry-run` still prints the whole plan.
-
-The repin is deliberately *not* gated behind anything extra: it is the step
-that was skipped, and welding it to the push is the entire point of the
-script. `tests/lake_client_publish_unit.sh` asserts both halves — that a
-credential-less `--push` touches neither docker nor the compose file, and that
-the digest surgery hits only the lake client's line and is idempotent.
+`docker-compose.lake-skeleton.yml` builds `Dockerfile-LakeDuckDB` locally, so a
+change to the Dockerfile (a pip pin, a baked extension, the base tag) takes
+effect on the next `lake-skeleton.sh` run with no republish. The GHCR republish
+lane, `scripts/publish-lake-client.sh` (#4441), was retired by system_3
+#10808. Nothing pulls the image from GHCR any more, and its repin wrote the
+pin that `tests/lake_client_image_unit.sh` now refuses.
 
 `tests/lake_client_image_unit.sh` builds the client image and probes it, failing
 when the built image is missing something the Dockerfile declares. It went in
