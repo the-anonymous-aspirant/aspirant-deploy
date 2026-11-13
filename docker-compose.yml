@@ -878,7 +878,19 @@ services:
       # lives only in this process's memory. A later restart of this
       # container cannot read a key from disk; decrypt comes back only when
       # the operator runs the verb again.
-      - ${LAKE_KEK_FILE_HOST:-/dev/null}:/run/secrets/lake_kek:ro
+      #
+      # Long syntax for `create_host_path: false`. The short form becomes a
+      # legacy bind, and on a restart after the file is deleted dockerd
+      # re-creates the missing path as an empty root-owned directory (seen on
+      # the #10777 rig). The restart still fails, but by a type mismatch. With
+      # this setting the restart fails because the file is absent, and
+      # nothing is created.
+      - type: bind
+        source: ${LAKE_KEK_FILE_HOST:-/dev/null}
+        target: /run/secrets/lake_kek
+        read_only: true
+        bind:
+          create_host_path: false
     networks:
       # NOT `default` (system_3 #10353, the penpot pattern below): this has
       # no auth of its own ("No auth here on purpose" in nginx/explorer.conf —

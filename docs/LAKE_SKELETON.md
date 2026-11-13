@@ -224,11 +224,23 @@ before it serves `/health`. A wrong key or fingerprint refuses to boot, and the
 verb exits non-zero and says how to bring the service back without a key.
 
 **Decrypt does not survive a recreate.** After the verb, the key is only in the
-running process. Any `up` without the verb, including an auto-pull of a new
+running container, never on the cell's disks, which is the custody rule of
+`docs/data-lake-design/KEK_CEREMONY.md` §3. Any `up` without the verb, including an auto-pull of a new
 `explorer-api` image, recreates the service with decrypt off: it keeps serving
 metadata and refusing contents. Turning decrypt back on is always the operator
-running the verb again with the key. That matches the custody rule that the
-key is never at rest on the cell (`docs/data-lake-design/KEK_CEREMONY.md` §3).
+running the verb again with the key. A restart of the same container cannot
+start either: its mount names the deleted file, and the mount uses
+`create_host_path: false`, so the restart fails with "no such file or
+directory" and creates nothing.
+
+Two side effects while decrypt is on, measured on the #10777 rig:
+- The mounted file stays readable inside the container until it stops, because
+  the mount holds the deleted tmpfs inode. Anyone who can `docker exec` into
+  `explorer-api` can read the key. The docker group could already read the
+  process's memory, so this adds no new reader.
+- `docker cp` to or from `explorer-api` fails, because it re-mounts the
+  container's binds and the host file is gone. Use `docker exec -i ... < file`
+  instead.
 
 ### What `verify` proves
 
