@@ -853,6 +853,32 @@ services:
       LAKE_S3_STAGING_BUCKET: ${LAKE_S3_STAGING_BUCKET:-lake-skeleton-staging}
       LAKE_S3_STAGING_ACCESS_KEY_ID: ${EXPLORER_S3_STAGING_ACCESS_KEY:-}
       LAKE_S3_STAGING_SECRET_ACCESS_KEY: ${EXPLORER_S3_STAGING_SECRET_KEY:-}
+      # Decrypt-on-read for `sensitivity=high` objects (system_3 #10777; C1's
+      # read path, corpus/system_3_gmail_lake_read_path.md §1). On only when a
+      # key file was staged: `lake-skeleton.sh explorer-decrypt-up` stages the
+      # operator's KEK to a 0600 tmpfs file (`stage_real_kek`) and exports its
+      # path as LAKE_KEK_FILE_HOST for this one recreate. With nothing staged
+      # (any plain `up`, any auto-pull recreate), all three read empty and the
+      # service boots as before: decrypt off, encrypted objects refused.
+      # With decrypt on, the explorer loads the key at startup and refuses to
+      # boot without it (aspirant-explorer app/main.py, fail-closed).
+      #
+      # Never LAKE_KEK_HEX here (security c64726/c64754 on system_3
+      # #8813/#8814): dockerd writes a container's environment to the
+      # unencrypted root disk, and `docker inspect` shows it to the docker
+      # group. Only the mount below carries the key. The fingerprint is a
+      # one-way hash and not secret; it makes a wrong key a refusal to boot.
+      LAKE_ENVELOPE_DECRYPT: ${LAKE_KEK_FILE_HOST:+1}
+      LAKE_KEK_FILE: ${LAKE_KEK_FILE_HOST:+/run/secrets/lake_kek}
+      LAKE_KEK_FINGERPRINT: ${LAKE_KEK_FINGERPRINT:-}
+    volumes:
+      # The staged key file, read-only; /dev/null when none is staged, which
+      # nothing reads because LAKE_KEK_FILE above is then empty. The verb
+      # deletes the host file once this service is healthy, so the key then
+      # lives only in this process's memory. A later restart of this
+      # container cannot read a key from disk; decrypt comes back only when
+      # the operator runs the verb again.
+      - ${LAKE_KEK_FILE_HOST:-/dev/null}:/run/secrets/lake_kek:ro
     networks:
       # NOT `default` (system_3 #10353, the penpot pattern below): this has
       # no auth of its own ("No auth here on purpose" in nginx/explorer.conf —
@@ -904,12 +930,19 @@ networks:
   # records landed on 2026-10-29. Operator, verbatim (#9109 comment 57255): "I
   # think being able to login as an admin is sufficent for now to be able to
   # see the data". The scope is admins only, behind the admin login
-  # (aspirant-client default.conf `auth_request /_internal/verify-admin`), with
-  # no decryption key in explorer-api, so it shows metadata and not contents.
-  # Re-derive it before that route stops requiring the admin login, before the
-  # explorer gets a decryption key, or when the operator revisits "for now". A
-  # permission that expires on a condition nobody recorded is a permanent
-  # permission, which is why the condition is written here and not in a thread.
+  # (aspirant-client default.conf `auth_request /_internal/verify-admin`).
+  # Re-derived again for the decryption key (system_3 #10777): security's
+  # review of explorer-api holding the KEK (#8813 D1, c64726) set two
+  # preconditions, this service's own `explorer_api` bridge (#10353) and the
+  # key off `-e` (#10354), and the operator answered "Yes, after both fixes
+  # are merged" (c64715 on #8813). Both are merged. So once the operator runs
+  # `lake-skeleton.sh explorer-decrypt-up`, an admin can read the contents of
+  # `sensitivity=high` objects, not only their metadata; until then, and after
+  # any recreate without it, the explorer still shows metadata only.
+  # Re-derive it before that route stops requiring the admin login, or when
+  # the operator revisits "for now". A permission that expires on a condition
+  # nobody recorded is a permanent permission, which is why the condition is
+  # written here and not in a thread.
   lake:
     external: true
     name: aspirant-lake-skeleton_lake
@@ -923,8 +956,10 @@ networks:
   # peers-only; here, `explorer-api` has no peer of its own, so it is the
   # dual-homed member instead — reachable only from client-blue/-green (the
   # containers that proxy `/admin/explorer/api/`) and from itself. No other
-  # service joins this network. Re-derive before the explorer gets a
-  # decryption key loosens this further than client-nginx's own admin login.
+  # service joins this network. It was the precondition for explorer-api
+  # holding the decryption key (#8813 D1), which it now can (system_3 #10777;
+  # see the `lake` network above). Re-derive before any other service joins
+  # it, or before anything loosens it beyond client-nginx's own admin login.
   explorer_api:
   # Penpot sub-stack bridge. Only penpot-frontend is dual-homed onto
   # `default` (for the client-nginx vhost proxy); backend, exporter,
