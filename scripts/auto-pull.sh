@@ -48,6 +48,9 @@ DECISIONS_LOG="${LOG_DIR}/decisions.jsonl"
 KNOWN_BAD_FILE="${STATE_DIR}/known-bad.txt"
 
 IMAGE_PREFIX="${ASPIRANT_AUTO_PULL_IMAGE_PREFIX:-ghcr.io/the-anonymous-aspirant/aspirant-}"
+# The one-shot compose service that runs server's AutoMigrate (system_3
+# #9324-B1). deploy_service runs it as its own step before recreating server.
+SERVER_MIGRATE_SERVICE="server-migrate"
 HEALTH_WAIT_SECONDS="${ASPIRANT_AUTO_PULL_HEALTH_WAIT:-30}"
 # Extra budget for a healthcheck still reporting `starting` once
 # HEALTH_WAIT_SECONDS has elapsed — a `start_period` longer than the wait is
@@ -542,7 +545,29 @@ deploy_service() {
     return 0
   fi
 
-  if docker compose up -d --force-recreate "$svc" >/dev/null 2>&1; then
+  local up_flags=(-d --force-recreate)
+
+  # server migrates as its own step first (system_3 #9324-B2). `up` alone runs
+  # the one-shot server-migrate through depends_on, but measured on compose
+  # 5.1.0 it removes the running server BEFORE the migrator runs: a failed
+  # migration left the old server gone and its replacement in `Created`, and
+  # the site down. `run` on the pulled image leaves the running server
+  # untouched, so a migration that fails here keeps the old server serving,
+  # and the image is marked bad like any other failed deploy. Only then is
+  # server recreated, with --no-deps so the migrator does not run twice.
+  if [[ "$svc" == "server" ]]; then
+    local migrate_out="" migrate_rc=0
+    migrate_out="$(docker compose run --rm --no-deps -T "$SERVER_MIGRATE_SERVICE" 2>&1)" || migrate_rc=$?
+    if [[ "$migrate_rc" -ne 0 ]]; then
+      mark_known_bad "$new_sha"
+      log_decision "$svc" "failed_migrate" "$old_sha" "$new_sha" \
+        "server_migrate_failed_marked_bad;rc=${migrate_rc};$(pull_error_summary "$migrate_out")"
+      return 0
+    fi
+    up_flags+=(--no-deps)
+  fi
+
+  if docker compose up "${up_flags[@]}" "$svc" >/dev/null 2>&1; then
     local verdict
     verdict="$(container_deploy_verdict "$container")"
     if verdict_good "$verdict"; then
