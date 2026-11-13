@@ -647,9 +647,9 @@ case "${1:-}" in
     # docker-compose.yml's explorer-api reads only that path: decrypt on, the
     # file mounted read-only, and no key in the container's environment.
     if [ -z "${LAKE_KEK_FILE_HOST:-}" ]; then
-      echo "refusing: no key staged. Read the key without echoing it" \
-           "(read -rs LAKE_KEK_HEX; export LAKE_KEK_HEX), set LAKE_KEK_FINGERPRINT," \
-           "and run this again" >&2
+      echo "refusing: no key staged. Run it in a subshell, so the key leaves no trace" \
+           "in your terminal: ( read -rs LAKE_KEK_HEX; export LAKE_KEK_HEX;" \
+           "export LAKE_KEK_FINGERPRINT=<fingerprint>; $0 explorer-decrypt-up )" >&2
       exit 1
     fi
     # Required, not optional: with the ceremony fingerprint, a mistyped or
