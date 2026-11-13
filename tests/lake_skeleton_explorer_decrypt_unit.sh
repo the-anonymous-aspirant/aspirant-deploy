@@ -147,9 +147,17 @@ for k, v in want.items():
     if env.get(k) != v:
         problems.append(f"{k} is {env.get(k)!r}, want {v!r}")
 vols = svc.get("volumes") or []
-mount = "${LAKE_KEK_FILE_HOST:-/dev/null}:/run/secrets/lake_kek:ro"
-if mount not in vols:
-    problems.append(f"no read-only key mount {mount!r}")
+want_mount = {
+    "type": "bind",
+    "source": "${LAKE_KEK_FILE_HOST:-/dev/null}",
+    "target": "/run/secrets/lake_kek",
+    "read_only": True,
+    "bind": {"create_host_path": False},
+}
+# Long form only: the short form is a legacy bind, which re-creates a deleted
+# key file's path as a root-owned directory on restart.
+if want_mount not in vols:
+    problems.append(f"no read-only, non-creating key mount {want_mount!r}; volumes are {vols!r}")
 for p in problems:
     print(p)
 sys.exit(1 if problems else 0)
@@ -157,7 +165,7 @@ EOF
 }
 
 rc=0; static_check docker-compose.yml > "$TMPDIR_TEST/static.out" 2>&1 || rc=$?
-check "compose: decrypt and LAKE_KEK_FILE only when a file is staged, key only by a :ro mount, no LAKE_KEK_HEX" \
+check "compose: decrypt and LAKE_KEK_FILE only when a file is staged, key only by a read-only non-creating bind, no LAKE_KEK_HEX" \
   "$([ "$rc" = 0 ] && echo yes || echo no)"
 [ "$rc" = 0 ] || sed 's/^/       /' "$TMPDIR_TEST/static.out"
 
