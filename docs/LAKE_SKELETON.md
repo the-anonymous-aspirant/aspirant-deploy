@@ -197,10 +197,17 @@ holds the lake KEK. Without it, it shows the object's metadata and refuses
 on:
 
 ```bash
-read -rs LAKE_KEK_HEX; export LAKE_KEK_HEX   # type the grouped hex; not echoed
-export LAKE_KEK_FINGERPRINT=<ceremony fingerprint, sha256(KEK)[:16]>
-scripts/lake-skeleton.sh explorer-decrypt-up
+( read -rs LAKE_KEK_HEX; export LAKE_KEK_HEX   # type the grouped hex; not echoed
+  export LAKE_KEK_FINGERPRINT=<ceremony fingerprint, sha256(KEK)[:16]>
+  scripts/lake-skeleton.sh explorer-decrypt-up )
 ```
+
+Run it as written, in parentheses. The subshell is the point: the verb's own
+`unset LAKE_KEK_HEX` clears only its copy, so a bare `export` would leave the
+real key in your terminal. A later `seed` from that terminal, the one verb that
+skips the tmpfs staging, would then pass it into a container's environment,
+which dockerd keeps on the unencrypted root disk (security review on system_3
+#10777).
 
 The verb uses the same staging as `ingest` (`stage_real_kek`):
 1. It writes the key to a 0600 file under `$XDG_RUNTIME_DIR`, and refuses if
