@@ -141,15 +141,30 @@ INGEST_RUNS_COLUMNS = """
     run_id VARCHAR, source VARCHAR, started_on TIMESTAMP, duration_seconds DOUBLE,
     files_seen BIGINT, bytes_ingested BIGINT, status VARCHAR,
     dataset_id VARCHAR, runner_version VARCHAR, kek_version INTEGER,
-    objects_high BIGINT, objects_normal BIGINT
+    objects_high BIGINT, objects_normal BIGINT, failure_reason VARCHAR
 """
 
 INGEST_RUNS_FIELDS = (
     "run_id", "source", "started_on", "duration_seconds",
     "files_seen", "bytes_ingested", "status",
     "dataset_id", "runner_version", "kek_version",
-    "objects_high", "objects_normal",
+    "objects_high", "objects_normal", "failure_reason",
 )
+
+# Columns added to a table after a live catalog already held real rows. A writer
+# that finds the table exactly one of these tails short adds the tail in place
+# (`ALTER TABLE ... ADD COLUMN`) instead of refusing: the live catalog cannot be
+# re-seeded once it holds real records (system_3 #10513), so "re-seed it" is no
+# answer for a column the contract grows. Anything else that differs is still
+# refused. Old rows read NULL in an added column.
+#
+# `failure_reason` (system_3 #11048): why a `failed` or `partial` run did not
+# load everything, in words the operator can act on. The explorer's Overview
+# shows it beside the run. NULL on a success, and on any run written before the
+# column existed, which the explorer reads as "no reason recorded".
+ADDED_COLUMNS = {
+    "ingest_runs": (("failure_reason", "VARCHAR"),),
+}
 
 # A run that never reported an outcome is not a success. Kept as a vocabulary so
 # the explorer and the verification harness agree on what "finished" means.
@@ -157,6 +172,48 @@ RUN_STATUS_SUCCESS = "success"
 RUN_STATUS_FAILED = "failed"
 RUN_STATUS_PARTIAL = "partial"
 RUN_STATUSES = (RUN_STATUS_SUCCESS, RUN_STATUS_FAILED, RUN_STATUS_PARTIAL)
+
+# --- why a run did not load everything (system_3 #11048) --------------------
+#
+# A reason is read by the operator on the explorer's Overview, beside the run.
+# It says what happened and what to do, in plain words. It never carries a path,
+# an upload id, an exception or a key: those can name a record, and the ledger
+# is read by a page that shows no record. The runner's printed report keeps the
+# per-record detail, as it always has.
+
+REASON_NO_KEK = (
+    "No encryption key was loaded and the data includes sensitive records, so "
+    "nothing was written. Load the key and run it again."
+)
+
+
+def partial_reason(not_loaded: int, seen: int, noun: str, verb: str) -> str:
+    """Why a `partial` run is partial: how many did not load, and what next.
+
+    `noun` is the singular of what the run counts ("file", "upload") and `verb`
+    the past participle of what could not be done to one ("read", "promoted").
+    Both runners retry what did not load on the next run and skip what did, so
+    the second sentence is true of either.
+    """
+    if not_loaded < 1 or seen < not_loaded:
+        raise ValueError(f"a partial run has 1..{seen} items not loaded, got {not_loaded}")
+
+    def count(n):
+        return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
+
+    it = "it" if not_loaded == 1 else "them"
+    report = ("The runner's report names it and says why." if not_loaded == 1
+              else "The runner's report names each and says why.")
+    if not_loaded == seen:
+        head = (f"The {noun} could not be {verb}." if seen == 1
+                else f"None of the {count(seen)} could be {verb}.")
+        return f"{head} {report} Running it again retries {it}."
+    rest = seen - not_loaded
+    others = "the other one is" if rest == 1 else f"the other {rest} are"
+    return (
+        f"{not_loaded} of {count(seen)} could not be {verb}; {others} in the lake. "
+        f"{report} Running it again retries {it} and skips the rest."
+    )
 
 
 def asset_row(
@@ -227,10 +284,20 @@ def run_row(
     kek_version=None,
     objects_high=0,
     objects_normal=0,
+    failure_reason=None,
 ):
-    """Build one ingest_runs tuple in INGEST_RUNS_FIELDS order."""
+    """Build one ingest_runs tuple in INGEST_RUNS_FIELDS order.
+
+    A `failed` or `partial` row must say why (system_3 #11048): a run the
+    operator is told did not finish, with nothing to say why, is the question
+    the Overview could not answer. A `success` row must not carry a reason.
+    """
     if status not in RUN_STATUSES:
         raise ValueError(f"unknown ingest run status {status!r}; expected one of {RUN_STATUSES}")
+    if status == RUN_STATUS_SUCCESS and failure_reason is not None:
+        raise ValueError(f"run {run_id} succeeded but carries a failure_reason")
+    if status != RUN_STATUS_SUCCESS and not (failure_reason or "").strip():
+        raise ValueError(f"run {run_id} is {status} but records no failure_reason")
     if objects_high and kek_version is None:
         raise ValueError(
             f"run {run_id} wrote {objects_high} high-sensitivity object(s) but records no "
@@ -240,7 +307,7 @@ def run_row(
         run_id, source, started_on, duration_seconds,
         files_seen, bytes_ingested, status,
         dataset_id, runner_version, kek_version,
-        objects_high, objects_normal,
+        objects_high, objects_normal, failure_reason,
     )
 
 
@@ -339,6 +406,40 @@ def _self_test():
           raises(lambda: run_row(status="success", objects_high=3, **run_base)))
     check("a run with no high objects needs no kek_version",
           len(run_row(status="success", objects_normal=3, **run_base)) == len(INGEST_RUNS_FIELDS))
+
+    # --- why a run did not finish (#11048) ------------------------------------
+    check("a failed run with no reason is refused",
+          raises(lambda: run_row(status="failed", **run_base)))
+    check("a partial run with a blank reason is refused",
+          raises(lambda: run_row(status="partial", failure_reason="  ", **run_base)))
+    check("a successful run carrying a reason is refused",
+          raises(lambda: run_row(status="success", failure_reason="x", **run_base)))
+    failed_run = run_row(status="failed", failure_reason=REASON_NO_KEK, **run_base)
+    check("a failed run's reason lands in the failure_reason column",
+          failed_run[INGEST_RUNS_FIELDS.index("failure_reason")] == REASON_NO_KEK)
+    check("a success row's failure_reason is NULL",
+          ok_run[INGEST_RUNS_FIELDS.index("failure_reason")] is None)
+    added = tuple(name for name, _ in ADDED_COLUMNS["ingest_runs"])
+    check("ingest_runs' added columns are the contract's tail, in order",
+          INGEST_RUNS_FIELDS[-len(added):] == added, f"{added}")
+    for args, want in [
+        ((3, 40, "file", "read"),
+         "3 of 40 files could not be read; the other 37 are in the lake. The runner's report "
+         "names each and says why. Running it again retries them and skips the rest."),
+        ((1, 2, "upload", "promoted"),
+         "1 of 2 uploads could not be promoted; the other one is in the lake. The runner's report "
+         "names it and says why. Running it again retries it and skips the rest."),
+        ((4, 4, "file", "read"),
+         "None of the 4 files could be read. The runner's report names each and says why. "
+         "Running it again retries them."),
+        ((1, 1, "file", "read"),
+         "The file could not be read. The runner's report names it and says why. "
+         "Running it again retries it."),
+    ]:
+        got = partial_reason(*args)
+        check(f"partial_reason{args} reads as a sentence", got == want, got)
+    check("partial_reason refuses a count of zero", raises(lambda: partial_reason(0, 3, "file", "read")))
+    check("partial_reason refuses more failures than items", raises(lambda: partial_reason(4, 3, "file", "read")))
 
     print(f"\ncatalog: {sum(checks)}/{len(checks)} checks passed")
     return all(checks)

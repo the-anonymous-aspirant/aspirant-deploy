@@ -306,6 +306,9 @@ def test_refuses_high_without_kek():
               field("ingest_runs", ledger[0], "status") == catalog.RUN_STATUS_FAILED)
         check("a run that wrote nothing high names no KEK",
               field("ingest_runs", ledger[0], "kek_version") is None)
+        check("the refused run says why, in words (#11048)",
+              field("ingest_runs", ledger[0], "failure_reason") == catalog.REASON_NO_KEK,
+              str(field("ingest_runs", ledger[0], "failure_reason")))
         check("the refused run still names its dataset and runner",
               field("ingest_runs", ledger[0], "dataset_id") == "SYNTHETIC — FAKE-DATASET-4271"
               and field("ingest_runs", ledger[0], "runner_version") == lake_ingest.RUNNER_VERSION)
@@ -452,6 +455,13 @@ def test_unreadable_record_is_partial(kek):
     check("the ledger records the partial outcome",
           ledger is not None and field("ingest_runs", ledger, "status")
           == catalog.RUN_STATUS_PARTIAL)
+    reason = field("ingest_runs", ledger, "failure_reason") if ledger else None
+    check("the partial run says how many did not load and what next (#11048)",
+          reason == "1 of 3 files could not be read; the other 2 are in the lake. The runner's "
+                    "report names it and says why. Running it again retries it and skips the rest.",
+          str(reason))
+    check("the reason names no record: the ledger is read by a page that shows none",
+          reason is not None and "missing.txt" not in reason and "Errno" not in reason, str(reason))
 
 
 # --------------------------------------------------------------------------
@@ -547,6 +557,66 @@ def test_a_contract_shaped_catalog_is_accepted_and_appended_to(kek):
           summary["status"] == catalog.RUN_STATUS_SUCCESS, summary["status"])
     check("the pre-existing row survives the run",
           con.execute("SELECT count(*) FROM asset_inventory").fetchone()[0] == 2)
+
+
+def test_a_catalog_one_added_column_short_gains_it_in_place(kek):
+    """The live catalog predates `failure_reason` and holds real rows (#11048).
+
+    It cannot be re-seeded (#10513), so the first run after the contract grew
+    adds the column in place. Old rows read NULL, which the explorer shows as
+    "no reason recorded". Only a table that is exactly the old contract gets
+    this; one with a column renamed is still refused at the door.
+    """
+    old_fields = catalog.INGEST_RUNS_FIELDS[:-1]
+    old_ddl = catalog.INGEST_RUNS_COLUMNS.replace(", failure_reason VARCHAR", "")
+    assert "failure_reason" not in old_ddl
+
+    s3, bucket = fresh_bucket()
+    con = duckdb.connect()
+    con.execute(f"CREATE TABLE asset_inventory ({catalog.ASSET_INVENTORY_COLUMNS})")
+    con.execute(f"CREATE TABLE ingest_runs ({old_ddl})")
+    con.execute(
+        f"INSERT INTO ingest_runs VALUES ({', '.join('?' for _ in old_fields)})",
+        ["EARLIER-RUN", "earlier", "2026-08-01 00:00:00", 1.0, 1, 0, "failed",
+         "EARLIER-DATASET", "0.0.0", None, 0, 0],
+    )
+    store = lake_ingest.DuckDBCatalogStore(con)
+    with tempfile.TemporaryDirectory() as root:
+        manifest_path = write_manifest(root, [("invoice.txt", INVOICE, "normal")])
+        summary = lake_ingest.ingest(
+            lake_ingest.load_manifest(manifest_path),
+            s3=s3, bucket=bucket, store=store, kek=kek,
+        )
+
+    columns = [r[0] for r in con.execute("DESCRIBE ingest_runs").fetchall()]
+    check("the run goes ahead on the pre-#11048 ledger", summary["status"] == catalog.RUN_STATUS_SUCCESS,
+          summary["status"])
+    check("the ledger gains failure_reason as its last column", tuple(columns) == catalog.INGEST_RUNS_FIELDS,
+          str(columns))
+    check("the earlier run survives, with no reason recorded",
+          con.execute("SELECT failure_reason FROM ingest_runs WHERE run_id = 'EARLIER-RUN'").fetchall()
+          == [(None,)])
+    check("the new run is in the ledger beside it", len(rows(store, "ingest_runs")) == 2)
+
+    # A table that differs in any other way is refused, not altered.
+    s3, bucket = fresh_bucket()
+    con = duckdb.connect()
+    con.execute(f"CREATE TABLE asset_inventory ({catalog.ASSET_INVENTORY_COLUMNS})")
+    con.execute(f"CREATE TABLE ingest_runs ({old_ddl.replace('objects_normal', 'objects_low')})")
+    store = lake_ingest.DuckDBCatalogStore(con)
+    refused = None
+    with tempfile.TemporaryDirectory() as root:
+        manifest_path = write_manifest(root, [("invoice.txt", INVOICE, "normal")])
+        try:
+            lake_ingest.ingest(
+                lake_ingest.load_manifest(manifest_path),
+                s3=s3, bucket=bucket, store=store, kek=kek,
+            )
+        except lake_ingest.CatalogSchemaError as exc:
+            refused = str(exc)
+    check("a ledger with a renamed column is still refused", refused is not None)
+    check("and is not altered",
+          "failure_reason" not in [r[0] for r in con.execute("DESCRIBE ingest_runs").fetchall()])
 
 
 # --------------------------------------------------------------------------
@@ -692,6 +762,7 @@ def main():
     print("\ncatalog schema drift:")
     test_catalog_on_an_older_schema_is_refused_before_anything_is_written(kek)
     test_a_contract_shaped_catalog_is_accepted_and_appended_to(kek)
+    test_a_catalog_one_added_column_short_gains_it_in_place(kek)
     print("\nmanifest validation:")
     test_manifest_validation()
     print("\nmain()'s own KEK resolution (#10354):")

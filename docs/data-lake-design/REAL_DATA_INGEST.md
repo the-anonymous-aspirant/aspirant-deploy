@@ -188,6 +188,13 @@ different facts, and the operator reads only one surface.
 | `partial` | At least one record could not be read; the rest loaded. | 1 |
 | `failed` | The run refused outright (no KEK for a `high` record). Nothing was written. | 3 |
 
+A `partial` or `failed` row carries `failure_reason`, which the explorer's
+Overview shows beside the run (system_3 #11048). `failed`: "No encryption key
+was loaded and the data includes sensitive records, so nothing was written.
+Load the key and run it again." `partial`: how many files of how many could not
+be read, that the rest are in the lake, and that running it again retries them
+and skips the rest. It never names a file; the printed report does.
+
 A manifest that does not parse exits 2 without writing a ledger row — there was
 no run to record.
 
