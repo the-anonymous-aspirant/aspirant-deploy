@@ -25,12 +25,39 @@ without the KEK is useless. Every tool here refuses to run without a KEK.
 
 ## One-time: put the client JSON on the cell
 
-From your own machine (never through the chat upload or a comment):
+From your own machine (never through the chat upload or a comment). There is
+one value to fill in: the name of the file Google gave you.
+
+First see which downloads exist:
 
 ```bash
-ssh aspirant@<cell> 'mkdir -p ~/secrets && chmod 700 ~/secrets'
-scp client_secret_*.json aspirant@<cell>:~/secrets/gmail-oauth-client.json
-ssh aspirant@<cell> 'chmod 600 ~/secrets/gmail-oauth-client.json'
+ls -t ~/Downloads/client_secret_*.json
+```
+
+If your browser saves somewhere else, look there. If it lists more than one,
+they are downloads of the same client; take the first line, which is the
+newest. Put that one file's full name in `SRC`, then
+paste the rest as it is:
+
+```bash
+SRC="$HOME/Downloads/client_secret_REPLACE_ME.json"
+
+ssh -p 41922 aspirant@home.the-aspirant.com 'mkdir -p ~/secrets && chmod 700 ~/secrets && if [ -d ~/secrets/gmail-oauth-client.json ]; then echo "STOP: gmail-oauth-client.json is a folder; see the note below"; exit 1; fi' \
+  && scp -P 41922 "$SRC" aspirant@home.the-aspirant.com:secrets/gmail-oauth-client.json \
+  && ssh -p 41922 aspirant@home.the-aspirant.com 'chmod 600 ~/secrets/gmail-oauth-client.json && ls -l ~/secrets/gmail-oauth-client.json'
+```
+
+The last line it prints must start with `-rw-------` and end with
+`gmail-oauth-client.json`: one file, readable only by you.
+
+Give `scp` one file, never a pattern such as `client_secret_*.json`. When a
+pattern matches two files, `scp` treats the destination as a folder and puts
+both inside it (this happened on 2026-11-13, system_3 #10778). If the first
+command printed `STOP`, a folder is there from such a copy. It holds only
+copies of the client JSON. Remove it and paste the block again:
+
+```bash
+ssh -p 41922 aspirant@home.the-aspirant.com 'rm -r ~/secrets/gmail-oauth-client.json'
 ```
 
 The client must be of type **Desktop app**. The scope used is exactly
@@ -68,6 +95,14 @@ tunnel. The token is then stored as an envelope and the sidecar is printed.
 Nothing secret is printed, ever.
 
 ## Status and re-consent
+
+The commands from here on run on the cell, from the deploy checkout. Either
+keep the session from the consent step open, or open a plain one:
+
+```bash
+ssh -p 41922 aspirant@home.the-aspirant.com
+cd ~/aspirant-deploy
+```
 
 ```bash
 scripts/gmail/gmail.sh status           # presence, obtained_at, scopes, kek version; no KEK needed
