@@ -498,6 +498,10 @@ replace(
             # nothing high to wrap has no key to record.
             kek_version=KEK_VERSION if high else None,
             objects_high=high, objects_normal=files - high,
+            # A failed run must say why (#11048). Marked SYNTHETIC like every
+            # other fixture value, so nobody mistakes it for a real failure.
+            failure_reason="SYNTHETIC — a fake run that failed, to give the explorer a reason to show."
+            if status == "failed" else None,
         )
         for n, suffix, duration, files, written, status, high in (
             (1, "a", 11.11, 3, 1111, "success", 1),
