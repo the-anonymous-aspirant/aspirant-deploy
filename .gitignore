@@ -1,6 +1,10 @@
 .env
 .env.local
 .env.*.local
+# A backup of .env holds the same secrets: never commit one (system_3 #11207).
+.env.bak*
+*.env.bak*
+.env*.bak
 .DS_Store
 __pycache__/
 node_modules/
