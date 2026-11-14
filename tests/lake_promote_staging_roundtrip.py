@@ -236,6 +236,14 @@ def test_hash_mismatch_is_refused_and_left_staged(kek):
     check("the good upload still promotes", summary["written_normal"] == 1, str(summary))
     check("the tampered upload is named in the failure list",
           [f["upload_id"] for f in summary["failed"]] == ["upload-tampered"], str(summary["failed"]))
+    ledger = ledger_row(store, summary["run_id"])
+    reason = field("ingest_runs", ledger, "failure_reason") if ledger else None
+    check("the partial run says how many did not promote and what next (#11048)",
+          reason == "1 of 2 uploads could not be promoted; the other one is in the lake. The "
+                    "runner's report names it and says why. Running it again retries it and skips the rest.",
+          str(reason))
+    check("the reason names no upload and carries no exception text",
+          reason is not None and "upload-tampered" not in reason and "sha256" not in reason, str(reason))
     check("the tampered upload's object is still staged (left alone, not deleted)",
           promote_mod._object_key("upload-tampered") in staged_keys(s3, staging))
     check("nothing was catalogued for the tampered upload",
@@ -311,6 +319,8 @@ def test_refuses_high_without_kek():
               field("ingest_runs", ledger[0], "status") == catalog.RUN_STATUS_FAILED)
         check("a run that wrote nothing high names no KEK",
               field("ingest_runs", ledger[0], "kek_version") is None)
+        check("the refused run says why, in words (#11048)",
+              field("ingest_runs", ledger[0], "failure_reason") == catalog.REASON_NO_KEK)
 
     # Fail-closed is not fail-always: an all-normal staging area needs no key.
     s3, bronze, staging = fresh_buckets()

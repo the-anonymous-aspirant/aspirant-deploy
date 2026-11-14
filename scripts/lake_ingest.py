@@ -297,6 +297,8 @@ class DuckDBCatalogStore:
             return
         if tuple(existing) == tuple(fields):
             return
+        if self._add_missing_tail(table, existing, fields):
+            return
         missing = [f for f in fields if f not in existing]
         extra = [c for c in existing if c not in fields]
         raise CatalogSchemaError(
@@ -312,6 +314,28 @@ class DuckDBCatalogStore:
             "before ingesting. Refusing up front rather than failing on the INSERT after "
             "objects have already been written."
         )
+
+    def _add_missing_tail(self, table: str, existing: list[str], fields: tuple) -> bool:
+        """Add columns the contract grew after this table was created.
+
+        Only when the table is exactly the contract minus a tail that
+        `catalog.ADDED_COLUMNS` declares: same names, same order, nothing extra.
+        That is the shape a live catalog has the first time a runner meets a
+        contract that grew a column (#11048 added `ingest_runs.failure_reason`).
+        The live catalog holds real records and cannot be re-seeded (#10513), so
+        the column is added in place and old rows read NULL in it. Anything
+        else that differs returns False and is refused by the caller, as before.
+        """
+        added = dict(catalog.ADDED_COLUMNS.get(table, ()))
+        n = len(existing)
+        if not (0 < n < len(fields)) or tuple(existing) != tuple(fields[:n]):
+            return False
+        tail = fields[n:]
+        if any(name not in added for name in tail):
+            return False
+        for name in tail:
+            self.con.execute(f"ALTER TABLE {table} ADD COLUMN {name} {added[name]}")
+        return True
 
     def ensure_tables(self) -> None:
         self._ensure_table(
@@ -397,9 +421,14 @@ def ingest(
         "dry_run": dry_run,
     }
 
-    def finish(status: str) -> dict:
-        """Write the ledger row and stamp the summary with the outcome."""
+    def finish(status: str, reason: str | None = None) -> dict:
+        """Write the ledger row and stamp the summary with the outcome.
+
+        `reason` is the plain-words why of a `failed` or `partial` run
+        (#11048), and `catalog.run_row` refuses either without one.
+        """
         summary["status"] = status
+        summary["failure_reason"] = reason
         summary["duration_seconds"] = round(time.monotonic() - started, 3)
         if not dry_run:
             store.add_run(
@@ -419,6 +448,7 @@ def ingest(
                     kek_version=kek_version if summary["written_high"] else None,
                     objects_high=summary["written_high"],
                     objects_normal=summary["written_normal"],
+                    failure_reason=reason,
                 )
             )
         return summary
@@ -431,7 +461,7 @@ def ingest(
     # out on line 1 costs an edit, while finding it out on line 4,000 costs a
     # half-loaded lake.
     if kek is None and manifest_needs_kek(manifest):
-        finish(catalog.RUN_STATUS_FAILED)
+        finish(catalog.RUN_STATUS_FAILED, catalog.REASON_NO_KEK)
         raise MissingKekError(
             f"refusing to load dataset {manifest['dataset_id']}: it contains at least one "
             f"sensitivity=high record (declared, or defaulted under the fail-closed intake "
@@ -468,7 +498,7 @@ def ingest(
         # record actually in hand, so no future refactor of the former can
         # quietly let a high blob past the latter.
         if is_high and kek is None:
-            finish(catalog.RUN_STATUS_FAILED)
+            finish(catalog.RUN_STATUS_FAILED, catalog.REASON_NO_KEK)
             raise MissingKekError(
                 f"refusing to write sensitivity=high blob {record['source_path']} with no KEK "
                 "loaded (DATA_LAKE_DESIGN.md §9 layer 2)"
@@ -520,7 +550,10 @@ def ingest(
         # Some records did not load. `partial` even when zero records succeeded:
         # the run did run, and the ledger's `failed` is reserved for a run that
         # refused outright, which is a different thing to investigate.
-        return finish(catalog.RUN_STATUS_PARTIAL)
+        return finish(
+            catalog.RUN_STATUS_PARTIAL,
+            catalog.partial_reason(len(summary["failed"]), summary["files_seen"], "file", "read"),
+        )
     return finish(catalog.RUN_STATUS_SUCCESS)
 
 

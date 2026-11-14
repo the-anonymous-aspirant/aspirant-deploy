@@ -433,8 +433,9 @@ def promote(
         "dry_run": dry_run,
     }
 
-    def finish(status: str) -> dict[str, Any]:
+    def finish(status: str, reason: str | None = None) -> dict[str, Any]:
         summary["status"] = status
+        summary["failure_reason"] = reason
         summary["duration_seconds"] = round(time.monotonic() - started, 3)
         if not dry_run:
             store.add_run(
@@ -451,6 +452,7 @@ def promote(
                     kek_version=kek_version if summary["written_high"] else None,
                     objects_high=summary["written_high"],
                     objects_normal=summary["written_normal"],
+                    failure_reason=reason,
                 )
             )
         return summary
@@ -467,7 +469,7 @@ def promote(
 
     # --- pre-flight: refuse the whole run before touching a single object ---
     if kek is None and manifests_need_kek(manifests):
-        finish(catalog.RUN_STATUS_FAILED)
+        finish(catalog.RUN_STATUS_FAILED, catalog.REASON_NO_KEK)
         raise MissingKekError(
             "refusing to promote: at least one staged upload declares "
             "sensitivity=high (or defaults to it under the fail-closed intake "
@@ -497,7 +499,7 @@ def promote(
             # reads the resolved decision for the upload actually in hand.
             # NOT inside the broad per-upload guard below — a systemic
             # refusal aborts the whole run, it is never "one failed upload".
-            finish(catalog.RUN_STATUS_FAILED)
+            finish(catalog.RUN_STATUS_FAILED, catalog.REASON_NO_KEK)
             raise MissingKekError(
                 f"refusing to promote sensitivity=high upload {upload_id} with no KEK loaded"
             )
@@ -558,7 +560,10 @@ def promote(
             continue
 
     if summary["failed"]:
-        return finish(catalog.RUN_STATUS_PARTIAL)
+        return finish(
+            catalog.RUN_STATUS_PARTIAL,
+            catalog.partial_reason(len(summary["failed"]), summary["uploads_seen"], "upload", "promoted"),
+        )
     return finish(catalog.RUN_STATUS_SUCCESS)
 
 

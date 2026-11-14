@@ -84,6 +84,16 @@ Added `dataset_id`, `runner_version`, `kek_version`, `objects_high`,
 The column **name** is kept: the explorer's §8 Runs & health page reads it, and
 renaming across a repo boundary buys nothing.
 
+Added `failure_reason` (system_3 #11048): why a `failed` or `partial` run did
+not load everything, in words the operator can act on, shown beside the run on
+the explorer's Overview. `catalog.run_row` refuses a `failed` or `partial` row
+without one and a `success` row with one. A reason names no path, upload id or
+exception: the runner's printed report keeps that detail. The live catalog
+already held real rows when this column was added and cannot be re-seeded
+(#10513), so a runner that finds `ingest_runs` exactly one `ADDED_COLUMNS` tail
+short adds the column in place; rows from before read NULL, which the explorer
+shows as "no reason recorded". Any other difference is still refused.
+
 ## `kek_version` is a deliberate duplicate
 
 It also lives inside the wrapped-DEK header
