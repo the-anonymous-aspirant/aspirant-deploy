@@ -60,10 +60,12 @@ resolve_swap_target() {  # resolve_swap_target <active> [requested] -> slot | "n
 # [::] proxy for it, and is reached over SSH (docs/OPERATIONS.md, break-glass).
 #
 # `client-active` is the Cloudflare Tunnel's target (system_3 #10829-A1): the
-# tunnel's service URL is http://client-active:80, and the alias sits only on
-# the slot this override makes active, so it follows every flip the way port 80
-# does. The name must never contain "client-blue" or "client-green":
-# read_active_slot greps this file for those.
+# tunnel's service URL is http://client-active:80. Only the slot this override
+# makes active joins the `tunnel` network, and the alias exists there alone, so
+# it follows every flip the way port 80 does and the connector reaches nothing
+# else (security c69867). The slot keeps its base networks (`default`,
+# `explorer_api`): compose merges this map into them. The name must never
+# contain "client-blue" or "client-green": read_active_slot greps this file.
 write_override() {  # write_override <slot> [override-file]
   cat > "${2:-$OVERRIDE}" <<EOF
 services:
@@ -73,7 +75,7 @@ services:
       - "127.0.0.1:8999:80"
       - "127.0.0.1:8098:8098"
     networks:
-      default:
+      tunnel:
         aliases:
           - client-active
 EOF
