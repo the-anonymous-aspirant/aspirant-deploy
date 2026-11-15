@@ -58,6 +58,12 @@ resolve_swap_target() {  # resolve_swap_target <active> [requested] -> slot | "n
 # one port where the admin sign-in carries the break-glass token. It is
 # published on 127.0.0.1 only, with an explicit IPv4 host IP so docker starts no
 # [::] proxy for it, and is reached over SSH (docs/OPERATIONS.md, break-glass).
+#
+# `client-active` is the Cloudflare Tunnel's target (system_3 #10829-A1): the
+# tunnel's service URL is http://client-active:80, and the alias sits only on
+# the slot this override makes active, so it follows every flip the way port 80
+# does. The name must never contain "client-blue" or "client-green":
+# read_active_slot greps this file for those.
 write_override() {  # write_override <slot> [override-file]
   cat > "${2:-$OVERRIDE}" <<EOF
 services:
@@ -66,6 +72,10 @@ services:
       - "80:80"
       - "127.0.0.1:8999:80"
       - "127.0.0.1:8098:8098"
+    networks:
+      default:
+        aliases:
+          - client-active
 EOF
 }
 

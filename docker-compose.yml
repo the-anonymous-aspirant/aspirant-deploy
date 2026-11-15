@@ -308,6 +308,53 @@ services:
       - default
       - explorer_api
 
+  # Cloudflare Tunnel connector (system_3 #10829, operator yes c67416 on #9107):
+  # every visitor request reaches the client over an outbound, encrypted tunnel
+  # instead of plaintext :80. Remotely managed: the public hostnames and their
+  # target, http://client-active:80, live in the Zero Trust dashboard. That
+  # alias follows the live blue/green slot (scripts/deploy-client.sh
+  # write_override), so a slot flip never strands the tunnel.
+  #
+  # Token custody (docs/OPERATIONS.md, Cloudflare Tunnel): whoever holds the
+  # connector token can attach a connector and take a share of the site's
+  # traffic. It is read from a file, never argv or `environment:` (both are
+  # saved in the container config under /var/lib/docker, on the unencrypted
+  # root LV). Compose outside Swarm bind-mounts a file secret as it is and
+  # ignores uid/mode, so the container runs as the file's owner (1000) rather
+  # than the image's 65532; the file stays 0400.
+  #
+  # Profile-gated: an untargeted `docker compose up` neither starts it nor needs
+  # its token file, so merging this changes nothing until the operator has made
+  # the tunnel and the file exists. Start it by name: `docker compose up -d
+  # cloudflared`. Pinned by digest, so auto-pull never recreates it.
+  cloudflared:
+    logging: *default-logging
+    image: cloudflare/cloudflared:2026.10.1@sha256:a15a3b50b8dabd57ac2090e9484c0247dba9dfa1f0df4d298d4317f9d69eb2d5
+    profiles: ["tunnel"]
+    command: ["tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:20241", "run"]
+    user: "1000:1000"
+    environment:
+      TUNNEL_TOKEN_FILE: /run/secrets/cloudflared_token
+    secrets:
+      - cloudflared_token
+    # The image has no shell; `tunnel ready` queries the metrics listener's
+    # /ready, which reports whether any edge connection is registered.
+    healthcheck:
+      test: ["CMD", "cloudflared", "tunnel", "--metrics", "127.0.0.1:20241", "ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    # On every visitor's path once A2 closes :80, so it dies with the client,
+    # not before it (system_3 #7674 order).
+    oom_score_adj: -500
+    mem_limit: 256m
+    # No `ports:`. It dials out to Cloudflare and in to client-active on
+    # `default`; nothing reaches it from the host or the internet.
+    networks:
+      - default
+
   transcriber:
     logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-transcriber:latest
@@ -927,6 +974,13 @@ services:
 
 volumes:
   pgdata:
+
+secrets:
+  # The Cloudflare Tunnel connector token (cloudflared above). Outside the repo,
+  # like /data/aspirant/nginx-secrets, so it can never be committed: 0400,
+  # owned by 1000, in a 0700 directory. Rotation: docs/OPERATIONS.md.
+  cloudflared_token:
+    file: /data/aspirant/cloudflared/token
 
 networks:
   default:

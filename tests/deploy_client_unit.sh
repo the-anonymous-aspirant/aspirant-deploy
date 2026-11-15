@@ -71,6 +71,15 @@ assert_eq "1" "$(grep -c '"127.0.0.1:8098:8098"' "$OV")" "write_override maps th
 assert_eq "0" "$(grep -c '"8098:8098"' "$OV" || true)" "write_override never publishes 8098 on all interfaces"
 assert_eq "0" "$(grep -c '\[::' "$OV" || true)" "write_override binds no IPv6 address"
 
+# write_override — the tunnel's target alias rides the active slot (#10829-A1)
+assert_eq "1" "$(grep -c -- '- client-active$' "$OV")" "write_override gives the active slot the client-active alias"
+# ...and the alias name never trips read_active_slot's slot-name grep, which
+# would misread the active slot after a write.
+assert_eq "green" "$(read_active_slot "$OV")" "read_active_slot reads green back from write_override green"
+write_override blue "$OV"
+assert_eq "blue" "$(read_active_slot "$OV")" "read_active_slot reads blue back from write_override blue"
+assert_eq "1" "$(grep -c -- '- client-active$' "$OV")" "write_override blue carries the alias too"
+
 echo
 echo "deploy_client_unit: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
