@@ -197,8 +197,13 @@ assert_eq "positive control: the shims saw openssl and the stub's cat" "1 1" \
   "$(grep -c '^openssl rand' "$ARGV_LOG") $(grep -c '^cat $' "$ARGV_LOG")"
 assert_eq "no external command the rotation ran had the password in its argv" "0" \
   "$(grep -cF "$new_pw" "$ARGV_LOG" || true)"
-assert_eq "the session first stops the server logging a failed statement" \
-  "SET log_min_error_statement TO panic;" "$(head -n 1 "$SQL_CAPTURE")"
+# Security c69944: every setting that could log the ALTER, the successful
+# one included, is off before it.
+assert_eq "the session turns off every statement log before anything else" \
+  "SET log_min_error_statement TO panic;|SET log_statement TO 'none';|SET pg_stat_statements.track_utility TO off;" \
+  "$(head -n 3 "$SQL_CAPTURE" | paste -sd'|')"
+alter_line="$(grep -n '^ALTER ROLE explorer_ro WITH PASSWORD' "$SQL_CAPTURE" | cut -d: -f1)"
+assert_eq "and the ALTER comes after all three" "1" "$([ "${alter_line:-0}" -gt 3 ] && echo 1 || echo 0)"
 
 # A failed ALTER must not echo the password: psql's error context quotes the
 # statement. The stub fails the way psql does, quoting its input on stderr.

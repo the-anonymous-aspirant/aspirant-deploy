@@ -347,14 +347,21 @@ bootstrap_catalog_role() {
   # Garage --read is.
   #
   # The password reaches psql on stdin only: bash 5.1+ feeds a small here-doc
-  # through a pipe. A failed statement must not echo it either (system_3
-  # #11381). The server would log the failing statement under the default
-  # log_min_error_statement, so this session turns that off (ducklake is the
-  # catalog's superuser). psql's own error context is captured and printed
-  # with the password redacted.
+  # through a pipe. No log may keep it either (system_3 #11381; security
+  # c69944). The session turns off, before the ALTER, every setting that
+  # could record the statement with the password in it (ducklake is the
+  # catalog's superuser, so it may):
+  # - log_min_error_statement: the server logs a failing statement;
+  # - log_statement: at 'ddl' or 'all' it logs a successful one;
+  # - pg_stat_statements.track_utility: if the module is loaded, it keeps the
+  #   text. When the module is not loaded, the SET only defines a placeholder.
+  # psql's own error context is captured and printed with the password
+  # redacted.
   local err rc=0
   err="$(catalog_psql 2>&1 >/dev/null <<SQL
 SET log_min_error_statement TO panic;
+SET log_statement TO 'none';
+SET pg_stat_statements.track_utility TO off;
 DO \$\$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$CATALOG_RO_ROLE') THEN
