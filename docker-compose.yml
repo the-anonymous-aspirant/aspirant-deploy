@@ -320,8 +320,15 @@ services:
   # traffic. It is read from a file, never argv or `environment:` (both are
   # saved in the container config under /var/lib/docker, on the unencrypted
   # root LV). Compose outside Swarm bind-mounts a file secret as it is and
-  # ignores uid/mode, so the container runs as the file's owner (1000) rather
-  # than the image's 65532; the file stays 0400.
+  # ignores uid/mode, so the FILE carries the image's own uid: 65532, 0400.
+  # The container keeps that user rather than the cell account's 1000, which
+  # owns /home/aspirant and is in the docker group (security c69867).
+  #
+  # Its own network (security c69867, required): the ingress rules of a
+  # remotely managed tunnel live in the dashboard, so one edit there, mistaken
+  # or from a stolen session, can route to anything the connector can reach.
+  # On `tunnel` that is the live client slot alone, which already faces the
+  # internet; on `default` it was postgres, the bare API and 14 more.
   #
   # Profile-gated: an untargeted `docker compose up` neither starts it nor needs
   # its token file, so merging this changes nothing until the operator has made
@@ -332,7 +339,12 @@ services:
     image: cloudflare/cloudflared:2026.10.1@sha256:a15a3b50b8dabd57ac2090e9484c0247dba9dfa1f0df4d298d4317f9d69eb2d5
     profiles: ["tunnel"]
     command: ["tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:20241", "run"]
-    user: "1000:1000"
+    # Least privilege (security c69867): an HTTP tunnel needs no capability
+    # and writes nothing; checked to token parsing on --network none, and the
+    # first real run is checked at bring-up (docs/OPERATIONS.md, Verify).
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
     environment:
       TUNNEL_TOKEN_FILE: /run/secrets/cloudflared_token
     secrets:
@@ -351,9 +363,10 @@ services:
     oom_score_adj: -500
     mem_limit: 256m
     # No `ports:`. It dials out to Cloudflare and in to client-active on
-    # `default`; nothing reaches it from the host or the internet.
+    # `tunnel`, the only other member; nothing reaches it from the host or the
+    # internet.
     networks:
-      - default
+      - tunnel
 
   transcriber:
     logging: *default-logging
@@ -978,7 +991,9 @@ volumes:
 secrets:
   # The Cloudflare Tunnel connector token (cloudflared above). Outside the repo,
   # like /data/aspirant/nginx-secrets, so it can never be committed: 0400,
-  # owned by 1000, in a 0700 directory. Rotation: docs/OPERATIONS.md.
+  # owned by 65532 (the image's user), in a 0700 directory (the daemon does the
+  # bind mount, so only the file's own mode reaches the container). Install
+  # and rotation: docs/OPERATIONS.md.
   cloudflared_token:
     file: /data/aspirant/cloudflared/token
 
@@ -1027,6 +1042,12 @@ networks:
   # see the `lake` network above). Re-derive before any other service joins
   # it, or before anything loosens it beyond client-nginx's own admin login.
   explorer_api:
+  # The Cloudflare Tunnel's bridge (system_3 #10829, security c69867): only
+  # cloudflared and the live client slot, which joins it with the alias
+  # client-active through scripts/deploy-client.sh write_override. Not
+  # internal: cloudflared dials out to Cloudflare. Re-derive before any other
+  # service joins it, because the dashboard can route to whatever is on it.
+  tunnel:
   # Penpot sub-stack bridge. Only penpot-frontend is dual-homed onto
   # `default` (for the client-nginx vhost proxy); backend, exporter,
   # postgres and redis are reachable solely from penpot peers.

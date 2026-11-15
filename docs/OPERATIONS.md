@@ -205,11 +205,13 @@ The `cloudflared` service (system_3 #10829) carries visitor traffic from Cloudfl
 
 `home.the-aspirant.com` is **not** on the tunnel and never should be. It is the SSH entry point (a tunnel carries HTTP only), and stays a DNS-only A record that DDNS keeps at the cell's IP.
 
+The connector has its own network, `tunnel`, shared only with the live client slot (security c69867). A remotely managed tunnel's ingress lives in the dashboard, so one edit there, mistaken or from a stolen session, can route to anything the connector can reach. On `tunnel` that is the client alone, which already faces the internet. `tests/compose_network_scope_unit.sh` keeps it so.
+
 The service is profile-gated (`profiles: ["tunnel"]`). An untargeted `docker compose up` neither starts it nor needs its token file, and auto-pull never recreates it, because it is pinned by digest. Start it and upgrade it by name.
 
 ### The token, and why it is not in `.env`
 
-Whoever holds the connector token can attach a connector to our tunnel and receive a share of the site's traffic. So it lives in a file, read by `cloudflared` via `TUNNEL_TOKEN_FILE`. It is never on argv or in `environment:`, both of which docker saves in the container's config under `/var/lib/docker`, on the unencrypted root LV. The file is outside the repo, so it can never be committed. Compose outside Swarm bind-mounts a file secret as it is and ignores `uid`/`mode`, so the container runs as the file's owner (`user: "1000:1000"`). As the image's own user (65532) it gets `permission denied` on a `0400` file.
+Whoever holds the connector token can attach a connector to our tunnel and receive a share of the site's traffic. So it lives in a file, read by `cloudflared` via `TUNNEL_TOKEN_FILE`. It is never on argv or in `environment:`, both of which docker saves in the container's config under `/var/lib/docker`, on the unencrypted root LV. The file is outside the repo, so it can never be committed. Compose outside Swarm bind-mounts a file secret as it is and ignores `uid`/`mode`, so the **file** carries the image's own user: owned by 65532, mode `0400`. The container keeps that user rather than running as the cell account's 1000, which owns `/home/aspirant` and is in the docker group (security c69867). It also runs `read_only`, with every capability dropped and `no-new-privileges`. Checked against the pinned image on `--network none`: as 65532 it reads the file (a dummy token gets "Provided Tunnel token is not valid"), and as 1000 the same file is `permission denied`.
 
 ### Install
 
@@ -218,10 +220,11 @@ Whoever holds the connector token can attach a connector to our tunnel and recei
 #    connector token. Add NO public hostname yet: adding one re-points that
 #    hostname's DNS at the tunnel, which is the cutover (A2), not this step.
 
-# 2. Put the token in place on the cell, without it touching argv or shell history.
+# 2. Put the token in place on the cell, owned by the image's user (65532),
+#    without it touching argv or shell history: paste it, then Ctrl-D.
 install -d -m 700 /data/aspirant/cloudflared
-( umask 377; cat > /data/aspirant/cloudflared/token )   # paste the token, then Ctrl-D
-ls -l /data/aspirant/cloudflared/token                   # -r-------- aspirant aspirant
+sudo install -o 65532 -g 65532 -m 0400 /dev/stdin /data/aspirant/cloudflared/token
+sudo ls -ln /data/aspirant/cloudflared/token            # -r-------- 65532 65532
 
 # 3. Start it by name.
 cd ~/aspirant-deploy && docker compose up -d cloudflared
@@ -238,8 +241,18 @@ docker compose logs --tail 20 cloudflared | grep -i "registered tunnel connectio
 docker port aspirant-online-cloudflared-1                       # no output
 docker inspect --format '{{json .Config.Env}}' aspirant-online-cloudflared-1   # TUNNEL_TOKEN_FILE only, never TUNNEL_TOKEN
 
-# The tunnel's target is the live slot.
+# read_only holds on a real connection, not only at startup: still healthy
+# after a few minutes, and no "read-only file system" in its log.
+docker compose logs cloudflared | grep -ci "read-only file system"   # 0
+
+# The connector is on `tunnel` only, and the live slot carries the alias there.
+docker inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' aspirant-online-cloudflared-1   # aspirant-online_tunnel only
 docker inspect --format '{{json .NetworkSettings.Networks}}' "$(docker compose ps -q client-green client-blue | head -1)" | grep -o client-active
+
+# From the tunnel, the client's break-glass port refuses (default.conf: 8098
+# answers the bridge gateway only). The connector has no shell, so ask from a
+# throwaway container on the same network. Expect 403.
+docker run --rm --network aspirant-online_tunnel curlimages/curl:8.11.1 -s -o /dev/null -w '%{http_code}\n' -X POST http://client-active:8098/admin/sign-in
 ```
 
 ### Rotate the token
@@ -249,7 +262,7 @@ The dashboard re-issues the token, and the old one stops working the moment it d
 ```bash
 # 1. Dashboard: the tunnel → Refresh token (or Rotate), and copy the new one.
 # 2. On the cell:
-( umask 377; cat > /data/aspirant/cloudflared/token.new ) && mv /data/aspirant/cloudflared/token.new /data/aspirant/cloudflared/token
+sudo install -o 65532 -g 65532 -m 0400 /dev/stdin /data/aspirant/cloudflared/token   # paste, then Ctrl-D
 docker compose up -d --force-recreate cloudflared
 # 3. Re-run Verify above.
 ```
