@@ -203,9 +203,13 @@ command line.
 The catalog password, in one sitting, because explorer-api cannot open a new
 catalog connection between the first step and the last:
 
+All three steps are the **operator's**. `explorer-env sync` in particular is
+operator only: it reads every line of the served `.env` into bash, and no
+agent's process may read that file (security ruling C, system_3 c61658 on #9979).
+
 ```bash
 scripts/lake-skeleton.sh rotate-explorer-ro   # new password: catalog + skeleton env
-scripts/lake-skeleton.sh explorer-env sync    # copy it into this checkout's .env
+scripts/lake-skeleton.sh explorer-env sync    # operator only: copy it into this checkout's .env
 ( read -rs LAKE_KEK_HEX; export LAKE_KEK_HEX   # recreate explorer-api, decrypt on
   export LAKE_KEK_FINGERPRINT=<ceremony fingerprint, sha256(KEK)[:16]>
   scripts/lake-skeleton.sh explorer-decrypt-up )
