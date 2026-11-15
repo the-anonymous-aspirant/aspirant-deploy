@@ -153,6 +153,8 @@ docker compose -f docker-compose.dev.yml up -d translator
 
 The env file is `aspirant`-owned, not root-owned: a root-owned `0600` file is unreadable by the job, and the failure is silent to anyone not tailing `~/ddns.log`.
 
+**Once the apex is served through the Cloudflare Tunnel (system_3 #10829), blank `ROOT_RECORD_ID` in the env file.** The apex is then a CNAME to the tunnel, not an A record at the cell, so it must not be managed here. The script also refuses on its own to PUT an A record over an apex that is no longer type A. Without that guard, the cutover would be undone every five minutes. A configured `ROOT_RECORD_ID` that cannot be read (for example, the A record was deleted for the tunnel's CNAME) logs an ERROR naming this fix on every run. `home.the-aspirant.com` is unaffected: it stays an A record at the cell for good, because SSH resolves through it and a tunnel carries HTTP only. Each record is compared on its own content, so a drifted `home` record is repaired even while the apex is current.
+
 ### Install
 
 ```bash
