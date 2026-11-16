@@ -80,17 +80,14 @@ scripts/gmail/gmail.sh consent --note 'consent screen: Testing'
 Google's redirect can never land on some other local process; without it ssh
 only warns and carries on.
 
-The tool asks for the KEK on a hidden prompt (the way to enter it). If you need
-it in the environment for a non-interactive run, read it hidden and export the
-variable, never type the hex on a command line, which would write the lake
-master key to the shell history on the cell:
-
-```bash
-read -rs LAKE_KEK_HEX && export LAKE_KEK_HEX    # one shell, one run; `unset LAKE_KEK_HEX` after
-```
-
-(`gmail.sh` hands the key to its container on stdin, never on `-e` and never in
-a file held for the run; security c70261 on #11344.)
+The tool asks for the KEK on a hidden prompt, which is the only way to enter
+it. Never type the hex on a command line: that would write the lake master key
+to the shell history on the cell. An exported `LAKE_KEK_HEX` is refused, by
+`gmail.sh` and by `gmail_pull_and_ingest.sh`. A process keeps its start-up
+environment in `/proc/<pid>/environ` for its whole life, even after `unset`,
+so an exported key would sit there for the run (security F1, c70270 on
+#11428). `gmail.sh` hands a key it was given to its container on stdin, never
+on `-e` and never in a file held for the run.
 
 It then prints an authorisation URL, you open it in your browser,
 grant read-only access, and Google's redirect lands on the cell through the
@@ -183,8 +180,7 @@ scripts/gmail/gmail_pull_and_ingest.sh --detach --full --verify
 ```
 
 One KEK prompt for both halves. Run it from a terminal and type the KEK at the
-hidden prompt. The older one-shot `export LAKE_KEK_HEX` still works, but it puts
-the key in your shell's environment, so prefer the prompt.
+hidden prompt; an exported `LAKE_KEK_HEX` is refused (see Consent above).
 
 **Where the KEK is during a run** (security c70261 on #11344). The wrapper keeps
 it in an unexported shell variable and hands it to each child on a pipe (fd 3,

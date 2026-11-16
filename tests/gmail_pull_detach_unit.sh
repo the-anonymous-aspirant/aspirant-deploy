@@ -72,10 +72,13 @@ start() {
   mkdir -p "$st"
   printf '%s' "$SENTINEL" > "$st/.expect"
   echo "$sleep_s" > "$st/.sleep"
-  LAKE_KEK_HEX="$SENTINEL" GMAIL_STAGING_DIR="$st" GMAIL_PULL_CMD="$T/pull" \
-    LAKE_INGEST_CMD="$T/ingest" LAKE_VERIFY_CMD=/bin/true \
-    bash "$WRAPPER" --detach --full > "$st.out" 2> "$st.err" < /dev/null
-  sed -nE 's/.*running detached as ([^;]+);.*/\1/p' "$st.out"
+  # Typed at the foreground's hidden prompt through a pty, after a pause so
+  # the pty does not echo it as typeahead (an exported LAKE_KEK_HEX is refused).
+  { sleep 2; printf '%s\n' "$SENTINEL"; } \
+    | env GMAIL_STAGING_DIR="$st" GMAIL_PULL_CMD="$T/pull" LAKE_INGEST_CMD="$T/ingest" LAKE_VERIFY_CMD=/bin/true \
+      script -qec "bash '$WRAPPER' --detach --full" /dev/null > "$st.out" 2>&1
+  cp "$st.out" "$st.err"
+  tr -d '\r' < "$st.out" | sed -nE 's/.*running detached as ([^;]+);.*/\1/p'
 }
 
 wait_for() { # FILE SECONDS
