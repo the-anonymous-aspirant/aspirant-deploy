@@ -42,9 +42,25 @@ equality is what `tests/gmail_pull_test.py` proves. Spam and trash are left out
 on both paths. A delta with no change writes no export, and still advances the
 history id.
 
+Pacing (system_3 #11344)
+------------------------
+Gmail charges each call in quota units against a per-user limit of 6,000 a
+minute: `messages.get` with `format=full` costs 60, `messages.list` 5,
+`history.list` 2, `getProfile` 1. The first real pull ran its gets serially at
+about 16 ms each, far past 100 a minute, and was refused with 403s. Every call
+now spends its cost from a budget of 5,100 units a minute (85% of the limit;
+`GMAIL_UNITS_PER_MINUTE` lowers it, and nothing raises it past 6,000) before it
+runs. A rate-limit refusal that outlasts the library's own retries waits for
+the window to recover (60 s, doubling to 300 s), resumes at a slower pace, and
+fails only after 30 minutes of waiting on one call.
+
 What is never printed
 ---------------------
-Counts and the run id only: never a subject, an address, a body or a token.
+Counts, times and the run id only: never a subject, an address, a body, a
+message id or a token. A failure names the call, its HTTP status and Google's
+reason code; Google's message is printed with anything shaped like an id or an
+address redacted. While it runs, the pull prints its progress on stderr once a
+minute: messages fetched of those listed, and the time left at the current pace.
 
 Exit codes: 0 ok; 2 KEK or envelope failure; 3 re-consent needed; 4 transport
 or API error; 5 configuration refused; 6 no token stored; 7 another pull holds
@@ -61,6 +77,7 @@ import os
 import re
 import shutil
 import sys
+import time
 from datetime import datetime, timezone
 from email.message import Message
 from html.parser import HTMLParser
@@ -86,6 +103,19 @@ HISTORY_TYPES = ["messageAdded", "messageDeleted", "labelAdded", "labelRemoved"]
 LIST_PAGE = 500
 RETRIES = 5
 
+# Gmail API quota units per call (developers.google.com/workspace/gmail/api/
+# reference/quota, as design read it for #11344): the per-user limit is 6,000
+# units a minute, and a full get costs 60 of them.
+UNIT_COST = {"getProfile": 1, "messages.list": 5, "messages.get": 60, "history.list": 2}
+USER_UNITS_PER_MINUTE = 6000
+DEFAULT_UNITS_PER_MINUTE = 5100  # 85%: headroom under the per-user limit
+RATE_LIMIT_REASONS = frozenset({"rateLimitExceeded", "userRateLimitExceeded"})
+RATE_WAIT_FIRST = 60
+RATE_WAIT_MAX = 300
+RATE_WAIT_GIVE_UP = 30 * 60
+SLOW_DOWN = 0.8
+PROGRESS_EVERY = 60
+
 EXIT_LOCKED = 7
 
 
@@ -94,7 +124,122 @@ class HistoryExpired(Exception):
 
 
 class PullError(Exception):
-    """A Gmail API call failed for a reason other than a missing object."""
+    """A Gmail API call failed for a reason other than a missing object.
+
+    `str()` is the failure line's middle: the call, its status, Google's reason
+    code and (redacted) message, then the progress so far. Never mail content.
+    """
+
+    def __init__(self, detail: str, *, reason: str | None = None, progress: str | None = None):
+        self.reason = reason
+        self.progress = progress
+        super().__init__(f"{detail}; {progress}" if progress else detail)
+
+
+_ADDRESS = re.compile(r"[^\s\"'<>(),;:]+@[^\s\"'<>(),;:]+")
+_ID_LIKE = re.compile(r"\b(?=[0-9A-Za-z_-]*\d)[0-9A-Za-z_-]{12,}\b")
+
+
+def redact(text: str) -> str:
+    """Google's error message, safe to print: no address, nothing shaped like
+    a message or thread id, one line, at most 200 characters."""
+    text = " ".join(str(text).split())
+    text = _ADDRESS.sub("<address>", text)
+    text = _ID_LIKE.sub("<id>", text)
+    return text[:200]
+
+
+def _google_error(exc) -> tuple[str | None, str | None]:
+    """(reason, message) from an HttpError's JSON body, or (None, None)."""
+    try:
+        body = json.loads(getattr(exc, "content", b"").decode("utf-8", "replace"))
+        error = body.get("error") or {}
+    except (ValueError, AttributeError):
+        return None, None
+    if not isinstance(error, dict):
+        return None, None
+    reasons = [e.get("reason") for e in error.get("errors") or [] if isinstance(e, dict) and e.get("reason")]
+    reason = reasons[0] if reasons else error.get("status")
+    return (str(reason) if reason else None), (str(error["message"]) if error.get("message") else None)
+
+
+class Pacer:
+    """Spends quota units so no 60-second window holds more than the budget
+    plus one call. Each call starts no earlier than the previous one's cost
+    allows at `units_per_minute`; the clock and sleep are injected for tests."""
+
+    def __init__(self, units_per_minute: float, clock=time.monotonic, sleep=time.sleep):
+        self.units_per_minute = float(units_per_minute)
+        self.clock, self.sleep = clock, sleep
+        self._next = None
+
+    def spend(self, units: int) -> None:
+        now = self.clock()
+        if self._next is None or self._next < now:
+            self._next = now
+        if self._next > now:
+            self.sleep(self._next - now)
+        self._next += units * 60.0 / self.units_per_minute
+
+    def slow_down(self) -> None:
+        self.units_per_minute *= SLOW_DOWN
+
+
+def units_per_minute_from_env() -> int:
+    raw = os.environ.get("GMAIL_UNITS_PER_MINUTE", "")
+    try:
+        value = int(raw) if raw else DEFAULT_UNITS_PER_MINUTE
+    except ValueError:
+        value = DEFAULT_UNITS_PER_MINUTE
+    return max(60, min(value, USER_UNITS_PER_MINUTE))
+
+
+class Progress:
+    """Counts only. Prints on stderr at most once per PROGRESS_EVERY seconds,
+    and at each phase change."""
+
+    def __init__(self, clock=time.monotonic, out=None, pacer: Pacer | None = None):
+        self.clock, self.out, self.pacer = clock, out, pacer
+        self.phase = "starting"
+        self.listed = None
+        self.fetched = 0
+        self._last = None
+
+    def counts(self) -> str:
+        listed = "?" if self.listed is None else self.listed
+        return f"listed={listed} fetched={self.fetched} first_get={'yes' if self.fetched == 0 else 'no'}"
+
+    def _eta(self) -> str:
+        if self.listed is None or self.pacer is None:
+            return ""
+        left = max(self.listed - self.fetched, 0)
+        per_minute = self.pacer.units_per_minute / UNIT_COST["messages.get"]
+        minutes = int(round(left / per_minute)) if per_minute else 0
+        return f", ~{minutes // 60}h{minutes % 60:02d}m left at {per_minute:.0f}/min"
+
+    def line(self) -> str:
+        if self.listed:
+            pct = int(100 * self.fetched / self.listed)
+            return f"gmail pull: {self.phase}: fetched {self.fetched}/{self.listed} ({pct}%){self._eta()}"
+        return f"gmail pull: {self.phase}: fetched {self.fetched}"
+
+    def emit(self, force: bool = False) -> None:
+        if self.out is None:
+            return
+        now = self.clock()
+        if force or self._last is None or now - self._last >= PROGRESS_EVERY:
+            self._last = now
+            print(self.line(), file=self.out, flush=True)
+
+    def enter(self, phase: str, listed: int | None = None) -> None:
+        self.phase = phase
+        if listed is not None:
+            self.listed = listed
+        self.emit(force=True)
+
+    def note(self, text: str) -> None:
+        if self.out is not None:
+            print(f"gmail pull: {text}", file=self.out, flush=True)
 
 
 def _http_status(exc) -> int | None:
@@ -114,23 +259,52 @@ class GmailApi:
     arguments, the 404 mapping) is exercised as well, not mocked away.
     """
 
-    def __init__(self, service):
+    def __init__(self, service, pacer: Pacer | None = None, progress: Progress | None = None, sleep=time.sleep):
         self._users = service.users()
+        # No pacer means unpaced: the unit tests' fake service. `paced_api`
+        # is what the command builds.
+        self.pacer = pacer
+        self.progress = progress or Progress()
+        self._sleep = sleep
 
     def _run(self, request, name: str, not_found=None):
         """Execute one call. Every failure leaves as PullError (exit 4), except
-        a 404 where the caller says what a missing object means."""
+        a 404 where the caller says what a missing object means, and a
+        rate-limit refusal, which waits for the window and retries."""
         from googleapiclient.errors import HttpError  # lazy: only the image has it
 
-        try:
-            return request.execute(num_retries=RETRIES)
-        except HttpError as exc:
-            status = _http_status(exc)
-            if status == 404 and not_found is not None:
-                return not_found()
-            raise PullError(f"{name} answered {status}") from exc
-        except Exception as exc:  # noqa: BLE001 - transport errors carry no mail
-            raise PullError(f"{name}: {type(exc).__name__}") from exc
+        waited, wait = 0, RATE_WAIT_FIRST
+        while True:
+            if self.pacer is not None:
+                self.pacer.spend(UNIT_COST.get(name, 1))
+            try:
+                return request.execute(num_retries=RETRIES)
+            except HttpError as exc:
+                status = _http_status(exc)
+                if status == 404 and not_found is not None:
+                    return not_found()
+                reason, message = _google_error(exc)
+                limited = status == 429 or (status == 403 and reason in RATE_LIMIT_REASONS)
+                if limited and waited + wait <= RATE_WAIT_GIVE_UP:
+                    self.progress.note(
+                        f"{name} rate-limited ({reason or status}); waiting {wait}s, then resuming more slowly"
+                    )
+                    self._sleep(wait)
+                    waited += wait
+                    wait = min(wait * 2, RATE_WAIT_MAX)
+                    if self.pacer is not None:
+                        self.pacer.slow_down()
+                    continue
+                detail = f"{name} answered {status}"
+                if reason:
+                    detail += f" reason={reason}"
+                if message:
+                    detail += f' ("{redact(message)}")'
+                if limited:
+                    detail += f" after waiting {waited // 60} min"
+                raise PullError(detail, reason=reason, progress=self.progress.counts()) from exc
+            except Exception as exc:  # noqa: BLE001 - transport errors carry no mail
+                raise PullError(f"{name}: {type(exc).__name__}", progress=self.progress.counts()) from exc
 
     def profile(self) -> dict:
         return self._run(self._users.getProfile(userId="me"), "getProfile")
@@ -145,11 +319,14 @@ class GmailApi:
 
     def get_message(self, message_id: str) -> dict | None:
         """The full message, or None if it no longer exists."""
-        return self._run(
+        message = self._run(
             self._users.messages().get(userId="me", id=message_id, format="full"),
             "messages.get",
             not_found=lambda: None,
         )
+        self.progress.fetched += 1
+        self.progress.emit()
+        return message
 
     def list_history(self, start_history_id: str, page_token: str | None = None) -> dict:
         def expired():
@@ -323,8 +500,10 @@ def _pages(call):
 
 
 def full_pull(api: GmailApi) -> dict:
+    api.progress.enter("listing")
     history_id = str(api.profile()["historyId"])
     ids = [m["id"] for page in _pages(api.list_message_ids) for m in page.get("messages") or []]
+    api.progress.enter("fetching", listed=len(ids))
     messages, counts = {}, {"listed": len(ids), "gone": 0, "excluded": 0}
     for message_id in ids:
         message = api.get_message(message_id)
@@ -358,6 +537,7 @@ def incremental_pull(api: GmailApi, start_history_id: str) -> dict:
             for entry in record.get("messagesDeleted") or []:
                 deleted.add(entry["message"]["id"])
     messages, counts = {}, {"history_records": records, "touched": len(touched), "gone": 0, "excluded": 0}
+    api.progress.enter("fetching", listed=len(touched - deleted))
     for message_id in sorted(touched - deleted):
         message = api.get_message(message_id)
         if message is None:
@@ -523,10 +703,18 @@ def _refresh(creds) -> None:
     creds.refresh(Request())
 
 
+def paced_api(service, units_per_minute: int | None = None, clock=time.monotonic, sleep=time.sleep, out=None) -> GmailApi:
+    """The API the command uses: every call paced under the per-user quota,
+    progress on `out` (stderr by default)."""
+    pacer = Pacer(units_per_minute or units_per_minute_from_env(), clock=clock, sleep=sleep)
+    progress = Progress(clock=clock, out=sys.stderr if out is None else out, pacer=pacer)
+    return GmailApi(service, pacer=pacer, progress=progress, sleep=sleep)
+
+
 def _build_api(creds) -> GmailApi:
     from googleapiclient.discovery import build  # lazy
 
-    return GmailApi(build("gmail", "v1", credentials=creds, cache_discovery=False))
+    return paced_api(build("gmail", "v1", credentials=creds, cache_discovery=False))
 
 
 class _Lock:
