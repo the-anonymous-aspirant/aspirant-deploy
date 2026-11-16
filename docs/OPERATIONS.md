@@ -199,6 +199,88 @@ grep -nE '^(CF_TOKEN|ZONE_ID|ROOT_RECORD_ID|HOME_RECORD_ID)=' scripts/update-dns
 ssh -p 41922 aspirant@home.the-aspirant.com 'ls -l ~/.config/aspirant/ddns.env'       # -rw-------
 ```
 
+## Cloudflare Tunnel
+
+The `cloudflared` service (system_3 #10829) carries visitor traffic from Cloudflare to the client over an outbound, encrypted tunnel, so the cell need not accept the website's traffic on a public port. The tunnel is **remotely managed**: its public hostnames, and their target `http://client-active:80`, are set in the Zero Trust dashboard (Networks → Tunnels), not in this repo. `client-active` is a network alias that `scripts/deploy-client.sh` puts on whichever blue/green slot is live, so a slot flip never strands the tunnel.
+
+`home.the-aspirant.com` is **not** on the tunnel and never should be. It is the SSH entry point (a tunnel carries HTTP only), and stays a DNS-only A record that DDNS keeps at the cell's IP.
+
+The connector has its own network, `tunnel`, shared only with the live client slot (security c69867). A remotely managed tunnel's ingress lives in the dashboard, so one edit there, mistaken or from a stolen session, can route to anything the connector can reach. On `tunnel` that is the client alone, which already faces the internet. `tests/compose_network_scope_unit.sh` keeps it so.
+
+The service is profile-gated (`profiles: ["tunnel"]`). An untargeted `docker compose up` neither starts it nor needs its token file, and auto-pull never recreates it, because it is pinned by digest. Start it and upgrade it by name.
+
+### The token, and why it is not in `.env`
+
+Whoever holds the connector token can attach a connector to our tunnel and receive a share of the site's traffic. So it lives in a file, read by `cloudflared` via `TUNNEL_TOKEN_FILE`. It is never on argv or in `environment:`, both of which docker saves in the container's config under `/var/lib/docker`, on the unencrypted root LV. The file is outside the repo, so it can never be committed. Compose outside Swarm bind-mounts a file secret as it is and ignores `uid`/`mode`, so the **file** carries the image's own user: owned by 65532, mode `0400`. The container keeps that user rather than running as the cell account's 1000, which owns `/home/aspirant` and is in the docker group (security c69867). It also runs `read_only`, with every capability dropped and `no-new-privileges`. Checked against the pinned image on `--network none`: as 65532 it reads the file (a dummy token gets "Provided Tunnel token is not valid"), and as 1000 the same file is `permission denied`.
+
+### Install
+
+```bash
+# 1. In the Zero Trust dashboard, create a remotely managed tunnel and copy its
+#    connector token. Add NO public hostname yet: adding one re-points that
+#    hostname's DNS at the tunnel, which is the cutover (A2), not this step.
+
+# 2. Put the token in place on the cell, owned by the image's user (65532),
+#    without it touching argv or shell history: paste it, then Ctrl-D.
+install -d -m 700 /data/aspirant/cloudflared
+sudo install -o 65532 -g 65532 -m 0400 /dev/stdin /data/aspirant/cloudflared/token
+sudo ls -ln /data/aspirant/cloudflared/token            # -r-------- 65532 65532
+
+# 3. Start it by name.
+cd ~/aspirant-deploy && docker compose up -d cloudflared
+```
+
+### Verify
+
+```bash
+# The connector registered with Cloudflare's edge (healthy = ready exited 0).
+docker inspect --format '{{.State.Health.Status}}' aspirant-online-cloudflared-1
+docker compose logs --tail 20 cloudflared | grep -i "registered tunnel connection"
+
+# No published port, and no token anywhere in the container's config.
+docker port aspirant-online-cloudflared-1                       # no output
+docker inspect --format '{{json .Config.Env}}' aspirant-online-cloudflared-1   # TUNNEL_TOKEN_FILE only, never TUNNEL_TOKEN
+
+# read_only holds on a real connection, not only at startup: still healthy
+# after a few minutes, and no "read-only file system" in its log.
+docker compose logs cloudflared | grep -ci "read-only file system"   # 0
+
+# The connector is on `tunnel` only, and the live slot carries the alias there.
+docker inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' aspirant-online-cloudflared-1   # aspirant-online_tunnel only
+docker inspect --format '{{json .NetworkSettings.Networks}}' "$(docker compose ps -q client-green client-blue | head -1)" | grep -o client-active
+
+# From the tunnel, the client's break-glass port refuses (default.conf: 8098
+# answers the bridge gateway only). The connector has no shell, so ask from a
+# throwaway container on the same network. Expect 403.
+docker run --rm --network aspirant-online_tunnel curlimages/curl:8.11.1 -s -o /dev/null -w '%{http_code}\n' -X POST http://client-active:8098/admin/sign-in
+```
+
+### Rotate the token
+
+The dashboard re-issues the token, and the old one stops working the moment it does. Rotate when the cell is reachable, and expect a few seconds without a connector.
+
+```bash
+# 1. Dashboard: the tunnel → Refresh token (or Rotate), and copy the new one.
+# 2. On the cell:
+sudo install -o 65532 -g 65532 -m 0400 /dev/stdin /data/aspirant/cloudflared/token   # paste, then Ctrl-D
+docker compose up -d --force-recreate cloudflared
+# 3. Re-run Verify above.
+```
+
+### Rollback
+
+Rollback means taking traffic back to the cell's own port. It applies only once the cutover (A2) has removed the public `:80`. Until a week of tunnel traffic has run clean (#10829-V1), keep `cf-port80-firewall.service` and `cf-port80-refresh.timer` installed: they are what limit a re-opened `:80` to Cloudflare.
+
+```bash
+# 1. Re-publish :80 (revert A2's write_override change), then apply it with a bare
+#    `swap`, which toggles to the other slot and rewrites the override. NOT
+#    `swap <the active slot>`: that is a no-op by design and rewrites nothing.
+./scripts/deploy-client.sh swap
+# 2. Dashboard: remove the tunnel's public hostname for the apex, and re-create the
+#    apex as a proxied A record at the cell's IP. DDNS then keeps it current.
+# 3. Leave cloudflared running or stop it: `docker compose stop cloudflared`.
+```
+
 ## Per-service database roles
 
 `transcriber`, `commander`, `advisor` and `browser` each have a login role of their own, `aspirant_<svc>`, with a schema of the same name (system_3 #9317). `DB_USER` is a Postgres superuser. A service that connects as it can:
