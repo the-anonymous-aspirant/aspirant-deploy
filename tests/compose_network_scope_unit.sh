@@ -10,6 +10,12 @@ set -euo pipefail
 # {explorer_api, lake}, and no service other than client-blue/client-green
 # joins `explorer_api`.
 #
+# The Cloudflare Tunnel connector likewise (system_3 #10829-A1, security
+# c69867): a remotely managed tunnel's ingress lives in the dashboard, so it
+# may only ever reach the live client. `cloudflared`'s networks are exactly
+# {tunnel}; only cloudflared and a client slot join `tunnel`; and the
+# `client-active` alias sits on `tunnel` alone, on a client slot alone.
+#
 # Usage: ./tests/compose_network_scope_unit.sh
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -71,6 +77,27 @@ for name, spec in services.items():
               f"{sorted(ALLOWED_EXPLORER_API_MEMBERS)} may")
         bad += 1
 
+# The tunnel (#10829-A1, security c69867).
+ALLOWED_TUNNEL_MEMBERS = {"cloudflared", "client-blue", "client-green"}
+cf = services.get("cloudflared")
+if cf is not None and nets(cf) != {"tunnel"}:
+    print(f"cloudflared networks are {sorted(nets(cf))}, want exactly ['tunnel']")
+    bad += 1
+for name, spec in services.items():
+    if "tunnel" in nets(spec) and name not in ALLOWED_TUNNEL_MEMBERS:
+        print(f"{name} joins tunnel, which only {sorted(ALLOWED_TUNNEL_MEMBERS)} may")
+        bad += 1
+    n = (spec or {}).get("networks")
+    if isinstance(n, dict):
+        for net, cfg in n.items():
+            if "client-active" in ((cfg or {}).get("aliases") or []):
+                if net != "tunnel":
+                    print(f"{name} carries client-active on {net}, not tunnel")
+                    bad += 1
+                if name not in {"client-blue", "client-green"}:
+                    print(f"{name} carries client-active, which only a client slot may")
+                    bad += 1
+
 sys.exit(1 if bad else 0)
 EOF
 }
@@ -100,7 +127,47 @@ services:
       - default
       - explorer_api
 EOF
-for bad in still_default missing_lake neighbour_joins; do
+# The tunnel's ways to break (#10829-A1, security c69867).
+cat > "$TMPDIR_TEST/cf_on_default.yml" <<'EOF'
+services:
+  cloudflared:
+    networks:
+      - default
+EOF
+cat > "$TMPDIR_TEST/cf_dual_homed.yml" <<'EOF'
+services:
+  cloudflared:
+    networks:
+      - tunnel
+      - default
+EOF
+cat > "$TMPDIR_TEST/postgres_joins_tunnel.yml" <<'EOF'
+services:
+  cloudflared:
+    networks:
+      - tunnel
+  postgres:
+    networks:
+      - default
+      - tunnel
+EOF
+cat > "$TMPDIR_TEST/alias_on_default.yml" <<'EOF'
+services:
+  client-green:
+    networks:
+      default:
+        aliases:
+          - client-active
+EOF
+cat > "$TMPDIR_TEST/alias_on_server.yml" <<'EOF'
+services:
+  server:
+    networks:
+      tunnel:
+        aliases:
+          - client-active
+EOF
+for bad in still_default missing_lake neighbour_joins cf_on_default cf_dual_homed postgres_joins_tunnel alias_on_default alias_on_server; do
   if check_file "$TMPDIR_TEST/$bad.yml" >/dev/null; then
     record no "negative control ($bad): the check refuses it"
   else
@@ -125,7 +192,29 @@ services:
   translator:
     networks:
       - default
+  cloudflared:
+    networks:
+      - tunnel
 EOF
+# The live slot as write_override merges it: base networks plus the alias.
+cat > "$TMPDIR_TEST/good_live_slot.yml" <<'EOF'
+services:
+  cloudflared:
+    networks:
+      - tunnel
+  client-green:
+    networks:
+      default: null
+      explorer_api: null
+      tunnel:
+        aliases:
+          - client-active
+EOF
+if check_file "$TMPDIR_TEST/good_live_slot.yml" >/dev/null; then
+  record yes "positive control: the live slot on tunnel with client-active passes"
+else
+  record no "positive control: the live slot on tunnel with client-active passes"
+fi
 if check_file "$TMPDIR_TEST/good.yml" >/dev/null; then
   record yes "positive control: the intended shape passes"
 else
@@ -134,9 +223,9 @@ fi
 
 for f in docker-compose*.yml; do
   if out="$(check_file "$f")"; then
-    record yes "$f: explorer-api's network scope holds"
+    record yes "$f: network scope holds (explorer_api, tunnel)"
   else
-    record no "$f: explorer-api's network scope holds"
+    record no "$f: network scope holds (explorer_api, tunnel)"
     printf '%s\n' "$out" | sed 's/^/        /'
   fi
 done
@@ -159,6 +248,49 @@ if docker compose version >/dev/null 2>&1 && [[ -f .env ]]; then
   fi
 else
   echo "  SKIP  resolved config: docker compose or .env is not available"
+fi
+
+# The tunnel as it actually merges (#10829-A1): the base file, the override
+# write_override really writes, and the tunnel profile, rendered by docker
+# compose itself. It needs no real .env: every ${VAR} gets a dummy value in a
+# scratch project directory, and the token secret points at a scratch file, so
+# this runs anywhere docker compose does. Nothing is started.
+if docker compose version >/dev/null 2>&1; then
+  PROJ="$TMPDIR_TEST/proj"; mkdir -p "$PROJ"
+  grep -ohE '\$\{[A-Z0-9_]+' docker-compose.yml | sort -u | sed 's/^\${//; s/$/=dummy/' > "$PROJ/.env"
+  printf 'not-a-token' > "$TMPDIR_TEST/token"
+  printf 'secrets:\n  cloudflared_token:\n    file: %s\n' "$TMPDIR_TEST/token" > "$TMPDIR_TEST/secret.yml"
+  ASPIRANT_DEPLOY_CLIENT_LIB=1 bash -c 'source scripts/deploy-client.sh; write_override green "$1"' _ "$TMPDIR_TEST/override.yml"
+  if docker compose -p netscope --project-directory "$PROJ" -f "$PWD/docker-compose.yml" -f "$TMPDIR_TEST/override.yml" \
+      -f "$TMPDIR_TEST/secret.yml" --profile tunnel config --format json > "$TMPDIR_TEST/merged.json" 2>"$TMPDIR_TEST/merged.err"; then
+    if check_file "$TMPDIR_TEST/merged.json" >"$TMPDIR_TEST/merged.out" 2>&1; then
+      record yes "merged config (base + write_override + tunnel profile): tunnel scope holds"
+    else
+      record no "merged config (base + write_override + tunnel profile): tunnel scope holds"
+      sed 's/^/        /' "$TMPDIR_TEST/merged.out"
+    fi
+    # check_file cannot fail on what is absent, so assert presence too: the
+    # live slot really is on tunnel with the alias, and keeps its base networks.
+    if python3 - "$TMPDIR_TEST/merged.json" <<'EOF'
+import json, sys
+s = json.load(open(sys.argv[1]))["services"]
+g = s["client-green"]["networks"]
+ok = (set(g) == {"default", "explorer_api", "tunnel"}
+      and "client-active" in ((g["tunnel"] or {}).get("aliases") or [])
+      and "tunnel" not in (s["client-blue"].get("networks") or {})
+      and set(s["cloudflared"]["networks"]) == {"tunnel"})
+sys.exit(0 if ok else 1)
+EOF
+    then
+      record yes "merged config: the live slot is on default, explorer_api and tunnel (alias client-active); the standby is not on tunnel"
+    else
+      record no "merged config: the live slot is on default, explorer_api and tunnel (alias client-active); the standby is not on tunnel"
+    fi
+  else
+    record no "merged config: docker compose config failed ($(head -1 "$TMPDIR_TEST/merged.err"))"
+  fi
+else
+  echo "  SKIP  merged tunnel config: docker compose is not available"
 fi
 
 echo
