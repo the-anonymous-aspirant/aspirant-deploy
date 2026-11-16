@@ -12,14 +12,20 @@
 # `--network host` for `consent` only, so the loopback consent server on
 # 127.0.0.1:<port> is the one the operator's SSH tunnel reaches; other commands
 # get the default bridge network (egress only). Runs as the invoking user, not
-# root. If the caller exported LAKE_KEK_HEX (one-shot, entered with `read -rs`,
-# never typed on a command line), this script writes it to a 0600 file on
-# tmpfs and bind-mounts that file in read-only, rather than passing it with
-# `-e`: dockerd persists a container's `-e` values to this cell's unencrypted
-# disk for as long as the container exists, and `docker inspect` shows them to
-# every member of the `docker` group (#10354). The file is deleted on every
-# exit path. If LAKE_KEK_HEX is unset, the container's own hidden prompt runs
-# on the terminal instead, and no key material ever touches disk.
+# root.
+#
+# The KEK reaches the container on a pipe, never on `-e` and never in a file
+# held for the run (security c70261 on #11344): `-e` values are persisted by
+# dockerd and shown by `docker inspect` (#10354), and a key file or an
+# environment block can be read by any same-uid process for as long as it
+# exists. A caller that holds it passes LAKE_KEK_FILE=<path> to read it from
+# once, typically /dev/fd/3 fed by a here-string
+# (scripts/gmail/gmail_pull_and_ingest.sh); it is read into an unexported
+# variable and written to the container's stdin, where kek_loader reads
+# LAKE_KEK_FILE=/dev/stdin (a 0600 pipe). Without it, the container's own
+# hidden prompt runs on the terminal. An exported LAKE_KEK_HEX is refused: it
+# would stay in this process's own /proc/<pid>/environ for the whole run, even
+# after `unset` (security F1, c70270 on #11428).
 #
 # Usage: scripts/gmail/gmail.sh consent [--port 8765] [--note TEXT]
 #        scripts/gmail/gmail.sh status [--check]
@@ -52,30 +58,30 @@ chmod 700 "$SECRETS" "$SECRETS/gmail"
 # other command needs egress only (review c54457).
 run=(docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e GMAIL_SECRETS_DIR=/secrets/gmail -e GMAIL_CLIENT_JSON=/secrets/gmail-oauth-client.json)
 if [[ "${1:-}" == "consent" ]]; then run+=(--network host); fi
-if [[ -t 0 && -t 1 ]]; then run+=(-it); fi
-# The hex itself never reaches `-e` (#10354): written to a 0600 tmpfs file,
-# bind-mounted read-only, and deleted on every exit path by the trap below.
-# LAKE_KEK_FINGERPRINT and LAKE_KEK_VERSION are not secret (the fingerprint is
-# a one-way hash, the version a small int) and stay on `-e`.
-kek_file=""
-cleanup_kek() { [[ -n "$kek_file" ]] && rm -f "$kek_file"; return 0; }
-trap cleanup_kek EXIT
+# The key, if the caller supplied one, into an unexported variable. Neither
+# variable is passed on: the container gets the key on stdin below.
 if [[ -n "${LAKE_KEK_HEX:-}" ]]; then
-  runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-  # Refuse a runtime dir that is not tmpfs (security review c64726 on #8813,
-  # folded in by #10492): a misconfigured caller must not be able to put the
-  # key file on disk just by pointing XDG_RUNTIME_DIR elsewhere.
-  fstype="$(stat -f -c %T "$runtime_dir" 2>/dev/null || echo "unreadable")"
-  if [[ "$fstype" != "tmpfs" ]]; then
-    echo "refusing: \$XDG_RUNTIME_DIR ($runtime_dir) is not tmpfs (filesystem: $fstype)" \
-         "— a real KEK must never be staged to a persistent disk" >&2
+  echo "refusing an exported LAKE_KEK_HEX: it would sit in this process's environment for the" \
+       "whole run. Unset it ('unset LAKE_KEK_HEX') and type the KEK at the prompt." >&2
+  exit 2
+fi
+kek=""
+if [[ -n "${LAKE_KEK_FILE:-}" ]]; then
+  if ! kek="$(<"$LAKE_KEK_FILE")"; then
+    echo "refusing: cannot read the KEK from LAKE_KEK_FILE" >&2
     exit 1
   fi
-  kek_file="$(mktemp "$runtime_dir/lake_kek.XXXXXX")"
-  chmod 600 "$kek_file"
-  printf '%s' "$LAKE_KEK_HEX" >"$kek_file"
-  run+=(-v "$kek_file:/run/secrets/lake_kek:ro" -e LAKE_KEK_FILE=/run/secrets/lake_kek)
 fi
+unset LAKE_KEK_FILE
+if [[ -n "$kek" ]]; then
+  # The key goes in on stdin, so the container runs without a terminal;
+  # nothing the tools run with a key in hand reads the terminal.
+  run+=(-i -e LAKE_KEK_FILE=/dev/stdin)
+elif [[ -t 0 && -t 1 ]]; then
+  run+=(-it)
+fi
+# LAKE_KEK_FINGERPRINT and LAKE_KEK_VERSION are not secret (the fingerprint is
+# a one-way hash, the version a small int) and stay on `-e`.
 for v in LAKE_KEK_FINGERPRINT LAKE_KEK_VERSION; do
   if [[ -n "${!v:-}" ]]; then run+=(-e "$v"); fi
 done
@@ -97,7 +103,8 @@ elif [[ "${1:-}" == "consent" ]]; then
   echo "no OAuth client JSON at $CLIENT (scp it there, mode 600; see docs/GMAIL_INGEST.md)" >&2
   exit 5
 fi
-# Not `exec`: the KEK-file cleanup trap above only fires for a process that
-# exits normally through bash, and `exec` would replace this shell with
-# docker's instead, skipping it (#10354).
-"${run[@]}" -w /work "$IMAGE" "$TOOL" "$@"
+if [[ -n "$kek" ]]; then
+  "${run[@]}" -w /work "$IMAGE" "$TOOL" "$@" <<<"$kek"
+else
+  "${run[@]}" -w /work "$IMAGE" "$TOOL" "$@"
+fi
