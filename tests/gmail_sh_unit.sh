@@ -39,6 +39,13 @@ fi
 if [[ "$1" == "run" ]]; then
   printf '%s\n' "$*" > "$STUB_LOG.argv"
   ls -A "$XDG_RUNTIME_DIR" > "$STUB_LOG.runtime_ls"
+  # Does any ancestor (gmail.sh itself, this test) hold the key in its own
+  # /proc/<pid>/environ? (security F1, c70270 on #11428)
+  key="$(cat "$EXPECT_FILE")"; p=$PPID
+  while [[ "$p" -gt 1 ]]; do
+    grep -qaF "$key" "/proc/$p/environ" 2>/dev/null && echo "$p" >> "$STUB_LOG.ancestorenv"
+    p="$(awk '{print $4}' "/proc/$p/stat" 2>/dev/null || echo 1)"
+  done
   for a in "$@"; do
     if [[ "$a" == "-i" ]]; then cat > "$STUB_LOG.stdin"; break; fi
   done
@@ -50,6 +57,7 @@ STUBEOF
 chmod +x "$T/bin/docker"
 
 FAKE_KEK="feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface"
+printf '%s' "$FAKE_KEK" > "$T/.expect"
 
 # run_wrapper NAME MODE — echoes the wrapper's exit code. MODE is `env` (the
 # one-shot LAKE_KEK_HEX export), `fd` (LAKE_KEK_FILE=/dev/fd/3 fed by a
@@ -59,7 +67,8 @@ run_wrapper() {
   rm -f "$T/$name".*
   set +e
   local base=(env -u LAKE_KEK_HEX -u LAKE_KEK_FILE PATH="$T/bin:$PATH" XDG_RUNTIME_DIR="${RUNTIME:-$TMPFS_RUNTIME}"
-              GMAIL_SECRETS_DIR="$T/secrets" STUB_LOG="$T/$name" STUB_RUN_RC="${STUB_RUN_RC:-0}" LAKE_KEK_FINGERPRINT="nonsecretfp")
+              GMAIL_SECRETS_DIR="$T/secrets" STUB_LOG="$T/$name" STUB_RUN_RC="${STUB_RUN_RC:-0}" LAKE_KEK_FINGERPRINT="nonsecretfp"
+              EXPECT_FILE="$T/.expect")
   case "$mode" in
     env)  "${base[@]}" LAKE_KEK_HEX="$FAKE_KEK" "$WRAPPER" status >"$T/$name.stdout" 2>"$T/$name.stderr" </dev/null ;;
     fd)   "${base[@]}" LAKE_KEK_FILE=/dev/fd/3 "$WRAPPER" status >"$T/$name.stdout" 2>"$T/$name.stderr" </dev/null 3<<<"$FAKE_KEK" ;;
@@ -70,8 +79,16 @@ run_wrapper() {
   echo "$rc"
 }
 
-# --- the key reaches the container on stdin, from either source -------------
-for mode in env fd; do
+# --- an exported LAKE_KEK_HEX is refused: it would stay in gmail.sh's own
+#     /proc/<pid>/environ for the whole run, even after `unset` (F1) ----------
+rc="$(STUB_RUN_RC=0 run_wrapper exported env)"
+[[ "$rc" == "2" ]] && pass "an exported LAKE_KEK_HEX is refused (exit 2)" || fail "an exported LAKE_KEK_HEX is refused" "got $rc"
+[[ ! -e "$T/exported.argv" ]] && pass "refused: docker run is never reached" || fail "refused: docker ran" "$(cat "$T/exported.argv")"
+grep -q "refusing an exported LAKE_KEK_HEX" "$T/exported.stderr" && pass "refused: says why and what to do" || fail "refused: message" "$(cat "$T/exported.stderr")"
+if grep -qF "$FAKE_KEK" "$T/exported.stdout" "$T/exported.stderr"; then fail "refused: the key is printed"; else pass "refused: the key is not printed"; fi
+
+# --- the key from LAKE_KEK_FILE reaches the container on stdin ---------------
+for mode in fd; do
   rc="$(STUB_RUN_RC=0 run_wrapper "ok-$mode" "$mode")"
   [[ "$rc" == "0" ]] && pass "$mode: wrapper exits 0 when the stub docker run succeeds" || fail "$mode: exit code on success" "got $rc"
   if grep -q "LAKE_KEK_HEX" "$T/ok-$mode.argv" 2>/dev/null || grep -qF "$FAKE_KEK" "$T/ok-$mode.argv" 2>/dev/null; then
@@ -89,6 +106,11 @@ for mode in env fd; do
   else
     fail "$mode: the container's stdin carried the key"
   fi
+  if [[ ! -s "$T/ok-$mode.ancestorenv" ]]; then
+    pass "$mode: no ancestor of docker, gmail.sh included, holds the key in /proc/<pid>/environ (F1)"
+  else
+    fail "$mode: an ancestor holds the key in its environment" "pids: $(cat "$T/ok-$mode.ancestorenv")"
+  fi
   if [[ ! -s "$T/ok-$mode.runtime_ls" ]]; then
     pass "$mode: no key file sits in the runtime dir while the container runs (security c70261, #11344)"
   else
@@ -97,7 +119,7 @@ for mode in env fd; do
 done
 
 # --- a failing run propagates its exit code ----------------------------------
-rc="$(STUB_RUN_RC=7 run_wrapper fail env)"
+rc="$(STUB_RUN_RC=7 run_wrapper fail fd)"
 [[ "$rc" == "7" ]] && pass "wrapper propagates the stub docker run's exit code" || fail "wrapper exit code on failure" "got $rc"
 
 # --- no KEK at all: no stdin hand-off ---------------------------------------
@@ -114,7 +136,7 @@ fi
 #     key was staged there as a file, #10492).
 DISK_RUNTIME="$T/not-tmpfs-runtime"
 mkdir -p "$DISK_RUNTIME"
-rc="$(RUNTIME="$DISK_RUNTIME" STUB_RUN_RC=0 run_wrapper notmpfs env)"
+rc="$(RUNTIME="$DISK_RUNTIME" STUB_RUN_RC=0 run_wrapper notmpfs fd)"
 [[ "$rc" == "0" && -z "$(ls -A "$DISK_RUNTIME")" ]] \
   && pass "a non-tmpfs runtime dir receives nothing" \
   || fail "a non-tmpfs runtime dir receives nothing" "rc=$rc ls=$(ls -A "$DISK_RUNTIME")"

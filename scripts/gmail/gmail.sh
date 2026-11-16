@@ -18,14 +18,14 @@
 # held for the run (security c70261 on #11344): `-e` values are persisted by
 # dockerd and shown by `docker inspect` (#10354), and a key file or an
 # environment block can be read by any same-uid process for as long as it
-# exists. The caller hands it over in one of two ways:
-#   LAKE_KEK_FILE=<path>   a path to read it from once, typically /dev/fd/3 fed
-#                          by a here-string (scripts/gmail/gmail_pull_and_ingest.sh)
-#   LAKE_KEK_HEX           the older one-shot export, still accepted
-# Either way it is read into an unexported variable and written to the
-# container's stdin, where kek_loader reads LAKE_KEK_FILE=/dev/stdin (a 0600
-# pipe). With neither set, the container's own hidden prompt runs on the
-# terminal instead.
+# exists. A caller that holds it passes LAKE_KEK_FILE=<path> to read it from
+# once, typically /dev/fd/3 fed by a here-string
+# (scripts/gmail/gmail_pull_and_ingest.sh); it is read into an unexported
+# variable and written to the container's stdin, where kek_loader reads
+# LAKE_KEK_FILE=/dev/stdin (a 0600 pipe). Without it, the container's own
+# hidden prompt runs on the terminal. An exported LAKE_KEK_HEX is refused: it
+# would stay in this process's own /proc/<pid>/environ for the whole run, even
+# after `unset` (security F1, c70270 on #11428).
 #
 # Usage: scripts/gmail/gmail.sh consent [--port 8765] [--note TEXT]
 #        scripts/gmail/gmail.sh status [--check]
@@ -60,16 +60,19 @@ run=(docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e GMAIL_SECRETS_DI
 if [[ "${1:-}" == "consent" ]]; then run+=(--network host); fi
 # The key, if the caller supplied one, into an unexported variable. Neither
 # variable is passed on: the container gets the key on stdin below.
+if [[ -n "${LAKE_KEK_HEX:-}" ]]; then
+  echo "refusing an exported LAKE_KEK_HEX: it would sit in this process's environment for the" \
+       "whole run. Unset it ('unset LAKE_KEK_HEX') and type the KEK at the prompt." >&2
+  exit 2
+fi
 kek=""
 if [[ -n "${LAKE_KEK_FILE:-}" ]]; then
   if ! kek="$(<"$LAKE_KEK_FILE")"; then
     echo "refusing: cannot read the KEK from LAKE_KEK_FILE" >&2
     exit 1
   fi
-elif [[ -n "${LAKE_KEK_HEX:-}" ]]; then
-  kek="$LAKE_KEK_HEX"
 fi
-unset LAKE_KEK_FILE LAKE_KEK_HEX
+unset LAKE_KEK_FILE
 if [[ -n "$kek" ]]; then
   # The key goes in on stdin, so the container runs without a terminal;
   # nothing the tools run with a key in hand reads the terminal.

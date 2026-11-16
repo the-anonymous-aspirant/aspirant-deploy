@@ -84,17 +84,21 @@ PASS=0
 FAIL=0
 
 : > "$LOG"
+# The key is typed at the wrapper's hidden prompt through a pty (an exported
+# LAKE_KEK_HEX is refused since security F1, c70270 on #11428), after a pause
+# so the pty does not echo it as typeahead.
 set +e
-LAKE_KEK_HEX="feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface" \
-  LAKE_SKELETON_ROOT="$TMPDIR_TEST/root" \
-  GMAIL_STAGING_DIR="$STAGING" \
-  GMAIL_PULL_CMD="$PULL_STUB" \
-  LAKE_INGEST_CMD="$PWD/scripts/lake-skeleton.sh ingest" \
-  LAKE_VERIFY_CMD="$PWD/scripts/lake-skeleton.sh verify-at-rest" \
-  DOCKER_FAKE_LOG="$LOG" \
-  PATH="$FAKE_BIN:$PATH" \
-  bash scripts/gmail/gmail_pull_and_ingest.sh --verify >"$TMPDIR_TEST/out.log" 2>"$TMPDIR_TEST/err.log"
+{ sleep 2; printf '%s\n' "feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface"; } \
+  | env LAKE_SKELETON_ROOT="$TMPDIR_TEST/root" \
+    GMAIL_STAGING_DIR="$STAGING" \
+    GMAIL_PULL_CMD="$PULL_STUB" \
+    LAKE_INGEST_CMD="$PWD/scripts/lake-skeleton.sh ingest" \
+    LAKE_VERIFY_CMD="$PWD/scripts/lake-skeleton.sh verify-at-rest" \
+    DOCKER_FAKE_LOG="$LOG" \
+    PATH="$FAKE_BIN:$PATH" \
+    script -qec "bash scripts/gmail/gmail_pull_and_ingest.sh --verify" /dev/null >"$TMPDIR_TEST/out.log" 2>&1
 rc=$?
+cp "$TMPDIR_TEST/out.log" "$TMPDIR_TEST/err.log"
 set -e
 
 # Not asserting rc=0: verify-at-rest's own layer-1 check correctly reports

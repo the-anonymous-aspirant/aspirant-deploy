@@ -61,10 +61,20 @@ for arg in "$@"; do
   esac
 done
 
-# One KEK for both halves, in an UNEXPORTED variable. Entered hidden; or, from
-# a caller that already holds it, the one-shot export LAKE_KEK_HEX, which is
-# taken over and unset so no child inherits it. Never accepted as an argument,
-# which would put the lake master key in the shell history and in `ps`.
+# An exported LAKE_KEK_HEX is refused, not taken over (security F1, c70270 on
+# #11428): `unset` keeps it from children, but this process's own
+# /proc/<pid>/environ keeps the block it started with, for the whole run. The
+# hidden prompt and --detach cover every documented use.
+if [[ -n "${LAKE_KEK_HEX:-}" ]]; then
+  echo "gmail_pull_and_ingest: refusing an exported LAKE_KEK_HEX: it would sit in this process's" \
+       "environment for the whole run. Unset it ('unset LAKE_KEK_HEX') and type the KEK at the prompt." >&2
+  exit 2
+fi
+
+# One KEK for both halves, in an UNEXPORTED variable, entered at the hidden
+# prompt (or, in the detached instance, read from the hand-off file). Never
+# accepted as an argument, which would put the lake master key in the shell
+# history and in `ps`.
 kek=""
 if [[ $detached -eq 1 ]]; then
   # The detached instance: read the hand-off file once and delete it now, so
@@ -76,17 +86,14 @@ if [[ $detached -eq 1 ]]; then
   kek="$(<"$LAKE_KEK_FILE")"
   rm -f "$LAKE_KEK_FILE"
   unset LAKE_KEK_FILE
-elif [[ -n "${LAKE_KEK_HEX:-}" ]]; then
-  kek="$LAKE_KEK_HEX"
 elif [[ -t 0 ]]; then
   read -rs -p 'lake KEK (grouped hex, hidden): ' kek
   echo >&2
 else
-  echo "gmail_pull_and_ingest: LAKE_KEK_HEX is not set and stdin is not a terminal;" \
-       "run it from a terminal to be asked for the KEK" >&2
+  echo "gmail_pull_and_ingest: stdin is not a terminal; run it from a terminal to be asked for the KEK" \
+       "(add --detach to let it finish after you log out)" >&2
   exit 2
 fi
-unset LAKE_KEK_HEX
 if [[ -z "$kek" ]]; then
   echo "gmail_pull_and_ingest: empty KEK; nothing run" >&2
   exit 2
