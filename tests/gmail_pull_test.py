@@ -16,6 +16,7 @@ import contextlib
 import copy
 import io
 import json
+import re
 import os
 import stat
 import sys
@@ -401,6 +402,181 @@ class PullTest(unittest.TestCase):
             code, text = self._cmd(env, _refresh=lambda _c: None, _build_api=lambda _c: api("s1")[0])
         self.assertEqual(code, gmail_pull.EXIT_LOCKED, text)
         self.assertIsNone(gmail_pull.read_state(self.staging))
+
+
+
+# --- #11344: Google's reason, pacing under the per-user limit, progress -----
+
+def google_error(status: int, reason: str, message: str) -> HttpError:
+    body = {"error": {"code": status, "message": message, "errors": [{"reason": reason, "message": message}]}}
+    return HttpError(httplib2.Response({"status": status}), json.dumps(body).encode())
+
+
+class FakeClock:
+    """time.monotonic and time.sleep for the pacer, with nothing slept."""
+
+    def __init__(self):
+        self.now = 1000.0
+        self.slept = []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+def failing_gets(svc, errors):
+    """messages.get raises the next error from `errors` (or each time, if it is
+    a single exception), then answers normally once the list is used up."""
+    pending = list(errors) if isinstance(errors, list) else None
+    real = svc.messages
+
+    class Messages:
+        def __init__(self):
+            self.inner = real()
+
+        def list(self, *a, **k):
+            return self.inner.list(*a, **k)
+
+        def get(self, userId, id, format):
+            ok = self.inner.get(userId, id, format)
+
+            def answer():
+                if pending is None:
+                    raise errors
+                if pending:
+                    raise pending.pop(0)
+                return ok.fn()
+
+            return _Req(answer, svc.calls, "messages.get")
+
+    svc.messages = lambda: Messages()
+
+
+class PacingAndReasonTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.staging = Path(self.tmp.name) / "staging"
+        self.kek = os.urandom(32)
+        gmail_auth.write_token(
+            {
+                "refresh_token": "1//PULLTEST-REFRESH-TOKEN-NOT-REAL",
+                "client_id": "123-pulltest.apps.googleusercontent.com",
+                "client_secret": "GOCSPX-PULLTEST-NOT-REAL",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "scopes": [gmail_auth.SCOPE],
+            },
+            self.kek, 1, Path(self.tmp.name) / "secrets",
+        )
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_cmd(self, api_obj):
+        out = io.StringIO()
+        env = {"LAKE_KEK_HEX": self.kek.hex(), "LAKE_KEK_FINGERPRINT": ""}
+        with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(out), contextlib.redirect_stderr(out), \
+                mock.patch.object(gmail_pull, "_refresh", lambda _c: None), \
+                mock.patch.object(gmail_pull, "_build_api", lambda _c: api_obj):
+            code = gmail_pull.cmd_pull(mock.Mock(full=True), staging=self.staging, secrets_dir=Path(self.tmp.name) / "secrets")
+        return code, out.getvalue()
+
+    def test_a_rate_limit_failure_names_googles_reason_and_the_progress(self):
+        svc = FakeService("s1")
+        failing_gets(svc, google_error(403, "rateLimitExceeded", "Rate Limit Exceeded"))
+        clock = FakeClock()
+        code, text = self.run_cmd(gmail_pull.GmailApi(svc, sleep=clock.sleep))
+        self.assertEqual(code, gmail_auth.EXIT_TRANSPORT, text)
+        self.assertIn("messages.get answered 403 reason=rateLimitExceeded", text)
+        self.assertIn('("Rate Limit Exceeded")', text)
+        listed = len([m for m in FIXTURE["s1"]["messages"] if not gmail_pull.EXCLUDED_LABELS.intersection(m["labelIds"])])
+        self.assertIn(f"listed={listed} fetched=0 first_get=yes", text)
+        self.assertIn("the stored history id is unchanged", text)
+        # It waited out the window before giving up: 60, 120, 240, then 300s
+        # steps, never past 30 minutes in all.
+        self.assertEqual(clock.slept[:4], [60, 120, 240, 300])
+        self.assertLessEqual(sum(clock.slept), gmail_pull.RATE_WAIT_GIVE_UP)
+        self.assertIn("after waiting", text)
+
+    def test_a_forbidden_failure_names_its_reason_and_does_not_wait(self):
+        svc = FakeService("s1")
+        failing_gets(svc, google_error(403, "forbidden", "Forbidden"))
+        clock = FakeClock()
+        code, text = self.run_cmd(gmail_pull.GmailApi(svc, sleep=clock.sleep))
+        self.assertEqual(code, gmail_auth.EXIT_TRANSPORT, text)
+        self.assertIn("messages.get answered 403 reason=forbidden", text)
+        self.assertIn('("Forbidden")', text)
+        self.assertIn("first_get=yes", text)
+        self.assertEqual(clock.slept, [], "a refusal that is not a rate limit is not waited on")
+
+    def test_googles_message_is_printed_without_ids_or_addresses(self):
+        svc = FakeService("s1")
+        mid = sorted(svc.mail)[0]
+        failing_gets(svc, google_error(400, "invalidArgument", f"Invalid id {mid}1234567890ab for mara@example.se"))
+        code, text = self.run_cmd(gmail_pull.GmailApi(svc, sleep=FakeClock().sleep))
+        self.assertEqual(code, gmail_auth.EXIT_TRANSPORT, text)
+        self.assertIn("reason=invalidArgument", text)
+        self.assertNotIn("mara@example.se", text)
+        self.assertNotIn(mid, text)
+        self.assertIn("<address>", text)
+
+    def test_one_rate_limit_waits_then_resumes_more_slowly(self):
+        svc = FakeService("s1")
+        failing_gets(svc, [google_error(429, "rateLimitExceeded", "slow down")])
+        clock = FakeClock()
+        out = io.StringIO()
+        a = gmail_pull.paced_api(svc, units_per_minute=5100, clock=clock, sleep=clock.sleep, out=out)
+        summary = gmail_pull.run_pull(a, self.staging, now=NOW)
+        self.assertEqual(summary["mode"], "full")
+        self.assertIn(60, clock.slept, "the refusal waited for the window")
+        self.assertAlmostEqual(a.pacer.units_per_minute, 5100 * gmail_pull.SLOW_DOWN)
+        self.assertIn("rate-limited (rateLimitExceeded); waiting 60s", out.getvalue())
+
+    def test_the_pace_keeps_every_minute_under_the_user_limit(self):
+        clock = FakeClock()
+        pacer = gmail_pull.Pacer(gmail_pull.DEFAULT_UNITS_PER_MINUTE, clock=clock, sleep=clock.sleep)
+        spent = []
+        for i in range(300):
+            cost = gmail_pull.UNIT_COST["messages.list" if i % 50 == 0 else "messages.get"]
+            pacer.spend(cost)
+            spent.append((clock(), cost))
+        for start, _ in spent:
+            window = sum(c for t, c in spent if start <= t < start + 60)
+            self.assertLessEqual(window, gmail_pull.DEFAULT_UNITS_PER_MINUTE + gmail_pull.UNIT_COST["messages.get"])
+            self.assertLess(window, gmail_pull.USER_UNITS_PER_MINUTE)
+        # And the pace is used, not left far below: 300 calls at ~60 units take
+        # about 300*60/5100 minutes.
+        minutes = (spent[-1][0] - spent[0][0]) / 60
+        self.assertGreater(minutes, 3.0)
+        self.assertLess(minutes, 3.6)
+
+    def test_the_env_override_cannot_raise_the_pace_past_the_limit(self):
+        for raw, want in (("9000", 6000), ("3000", 3000), ("nonsense", 5100), ("", 5100), ("0", 60)):
+            with mock.patch.dict(os.environ, {"GMAIL_UNITS_PER_MINUTE": raw}):
+                self.assertEqual(gmail_pull.units_per_minute_from_env(), want, raw)
+
+    def test_the_command_builds_a_paced_api(self):
+        a = gmail_pull.paced_api(FakeService("s1"))
+        self.assertIsNotNone(a.pacer)
+        self.assertEqual(a.pacer.units_per_minute, gmail_pull.DEFAULT_UNITS_PER_MINUTE)
+
+    def test_progress_lines_carry_counts_and_time_only(self):
+        svc = FakeService("s1")
+        clock = FakeClock()
+        out = io.StringIO()
+        a = gmail_pull.paced_api(svc, units_per_minute=600, clock=clock, sleep=clock.sleep, out=out)
+        gmail_pull.run_pull(a, self.staging, now=NOW)
+        lines = [l for l in out.getvalue().splitlines() if l]
+        self.assertTrue(any("fetching: fetched 0/" in l for l in lines), lines)
+        allowed = re.compile(
+            r"^gmail pull: (listing|fetching): fetched \d+(/\d+ \(\d+%\)(, ~\d+h\d\dm left at \d+/min)?)?$"
+        )
+        for line in lines:
+            self.assertRegex(line, allowed)
+        for secret in SECRET_STRINGS + sorted(svc.mail):
+            self.assertNotIn(secret, out.getvalue())
 
 
 if __name__ == "__main__":
