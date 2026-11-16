@@ -168,6 +168,36 @@ The output is one line of counts, for example
 `gmail pull: run_id=... mode=incremental exported=2 deleted=3 history=1002->1008 ...`.
 No subject, address, body or token is ever printed.
 
+### Pace, and how long a first pull takes (#11344)
+
+Gmail charges each call against a per-user limit of **6,000 quota units a
+minute**. A full `messages.get` costs 60, so at most 100 messages a minute. The
+first real pull fetched far faster than that and was refused with 403s. The
+pull now spends from a budget of **5,100 units a minute** (85 full gets a
+minute). `GMAIL_UNITS_PER_MINUTE` can lower it, and nothing raises it past
+6,000. At that pace a mailbox of about 27,000 messages takes **around 5¼
+hours** for its first, full pull. Later, incremental pulls fetch only what
+changed, so they take seconds to minutes.
+
+If Gmail still refuses a call for its rate limit, the pull waits for the window
+to recover (60 s, doubling to 5 minutes), resumes at a slower pace, and gives
+up only after 30 minutes of waiting on one call.
+
+While it runs, it prints a progress line on stderr about once a minute,
+counts and time only:
+
+```
+gmail pull: fetching: fetched 1200/26812 (4%), ~4h59m left at 85/min
+```
+
+A failed pull names the call, the HTTP status and **Google's reason**, plus how
+far it got. Google's message is shown with anything shaped like an id or an
+address replaced:
+
+```
+pull failed (transport or API): messages.get answered 403 reason=rateLimitExceeded ("Rate Limit Exceeded") after waiting 27 min; listed=26812 fetched=749 first_get=no; the stored history id is unchanged
+```
+
 ## Ingest into the lake (on demand, B2)
 
 ```bash
