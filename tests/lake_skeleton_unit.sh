@@ -48,6 +48,17 @@ assert_eq() {
   fi
 }
 
+assert_rc() {
+  local label="$1" want="$2" got="$3"
+  if [ "$want" = "$got" ]; then
+    PASS=$((PASS + 1))
+    echo "[PASS] $label"
+  else
+    FAIL=$((FAIL + 1))
+    echo "[FAIL] $label (want rc=$want, got rc=$got)"
+  fi
+}
+
 # --- the regression: appending a key that is not in the file -----------------
 
 ENV_FILE="$TMPDIR_TEST/absent.env"
@@ -112,6 +123,111 @@ assert_eq "the shorter key is written as its own line" \
   "LAKE_S3_ACCESS=short" \
   "$(grep '^LAKE_S3_ACCESS=' "$ENV_FILE")"
 
+# --- no value in any argv (system_3 #11381; security c69918 on #11368) --------
+# env_set used to run `sed -i "s|^KEY=.*|KEY=$value|"`, so every credential it
+# wrote sat in sed's /proc/<pid>/cmdline. Shim every external command env_set,
+# bootstrap_catalog_role or explorer_env_sync could reach on PATH: each shim
+# logs its argv and then runs the real binary. Builtins never reach a shim,
+# which is the point. The positive controls below prove the shims are on the
+# path that runs, so an empty match is not a vacuous pass.
+
+SHIM_DIR="$TMPDIR_TEST/shims"
+ARGV_LOG="$TMPDIR_TEST/argv.log"
+mkdir -p "$SHIM_DIR"
+: > "$ARGV_LOG"
+for cmd in sed awk grep cut cat tee cp mv mktemp chmod dirname install tail openssl perl python3; do
+  real="$(type -P "$cmd" 2>/dev/null)" || continue
+  cat > "$SHIM_DIR/$cmd" <<EOF
+#!/usr/bin/env bash
+printf '%s %s\n' "$cmd" "\$*" >> "$ARGV_LOG"
+exec "$real" "\$@"
+EOF
+  chmod +x "$SHIM_DIR/$cmd"
+done
+ORIG_PATH="$PATH"
+
+PROBE_VALUE="c0ffee5ecretprobe0123456789abcdef"
+ENV_FILE="$TMPDIR_TEST/argv.env"
+printf 'OTHER=1\nPROBE_KEY=old\n' > "$ENV_FILE"
+chmod 600 "$ENV_FILE"
+PATH="$SHIM_DIR:$ORIG_PATH"
+env_set PROBE_KEY "$PROBE_VALUE"
+env_set PROBE_NEW "$PROBE_VALUE"
+PATH="$ORIG_PATH"
+assert_eq "env_set updates a present key" "PROBE_KEY=$PROBE_VALUE" "$(grep '^PROBE_KEY=' "$ENV_FILE")"
+assert_eq "env_set appends an absent key" "PROBE_NEW=$PROBE_VALUE" "$(grep '^PROBE_NEW=' "$ENV_FILE")"
+assert_eq "env_set keeps the other lines" "OTHER=1" "$(grep '^OTHER=' "$ENV_FILE")"
+assert_eq "env_set keeps the file's mode" "600" "$(stat -c %a "$ENV_FILE")"
+assert_eq "env_set keeps the file's owner" "$(id -u)" "$(stat -c %u "$ENV_FILE")"
+chmod 640 "$ENV_FILE"
+env_set PROBE_KEY "$PROBE_VALUE"
+assert_eq "env_set keeps a mode other than 600" "640" "$(stat -c %a "$ENV_FILE")"
+chmod 600 "$ENV_FILE"
+assert_eq "env_set leaves no temp copy behind" "0" \
+  "$(find "$TMPDIR_TEST" -maxdepth 1 -name '.env_set.*' | wc -l)"
+assert_eq "positive control: the shims saw env_set's mktemp and mv" "2 2" \
+  "$(grep -c '^mktemp ' "$ARGV_LOG") $(grep -c '^mv ' "$ARGV_LOG")"
+assert_eq "no external command env_set ran had the value in its argv" "0" \
+  "$(grep -cF "$PROBE_VALUE" "$ARGV_LOG" || true)"
+
+# The explorer_ro rotation (the rotate-explorer-ro verb): 'pending' makes
+# bootstrap_catalog_role generate a password, ALTER the role over stdin and
+# write the password and DSN. catalog_psql is stubbed to capture that stdin.
+SQL_CAPTURE="$TMPDIR_TEST/rotate.sql"
+ENV_FILE="$TMPDIR_TEST/rotate.env"
+printf 'LAKE_CATALOG_RO_PASSWORD=0ld0ld0ld\nLAKE_CATALOG_RO_DSN=postgresql://explorer_ro:0ld0ld0ld@lake-skeleton-catalog:5432/lake_catalog_skeleton\n' > "$ENV_FILE"
+chmod 600 "$ENV_FILE"
+: > "$ARGV_LOG"
+(
+  catalog_psql() { cat > "$SQL_CAPTURE"; }
+  PATH="$SHIM_DIR:$ORIG_PATH"
+  env_set LAKE_CATALOG_RO_PASSWORD pending
+  bootstrap_catalog_role
+)
+new_pw="$(grep '^LAKE_CATALOG_RO_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)"
+assert_eq "rotation writes a new 48-hex password" "1" \
+  "$(printf '%s\n' "$new_pw" | grep -cE '^[0-9a-f]{48}$')"
+assert_eq "the ALTER on stdin carries that password" "1" \
+  "$(grep -cF "ALTER ROLE explorer_ro WITH PASSWORD '$new_pw';" "$SQL_CAPTURE")"
+assert_eq "the DSN carries that password" \
+  "LAKE_CATALOG_RO_DSN=postgresql://explorer_ro:$new_pw@lake-skeleton-catalog:5432/lake_catalog_skeleton" \
+  "$(grep '^LAKE_CATALOG_RO_DSN=' "$ENV_FILE")"
+assert_eq "no line keeps the old password" "0" "$(grep -c '0ld0ld0ld' "$ENV_FILE" || true)"
+assert_eq "positive control: the shims saw openssl and the stub's cat" "1 1" \
+  "$(grep -c '^openssl rand' "$ARGV_LOG") $(grep -c '^cat $' "$ARGV_LOG")"
+assert_eq "no external command the rotation ran had the password in its argv" "0" \
+  "$(grep -cF "$new_pw" "$ARGV_LOG" || true)"
+# Security c69944: every setting that could log the ALTER, the successful
+# one included, is off before it.
+assert_eq "the session turns off every statement log before anything else" \
+  "SET log_min_error_statement TO panic;|SET log_statement TO 'none';|SET pg_stat_statements.track_utility TO off;" \
+  "$(head -n 3 "$SQL_CAPTURE" | paste -sd'|')"
+alter_line="$(grep -n '^ALTER ROLE explorer_ro WITH PASSWORD' "$SQL_CAPTURE" | cut -d: -f1)"
+assert_eq "and the ALTER comes after all three" "1" "$([ "${alter_line:-0}" -gt 3 ] && echo 1 || echo 0)"
+
+# A failed ALTER must not echo the password: psql's error context quotes the
+# statement. The stub fails the way psql does, quoting its input on stderr.
+rc=0
+err_out="$(
+  catalog_psql() { local sql; sql="$(cat)"; printf 'ERROR:  boom\nLINE 1: %s\n' "$sql" >&2; return 3; }
+  env_set LAKE_CATALOG_RO_PASSWORD pending
+  bootstrap_catalog_role 2>&1 >/dev/null
+)" || rc=$?
+failed_pw="$(grep '^LAKE_CATALOG_RO_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)"
+assert_rc "a failed catalog SQL is a refusal" "1" "$rc"
+assert_eq "positive control: the failure's output quoted the SQL" "1" \
+  "$(grep -c 'LINE 1: SET log_min_error_statement' <<<"$err_out")"
+assert_eq "and the password is redacted from it" "0" "$(grep -cF "$failed_pw" <<<"$err_out" || true)"
+assert_eq "where it stood, <redacted> is printed" "1" \
+  "$(grep -c "PASSWORD '<redacted>'" <<<"$err_out")"
+
+rc=0; ENV_FILE="$TMPDIR_TEST/nl.env" env_set SOME_KEY $'a\nINJECTED=1' 2>/dev/null || rc=$?
+assert_rc "env_set refuses a value containing a newline" "1" "$rc"
+
+( cd "$TMPDIR_TEST" && ENV_FILE="relative.env" env_set REL_KEY "relvalue" )
+assert_eq "env_set writes a file named without a directory" \
+  "REL_KEY=relvalue" "$(grep '^REL_KEY=' "$TMPDIR_TEST/relative.env")"
+
 # --- the read-only credential names the compose file reads -------------------
 # Pins the contract between this script and docker-compose.yml. If either side
 # renames a variable, the explorer silently gets no credential — the failure
@@ -168,17 +284,6 @@ assert_eq "and makes no Garage call at all" "0" "$(wc -l < "$GARAGE_CALLS")"
 # shadows the PATH binary of the same name when layer1_check calls it bare, so
 # this is deterministic regardless of whether the host running the suite
 # happens to have a LUKS mapping anywhere.
-
-assert_rc() {
-  local label="$1" want="$2" got="$3"
-  if [ "$want" = "$got" ]; then
-    PASS=$((PASS + 1))
-    echo "[PASS] $label"
-  else
-    FAIL=$((FAIL + 1))
-    echo "[FAIL] $label (want rc=$want, got rc=$got)"
-  fi
-}
 
 # `rc=0` default + `|| rc=$?`, not `out=$(...); rc=$?` — under this file's own
 # `set -e`, a plain failing command substitution assignment would abort the
@@ -244,6 +349,8 @@ else
   PASS=$((PASS + 1)); echo "[PASS] check output contains no credential value"
 fi
 
+# A standing backup from an earlier sync, as the cell had from 2026-11-11.
+install -m 600 "$DEPLOY_ENV" "$ROOT/deploy-env.bak-20261111T164917Z"
 explorer_env_sync > /dev/null
 assert_eq "sync copies the catalog DSN under the name compose reads" \
   "LAKE_CATALOG_DSN=$NEW_DSN" "$(grep '^LAKE_CATALOG_DSN=' "$DEPLOY_ENV")"
@@ -255,16 +362,33 @@ assert_eq "sync adds the staging secret key the deploy .env lacked" \
 assert_eq "sync adds the staging bucket name" \
   "LAKE_S3_STAGING_BUCKET=lake-skeleton-staging" "$(grep '^LAKE_S3_STAGING_BUCKET=' "$DEPLOY_ENV")"
 assert_eq "sync leaves other keys alone" "UNRELATED=keep-me" "$(grep '^UNRELATED=' "$DEPLOY_ENV")"
-assert_eq "sync keeps a mode-600 backup of the previous file under ROOT" \
-  "600" "$(stat -c %a "$ROOT"/deploy-env.bak-*)"
-assert_eq "the backup holds the previous credentials" \
-  "EXPLORER_S3_ACCESS_KEY=GKoldkey" "$(grep '^EXPLORER_S3_ACCESS_KEY=' "$ROOT"/deploy-env.bak-*)"
+# The backup exists only while a sync is in flight (#11381, security c69938):
+# after a sync whose check passes, no copy of the old served secrets is left,
+# the standing one from an earlier sync included.
+assert_eq "a passing sync leaves no backup, an earlier one included" \
+  "0" "$(find "$ROOT" -maxdepth 1 -name 'deploy-env.bak-*' | wc -l)"
 rc=0; explorer_env_check > /dev/null || rc=$?
 assert_rc "check passes after sync" "0" "$rc"
 assert_eq "sync leaves the deploy .env at mode 600" "600" "$(stat -c %a "$DEPLOY_ENV")"
 explorer_env_sync > /dev/null
-assert_eq "a second sync keeps only the newest backup" \
-  "1" "$(find "$ROOT" -maxdepth 1 -name 'deploy-env.bak-*' | wc -l)"
+assert_eq "a second sync leaves no backup either" \
+  "0" "$(find "$ROOT" -maxdepth 1 -name 'deploy-env.bak-*' | wc -l)"
+
+# A sync that fails part way keeps the backup, the only way back. env_set
+# cannot create its temp copy in a read-only directory.
+RO_DIR="$TMPDIR_TEST/ro-deploy"
+mkdir -p "$RO_DIR"
+printf 'UNRELATED=keep-me\nEXPLORER_S3_ACCESS_KEY=GKoldkey\n' > "$RO_DIR/deploy.env"
+chmod 600 "$RO_DIR/deploy.env"
+chmod 555 "$RO_DIR"
+rc=0; DEPLOY_ENV_FILE="$RO_DIR/deploy.env" explorer_env_sync > /dev/null 2>&1 || rc=$?
+chmod 755 "$RO_DIR"
+assert_rc "sync reports a write that failed" "1" "$rc"
+assert_eq "and keeps the backup, mode 600" \
+  "600" "$(stat -c %a "$ROOT"/deploy-env.bak-* 2>/dev/null)"
+assert_eq "which holds the previous credentials" \
+  "EXPLORER_S3_ACCESS_KEY=GKoldkey" "$(grep -h '^EXPLORER_S3_ACCESS_KEY=' "$ROOT"/deploy-env.bak-* 2>/dev/null)"
+rm -f "$ROOT"/deploy-env.bak-*
 
 # env_set's value is a sed replacement: | ends it, & and \ are special.
 rc=0; ENV_FILE="$TMPDIR_TEST/sed.env" env_set SOME_KEY 'a&b' 2>/dev/null || rc=$?
