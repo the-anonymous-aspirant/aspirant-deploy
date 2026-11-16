@@ -12,6 +12,8 @@
 #   lake-skeleton.sh explorer-env [check|sync]
 #                              compare (or copy) the explorer's credentials
 #                              into the deploy .env (system_3 #9074)
+#   lake-skeleton.sh rotate-explorer-ro
+#                              give explorer_ro a new password (#11381)
 #   lake-skeleton.sh explorer-decrypt-up
 #                              recreate explorer-api with decrypt-on-read (#10777)
 #   lake-skeleton.sh status    show containers, published ports, and disk use
@@ -135,22 +137,60 @@ catalog_psql() {
 # writes the template when the file does not already exist. The result would be
 # a bootstrap that reports success while leaving the explorer with no
 # credentials, on precisely the hosts that already exist.
+#
+# And no value in any process's argv (system_3 #11381; security c69918 on
+# #11368). The previous body ran `sed -i "s|^KEY=.*|KEY=$value|"`, so every
+# credential it wrote, including each one `explorer-env sync` copied into the
+# deploy .env, was readable in /proc/<pid>/cmdline and by any process
+# accounting or audit hook for the life of that sed. Now only bash builtins
+# (`read`, `printf`, `[[ ]]`) touch the value. The external commands below
+# (mktemp, chmod, mv) are given paths only. tests/lake_skeleton_unit.sh shims
+# every external command on PATH and asserts none of them sees the value.
 env_set() {
-  local key="$1" value="$2"
-  # The value becomes a sed replacement, where `|` ends the expression and `&`
-  # and `\` are special, so any of them would silently corrupt the file.
-  # Every current generator emits hex; refuse rather than mangle a future one.
+  local key="$1" value="$2" tmp line found=0
+  # Every current generator emits hex. These characters were refused while the
+  # value was a sed replacement; the refusal stays because nothing should
+  # produce them, and explorer_env_sync pre-checks the same set so that it
+  # refuses before writing anything. A newline would write a second key.
   case "$value" in
-    *'|'* | *'&'* | *'\'*)
-      echo "refusing: value for $key contains | & or \\, which env_set cannot write safely" >&2
+    *'|'* | *'&'* | *'\'* | *$'\n'*)
+      echo "refusing: value for $key contains | & \\ or a newline, which env_set does not write" >&2
       return 1
       ;;
   esac
-  if grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
-    sed -i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
-  else
-    printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
+  # mktemp creates the file 0600, beside the target so the mv is a rename on
+  # one filesystem. chown and chmod --reference then give it the target's
+  # owner and mode, as sed -i kept them. A copy whose owner cannot be kept is
+  # refused rather than left to change hands silently. explorer_env_sync
+  # still chmods the deploy .env to 600 afterwards.
+  # A failure after mktemp removes the copy: it may already hold the value.
+  local dir=.
+  case "$ENV_FILE" in */*) dir="${ENV_FILE%/*}" ;; esac
+  tmp="$(mktemp "$dir/.env_set.XXXXXX")" || return 1
+  if [ -f "$ENV_FILE" ]; then
+    # Every line already matching ^KEY= is replaced, as sed's s/// did.
+    if ! while IFS= read -r line || [ -n "$line" ]; do
+           if [[ "$line" == "$key="* ]]; then
+             printf '%s=%s\n' "$key" "$value"
+             found=1
+           else
+             printf '%s\n' "$line"
+           fi
+         done < "$ENV_FILE" > "$tmp"; then
+      rm -f -- "$tmp"
+      return 1
+    fi
+    if ! chown --reference="$ENV_FILE" -- "$tmp" 2>/dev/null; then
+      rm -f -- "$tmp"
+      echo "refusing: cannot keep the owner of $ENV_FILE; run as its owner" >&2
+      return 1
+    fi
+    chmod --reference="$ENV_FILE" -- "$tmp" || { rm -f -- "$tmp"; return 1; }
   fi
+  if [ "$found" -eq 0 ]; then
+    printf '%s=%s\n' "$key" "$value" >> "$tmp"
+  fi
+  mv -f -- "$tmp" "$ENV_FILE" || { rm -f -- "$tmp"; return 1; }
 }
 
 seed_config() {
@@ -305,7 +345,23 @@ bootstrap_catalog_role() {
   # Idempotent by construction: CREATE ROLE fails if it exists, so the DO block
   # branches, and the GRANTs are re-asserted every run for the same reason the
   # Garage --read is.
-  catalog_psql <<SQL >/dev/null
+  #
+  # The password reaches psql on stdin only: bash 5.1+ feeds a small here-doc
+  # through a pipe. No log may keep it either (system_3 #11381; security
+  # c69944). The session turns off, before the ALTER, every setting that
+  # could record the statement with the password in it (ducklake is the
+  # catalog's superuser, so it may):
+  # - log_min_error_statement: the server logs a failing statement;
+  # - log_statement: at 'ddl' or 'all' it logs a successful one;
+  # - pg_stat_statements.track_utility: if the module is loaded, it keeps the
+  #   text. When the module is not loaded, the SET only defines a placeholder.
+  # psql's own error context is captured and printed with the password
+  # redacted.
+  local err rc=0
+  err="$(catalog_psql 2>&1 >/dev/null <<SQL
+SET log_min_error_statement TO panic;
+SET log_statement TO 'none';
+SET pg_stat_statements.track_utility TO off;
 DO \$\$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$CATALOG_RO_ROLE') THEN
@@ -322,6 +378,12 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO $CATALOG_RO_ROLE;
 -- role is read-only today and blind tomorrow.
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO $CATALOG_RO_ROLE;
 SQL
+)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "refusing: the catalog role's SQL failed (psql exit $rc); its error, password redacted:" >&2
+    printf '%s\n' "${err//"$pw"/<redacted>}" >&2
+    return 1
+  fi
 
   env_set LAKE_CATALOG_RO_DSN \
     "postgresql://$CATALOG_RO_ROLE:$pw@lake-skeleton-catalog:5432/lake_catalog_skeleton"
@@ -483,7 +545,11 @@ explorer_env_sync() {
   done
   # The backup holds every service's secrets, not just the mapped ones. Create it
   # 600 from the start, rather than cp-then-chmod (which leaves it at the
-  # source's mode in between), and keep only the newest copy.
+  # source's mode in between). It exists only while the sync is in flight
+  # (system_3 #11381, security c69938 on #11368): a standing copy is a second
+  # home for every served secret, and after a rotation it holds the old values.
+  # It is deleted once the check below passes, and kept only to recover from a
+  # sync that failed part way.
   backup="$ROOT/deploy-env.bak-$(date -u +%Y%m%dT%H%M%SZ)"
   rm -f "$ROOT"/deploy-env.bak-*
   install -m 600 "$DEPLOY_ENV_FILE" "$backup"
@@ -492,12 +558,21 @@ explorer_env_sync() {
     dkey="${pair%%=*}"
     skey="${pair#*=}"
     value="$(env_get "$skeleton_env" "$skey")"
-    ENV_FILE="$DEPLOY_ENV_FILE" env_set "$dkey" "$value"
+    if ! ENV_FILE="$DEPLOY_ENV_FILE" env_set "$dkey" "$value"; then
+      echo "sync failed at $dkey; the previous $DEPLOY_ENV_FILE is at $backup (mode 600)." >&2
+      echo "Restore it with: install -m 600 $backup $DEPLOY_ENV_FILE" >&2
+      return 1
+    fi
   done
   # The deploy .env was found at 644 (security review, #9074 c55779).
   chmod 600 "$DEPLOY_ENV_FILE"
-  echo "explorer credentials copied into $DEPLOY_ENV_FILE (previous copy: $backup)"
-  echo "next: docker compose --profile explorer up -d explorer-api"
+  if ! explorer_env_check > /dev/null; then
+    echo "sync wrote $DEPLOY_ENV_FILE but its check fails; the previous copy is kept at $backup" >&2
+    return 1
+  fi
+  rm -f -- "$backup"
+  echo "explorer credentials copied into $DEPLOY_ENV_FILE; the check passes and the backup is deleted"
+  echo "next: recreate explorer-api (explorer-decrypt-up if it decrypts; see docs/LAKE_SKELETON.md)"
 }
 
 # Test-mode escape hatch: source this file with ASPIRANT_LAKE_SKELETON_LIB=1 to
@@ -653,6 +728,23 @@ case "${1:-}" in
     esac
     ;;
 
+  rotate-explorer-ro)
+    # A new explorer_ro password, for when the old one may have leaked (system_3
+    # #11381; security c69918 on #11368). bootstrap_catalog_role does the work:
+    # 'pending' makes it generate a password (openssl's stdout, captured into a
+    # variable), ALTER the role over psql's stdin, and write the password and
+    # the DSN with env_set. No step puts the value in an argv or on the screen.
+    # The catalog must be up first, so a refusal leaves the env file untouched.
+    wait_healthy catalog
+    env_set LAKE_CATALOG_RO_PASSWORD pending
+    bootstrap_catalog_role
+    echo "rotated: explorer_ro has a new password, in the catalog and in $ENV_FILE."
+    echo "explorer-api cannot open new catalog connections until it has it. Now run:"
+    echo "  $0 explorer-env sync"
+    echo "and recreate explorer-api: explorer-decrypt-up if it decrypts (docs/LAKE_SKELETON.md),"
+    echo "otherwise: docker compose --profile explorer up -d --force-recreate explorer-api"
+    ;;
+
   explorer-decrypt-up)
     # Turn decrypt-on-read on for the deploy's explorer-api with the operator's
     # KEK (system_3 #10777; security c64754 on #8814). `stage_real_kek`, called
@@ -717,7 +809,7 @@ case "${1:-}" in
     ;;
 
   *)
-    sed -n '3,21p' "${BASH_SOURCE[0]}"
+    sed -n '3,23p' "${BASH_SOURCE[0]}"
     exit 1
     ;;
 esac

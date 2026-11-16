@@ -106,6 +106,7 @@ Run from a checkout on the cell (`~/aspirant-deploy` post-merge):
 scripts/lake-skeleton.sh up       # start + bootstrap bucket, key, catalog
 scripts/lake-skeleton.sh verify   # acceptance checks
 scripts/lake-skeleton.sh explorer-env sync  # copy the explorer's credentials into .env
+scripts/lake-skeleton.sh rotate-explorer-ro  # new explorer_ro password (see "Rotating")
 scripts/lake-skeleton.sh explorer-decrypt-up  # recreate explorer-api able to decrypt (needs the KEK)
 scripts/lake-skeleton.sh status   # containers, published ports, disk use
 scripts/lake-skeleton.sh down     # stop, keep data
@@ -186,8 +187,46 @@ with the read-only pair, all or nothing.
 Credentials (Garage access keys, catalog passwords) are generated at `up` and
 written to `/scratch/lake-skeleton/lake-skeleton.env`, mode 600. They live on
 the scratch path with everything else, so `destroy` takes them too — a fresh
-`up` mints new ones. Nothing here is a secret worth keeping; the stack it
-authenticates holds only fixtures.
+`up` mints new ones. The stack has held real records since the first ingest
+(#4271), so these are live credentials. Never pass one on a command line or print
+one, and rotate any that leaks.
+
+### Rotating the explorer's credentials (system_3 #11381)
+
+When a leak exposes the explorer's catalog password or its read-only key, the
+new values must travel the way the old ones should have: never in an argv,
+never on screen, never in a terminal's scrollback (security c69918 on system_3
+#11368). `env_set` writes with bash builtins only, so neither
+`rotate-explorer-ro` nor `explorer-env sync` puts a value in any process's
+command line.
+
+The catalog password, in one sitting, because explorer-api cannot open a new
+catalog connection between the first step and the last:
+
+All three steps are the **operator's**. `explorer-env sync` in particular is
+operator only: it reads every line of the served `.env` into bash, and no
+agent's process may read that file (security ruling C, system_3 c61658 on #9979).
+
+```bash
+scripts/lake-skeleton.sh rotate-explorer-ro   # new password: catalog + skeleton env
+scripts/lake-skeleton.sh explorer-env sync    # operator only: copy it into this checkout's .env
+( read -rs LAKE_KEK_HEX; export LAKE_KEK_HEX   # recreate explorer-api, decrypt on
+  export LAKE_KEK_FINGERPRINT=<ceremony fingerprint, sha256(KEK)[:16]>
+  scripts/lake-skeleton.sh explorer-decrypt-up )
+```
+
+Without decrypt-on-read, the last step is
+`docker compose --profile explorer up -d --force-recreate explorer-api`.
+A plain recreate of a decrypting explorer-api turns decrypt off.
+
+The read-only key has no verb. Garage keys are looked up by name, so first
+rename the old key (`garage key rename <id> lake-skeleton-explorer-ro-retired-<date>`).
+Then `garage key create lake-skeleton-explorer-ro > <0600 file> 2>&1`, because
+create prints the secret. Grant the new key what the old one had (`R` on bronze,
+deny `W`), and write the pair into the skeleton env from that file in-process.
+Then run the same `explorer-env sync` and recreate. Delete the old key only after
+explorer-api is healthy on the new one, and run `verify`, which proves the new
+key can read and cannot write.
 
 ### The explorer's decryption key (#10777)
 
