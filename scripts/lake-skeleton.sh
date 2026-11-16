@@ -97,6 +97,21 @@ _kek_file=""
 _cleanup_kek_file() { [[ -n "$_kek_file" ]] && rm -f "$_kek_file"; return 0; }
 
 stage_real_kek() {
+  # The key arrives either as LAKE_KEK_HEX (the one-shot export) or, from
+  # scripts/gmail/gmail_pull_and_ingest.sh, on a pipe named by LAKE_KEK_FILE
+  # (typically /dev/fd/3), so it is never in this process's environment
+  # (security c70261 on #11344). Read once, into LAKE_KEK_HEX unexported, so
+  # the rest of this function is unchanged; unset below.
+  if [[ -z "${LAKE_KEK_HEX:-}" && -n "${LAKE_KEK_FILE:-}" ]]; then
+    local _from_file
+    if ! _from_file="$(<"$LAKE_KEK_FILE")"; then
+      echo "refusing: cannot read the KEK from LAKE_KEK_FILE" >&2
+      exit 1
+    fi
+    unset LAKE_KEK_FILE
+    LAKE_KEK_HEX="$_from_file"
+    export -n LAKE_KEK_HEX
+  fi
   if [[ -n "${LAKE_KEK_HEX:-}" ]]; then
     local runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
     # Refuse a runtime dir that is not tmpfs (security review c64726 on

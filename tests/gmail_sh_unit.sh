@@ -28,9 +28,9 @@ mkdir -p "$T/bin" "$T/secrets"
 echo '{"fake":"oauth-client"}' > "$T/secrets/gmail-oauth-client.json"
 
 # A fake `docker`: `image inspect` always succeeds (so gmail.sh never tries a
-# real build), `run` records its full argv and the KEK file's permission
-# bits + content (read before the wrapper's own trap can delete it) to
-# $STUB_LOG, then exits $STUB_RUN_RC.
+# real build); `run` records its full argv, what arrived on its stdin when it
+# was given `-i`, and what was in the runtime dir while it ran, then exits
+# $STUB_RUN_RC.
 cat > "$T/bin/docker" <<'STUBEOF'
 #!/usr/bin/env bash
 if [[ "$1" == "image" && "$2" == "inspect" ]]; then
@@ -38,17 +38,9 @@ if [[ "$1" == "image" && "$2" == "inspect" ]]; then
 fi
 if [[ "$1" == "run" ]]; then
   printf '%s\n' "$*" > "$STUB_LOG.argv"
-  : > "$STUB_LOG.kekfile_path"
-  for ((i = 1; i <= $#; i++)); do
-    arg="${!i}"
-    if [[ "$arg" == *:/run/secrets/lake_kek:ro ]]; then
-      src="${arg%%:/run/secrets/lake_kek:ro}"
-      if [[ -f "$src" ]]; then
-        stat -c '%a' "$src" > "$STUB_LOG.kekfile_mode"
-        cat "$src" > "$STUB_LOG.kekfile_content"
-      fi
-      printf '%s\n' "$src" > "$STUB_LOG.kekfile_path"
-    fi
+  ls -A "$XDG_RUNTIME_DIR" > "$STUB_LOG.runtime_ls"
+  for a in "$@"; do
+    if [[ "$a" == "-i" ]]; then cat > "$STUB_LOG.stdin"; break; fi
   done
   exit "${STUB_RUN_RC:-0}"
 fi
@@ -59,119 +51,73 @@ chmod +x "$T/bin/docker"
 
 FAKE_KEK="feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface"
 
-# run_wrapper NAME [LAKE_KEK_HEX_VALUE] — echoes the wrapper's exit code.
-# LAKE_KEK_HEX_VALUE unset/empty means "do not export it at all".
+# run_wrapper NAME MODE — echoes the wrapper's exit code. MODE is `env` (the
+# one-shot LAKE_KEK_HEX export), `fd` (LAKE_KEK_FILE=/dev/fd/3 fed by a
+# here-string, as gmail_pull_and_ingest.sh does) or `none`.
 run_wrapper() {
-  local name="$1" kek="${2:-}"
+  local name="$1" mode="$2"
   rm -f "$T/$name".*
   set +e
-  if [[ -n "$kek" ]]; then
-    PATH="$T/bin:$PATH" \
-      XDG_RUNTIME_DIR="$TMPFS_RUNTIME" \
-      GMAIL_SECRETS_DIR="$T/secrets" \
-      STUB_LOG="$T/$name" \
-      STUB_RUN_RC="${STUB_RUN_RC:-0}" \
-      LAKE_KEK_HEX="$kek" \
-      LAKE_KEK_FINGERPRINT="nonsecretfp" \
-      "$WRAPPER" status >"$T/$name.stdout" 2>"$T/$name.stderr"
-  else
-    PATH="$T/bin:$PATH" \
-      XDG_RUNTIME_DIR="$TMPFS_RUNTIME" \
-      GMAIL_SECRETS_DIR="$T/secrets" \
-      STUB_LOG="$T/$name" \
-      STUB_RUN_RC="${STUB_RUN_RC:-0}" \
-      env -u LAKE_KEK_HEX "$WRAPPER" status >"$T/$name.stdout" 2>"$T/$name.stderr"
-  fi
+  local base=(env -u LAKE_KEK_HEX -u LAKE_KEK_FILE PATH="$T/bin:$PATH" XDG_RUNTIME_DIR="${RUNTIME:-$TMPFS_RUNTIME}"
+              GMAIL_SECRETS_DIR="$T/secrets" STUB_LOG="$T/$name" STUB_RUN_RC="${STUB_RUN_RC:-0}" LAKE_KEK_FINGERPRINT="nonsecretfp")
+  case "$mode" in
+    env)  "${base[@]}" LAKE_KEK_HEX="$FAKE_KEK" "$WRAPPER" status >"$T/$name.stdout" 2>"$T/$name.stderr" </dev/null ;;
+    fd)   "${base[@]}" LAKE_KEK_FILE=/dev/fd/3 "$WRAPPER" status >"$T/$name.stdout" 2>"$T/$name.stderr" </dev/null 3<<<"$FAKE_KEK" ;;
+    none) "${base[@]}" "$WRAPPER" status >"$T/$name.stdout" 2>"$T/$name.stderr" </dev/null ;;
+  esac
   local rc=$?
   set -e
   echo "$rc"
 }
 
-# --- a successful run -------------------------------------------------------
-rc="$(STUB_RUN_RC=0 run_wrapper ok "$FAKE_KEK")"
-if [[ "$rc" == "0" ]]; then pass "wrapper exits 0 when the stub docker run succeeds"
-else fail "wrapper exit code on success" "got $rc"; fi
+# --- the key reaches the container on stdin, from either source -------------
+for mode in env fd; do
+  rc="$(STUB_RUN_RC=0 run_wrapper "ok-$mode" "$mode")"
+  [[ "$rc" == "0" ]] && pass "$mode: wrapper exits 0 when the stub docker run succeeds" || fail "$mode: exit code on success" "got $rc"
+  if grep -q "LAKE_KEK_HEX" "$T/ok-$mode.argv" 2>/dev/null || grep -qF "$FAKE_KEK" "$T/ok-$mode.argv" 2>/dev/null; then
+    fail "$mode: neither LAKE_KEK_HEX nor the hex reaches docker run argv" "argv: $(cat "$T/ok-$mode.argv")"
+  else
+    pass "$mode: neither LAKE_KEK_HEX nor the hex reaches docker run argv"
+  fi
+  if grep -q -- "-i -e LAKE_KEK_FILE=/dev/stdin" "$T/ok-$mode.argv" 2>/dev/null; then
+    pass "$mode: the container reads the key from stdin (-i, LAKE_KEK_FILE=/dev/stdin)"
+  else
+    fail "$mode: -i and LAKE_KEK_FILE=/dev/stdin" "argv: $(cat "$T/ok-$mode.argv" 2>/dev/null)"
+  fi
+  if [[ "$(cat "$T/ok-$mode.stdin" 2>/dev/null)" == "$FAKE_KEK" ]]; then
+    pass "$mode: the container's stdin carried the key"
+  else
+    fail "$mode: the container's stdin carried the key"
+  fi
+  if [[ ! -s "$T/ok-$mode.runtime_ls" ]]; then
+    pass "$mode: no key file sits in the runtime dir while the container runs (security c70261, #11344)"
+  else
+    fail "$mode: the runtime dir held a file during the run" "$(cat "$T/ok-$mode.runtime_ls")"
+  fi
+done
 
-if grep -q "LAKE_KEK_HEX" "$T/ok.argv" 2>/dev/null; then
-  fail "LAKE_KEK_HEX never reaches docker run argv" "found: $(cat "$T/ok.argv")"
-else
-  pass "LAKE_KEK_HEX never reaches docker run argv"
-fi
-if grep -qF "$FAKE_KEK" "$T/ok.argv" 2>/dev/null; then
-  fail "the raw KEK hex never reaches docker run argv" "found in: $(cat "$T/ok.argv")"
-else
-  pass "the raw KEK hex never reaches docker run argv"
-fi
-if grep -q -- "-e LAKE_KEK_FILE=/run/secrets/lake_kek" "$T/ok.argv" 2>/dev/null; then
-  pass "LAKE_KEK_FILE=/run/secrets/lake_kek is passed instead"
-else
-  fail "LAKE_KEK_FILE=/run/secrets/lake_kek is passed instead" "argv: $(cat "$T/ok.argv" 2>/dev/null)"
-fi
-if [[ "$(cat "$T/ok.kekfile_mode" 2>/dev/null)" == "600" ]]; then
-  pass "the KEK file was 0600 while docker run held it"
-else
-  fail "the KEK file was 0600 while docker run held it" "mode: $(cat "$T/ok.kekfile_mode" 2>/dev/null)"
-fi
-if [[ "$(cat "$T/ok.kekfile_content" 2>/dev/null)" == "$FAKE_KEK" ]]; then
-  pass "the KEK file held the real hex"
-else
-  fail "the KEK file held the real hex"
-fi
-kek_path_ok="$(cat "$T/ok.kekfile_path" 2>/dev/null)"
-if [[ -n "$kek_path_ok" && ! -e "$kek_path_ok" ]]; then
-  pass "the KEK file is deleted after a successful run"
-else
-  fail "the KEK file is deleted after a successful run" "path: $kek_path_ok"
-fi
+# --- a failing run propagates its exit code ----------------------------------
+rc="$(STUB_RUN_RC=7 run_wrapper fail env)"
+[[ "$rc" == "7" ]] && pass "wrapper propagates the stub docker run's exit code" || fail "wrapper exit code on failure" "got $rc"
 
-# --- a failing run: the file must still be cleaned up -----------------------
-rc="$(STUB_RUN_RC=7 run_wrapper fail "$FAKE_KEK")"
-if [[ "$rc" == "7" ]]; then pass "wrapper propagates the stub docker run's exit code"
-else fail "wrapper exit code on failure" "got $rc"; fi
-
-kek_path_fail="$(cat "$T/fail.kekfile_path" 2>/dev/null)"
-if [[ -n "$kek_path_fail" && ! -e "$kek_path_fail" ]]; then
-  pass "the KEK file is deleted after a failing run"
+# --- no KEK at all: no stdin hand-off ---------------------------------------
+rc="$(STUB_RUN_RC=0 run_wrapper nokek none)"
+[[ "$rc" == "0" ]] && pass "wrapper still runs with no KEK supplied" || fail "wrapper runs with no KEK" "got $rc"
+if grep -q -- "LAKE_KEK_FILE" "$T/nokek.argv" 2>/dev/null || [[ -e "$T/nokek.stdin" ]]; then
+  fail "no key hand-off without a KEK" "argv: $(cat "$T/nokek.argv")"
 else
-  fail "the KEK file is deleted after a failing run" "path: $kek_path_fail"
+  pass "no key hand-off without a KEK"
 fi
 
-# --- no KEK exported at all: no file, no mount ------------------------------
-rc="$(STUB_RUN_RC=0 run_wrapper nokek)"
-if [[ "$rc" == "0" ]]; then pass "wrapper still runs with no KEK exported at all"
-else fail "wrapper still runs with no KEK exported at all" "got $rc"; fi
-if [[ -s "$T/nokek.kekfile_path" ]]; then
-  fail "no KEK mount is added when LAKE_KEK_HEX is unset" "found: $(cat "$T/nokek.kekfile_path")"
-else
-  pass "no KEK mount is added when LAKE_KEK_HEX is unset"
-fi
-
-# --- a non-tmpfs runtime dir is refused outright (#10492, security review
-#     c64726 on #8813): a misconfigured XDG_RUNTIME_DIR must not let a real
-#     KEK land on disk. docker must never even be invoked.
+# --- nothing is written to the runtime dir at all, so its filesystem no longer
+#     matters: a non-tmpfs XDG_RUNTIME_DIR stays empty (it was refused when the
+#     key was staged there as a file, #10492).
 DISK_RUNTIME="$T/not-tmpfs-runtime"
 mkdir -p "$DISK_RUNTIME"
-rm -f "$T/notmpfs".*
-set +e
-PATH="$T/bin:$PATH" \
-  XDG_RUNTIME_DIR="$DISK_RUNTIME" \
-  GMAIL_SECRETS_DIR="$T/secrets" \
-  STUB_LOG="$T/notmpfs" \
-  LAKE_KEK_HEX="$FAKE_KEK" \
-  LAKE_KEK_FINGERPRINT="nonsecretfp" \
-  "$WRAPPER" status >"$T/notmpfs.stdout" 2>"$T/notmpfs.stderr"
-rc=$?
-set -e
-if [[ "$rc" != "0" ]]; then
-  pass "wrapper refuses a non-tmpfs \$XDG_RUNTIME_DIR"
-else
-  fail "wrapper refuses a non-tmpfs \$XDG_RUNTIME_DIR" "exited 0"
-fi
-if [[ -e "$T/notmpfs.argv" ]]; then
-  fail "docker run is never reached when the runtime dir is refused" "argv: $(cat "$T/notmpfs.argv")"
-else
-  pass "docker run is never reached when the runtime dir is refused"
-fi
+rc="$(RUNTIME="$DISK_RUNTIME" STUB_RUN_RC=0 run_wrapper notmpfs env)"
+[[ "$rc" == "0" && -z "$(ls -A "$DISK_RUNTIME")" ]] \
+  && pass "a non-tmpfs runtime dir receives nothing" \
+  || fail "a non-tmpfs runtime dir receives nothing" "rc=$rc ls=$(ls -A "$DISK_RUNTIME")"
 
 echo
 if [[ "$fails" -gt 0 ]]; then
