@@ -26,13 +26,15 @@ echo '{"history_id":"1002"}' > "$T/state.json"
 # A synthetic value that cannot be mistaken for a real KEK and that the output
 # checks can grep for.
 FAKE_KEK="deadbeef-synthetic-kek-0000"
+export EXPECT_KEK="$FAKE_KEK"
 
 # The pull stand-in: prints the summary line STUB_SUMMARY, exits STUB_PULL_RC,
 # records its argv and whether it saw the KEK.
 cat > "$T/pull" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" > "$STUB_LOG.pull.args"
-if [[ -n "${LAKE_KEK_HEX:-}" ]]; then echo kek-seen > "$STUB_LOG.pull.kek"; fi
+if [[ -n "${LAKE_KEK_HEX:-}" ]]; then echo env > "$STUB_LOG.pull.kekenv"; fi
+if [[ -n "${LAKE_KEK_FILE:-}" && "$(<"$LAKE_KEK_FILE")" == "$EXPECT_KEK" ]]; then echo fd > "$STUB_LOG.pull.kek"; fi
 echo "pull diagnostics on stderr" >&2
 printf '%s\n' "$STUB_SUMMARY"
 exit "${STUB_PULL_RC:-0}"
@@ -41,13 +43,15 @@ EOF
 cat > "$T/ingest" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" > "$STUB_LOG.ingest.args"
-if [[ -n "${LAKE_KEK_HEX:-}" ]]; then echo kek-seen > "$STUB_LOG.ingest.kek"; fi
+if [[ -n "${LAKE_KEK_HEX:-}" ]]; then echo env > "$STUB_LOG.ingest.kekenv"; fi
+if [[ -n "${LAKE_KEK_FILE:-}" && "$(<"$LAKE_KEK_FILE")" == "$EXPECT_KEK" ]]; then echo fd > "$STUB_LOG.ingest.kek"; fi
 if [[ "${STUB_INGEST_RC:-0}" -ne 0 ]]; then echo "run stub-run: partial"; exit "$STUB_INGEST_RC"; fi
 echo "run stub-run: success"
 EOF
 cat > "$T/verify" <<'EOF'
 #!/usr/bin/env bash
 echo verify-ran > "$STUB_LOG.verify"
+if [[ -n "${LAKE_KEK_FILE:-}" && "$(<"$LAKE_KEK_FILE")" == "$EXPECT_KEK" ]]; then echo fd > "$STUB_LOG.verify.kek"; fi
 echo "GREEN (stub)"
 EOF
 chmod +x "$T/pull" "$T/ingest" "$T/verify"
@@ -70,7 +74,10 @@ echo "== the KEK is read once and reaches both halves, and is never printed"
 export LAKE_KEK_HEX="$FAKE_KEK"
 STUB_SUMMARY="gmail pull: run_id=20261101T120000Z-full mode=full exported=4 deleted=0 history=-->1002" STUB_PULL_RC=0 run normal
 [[ $rc -eq 0 ]] && pass "a normal run exits 0" || fail "a normal run exits 0" "rc=$rc $(cat "$T/normal.err")"
-[[ -f "$T/normal.pull.kek" && -f "$T/normal.ingest.kek" ]] && pass "both the pull and the ingest saw LAKE_KEK_HEX" || fail "both halves saw the KEK"
+[[ -f "$T/normal.pull.kek" && -f "$T/normal.ingest.kek" ]] && pass "both the pull and the ingest got the KEK on LAKE_KEK_FILE (fd 3)" || fail "both halves got the KEK on the fd"
+[[ ! -f "$T/normal.pull.kekenv" && ! -f "$T/normal.ingest.kekenv" ]] \
+  && pass "neither half has LAKE_KEK_HEX in its environment (#11344, security c70261)" \
+  || fail "a child inherited LAKE_KEK_HEX"
 [[ "$(cat "$T/normal.ingest.args")" == "$T/runs/20261101T120000Z-full/manifest.json" ]] \
   && pass "the ingest got exactly <staging>/runs/<run_id>/manifest.json" \
   || fail "ingest argv" "$(cat "$T/normal.ingest.args")"
@@ -89,6 +96,7 @@ STUB_SUMMARY="gmail pull: run_id=20261101T121500Z-incremental mode=incremental e
 [[ "$(cat "$T/flags.ingest.args")" == "$T/runs/20261101T121500Z-incremental/manifest.json --dry-run" ]] \
   && pass "--dry-run reaches the ingest after the manifest" || fail "--dry-run placement" "$(cat "$T/flags.ingest.args")"
 [[ -f "$T/flags.verify" ]] && pass "--verify runs verify-at-rest after the ingest" || fail "--verify ran"
+[[ -f "$T/flags.verify.kek" ]] && pass "verify-at-rest gets the KEK on the fd too" || fail "verify got no KEK on the fd"
 [[ -f "$T/runs/20261101T121500Z-incremental/messages.json" ]] && pass "--dry-run keeps the clear export for a real run" || fail "--dry-run deleted the export"
 grep -q 'clear export kept at' "$T/flags.err" && pass "--dry-run says the export was kept" || fail "--dry-run kept message" "$(cat "$T/flags.err")"
 
