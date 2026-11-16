@@ -94,6 +94,11 @@ assert_eq "home-abc" "${HOME_RECORD_ID}" "load_env_file exports HOME_RECORD_ID"
 
 assert_eq "0" "$(rc_of require_vars)" "require_vars passes with all four set"
 
+# ROOT_RECORD_ID is optional once the apex is on the tunnel (#10829-A3).
+unset ROOT_RECORD_ID
+assert_eq "0" "$(rc_of require_vars)" "require_vars passes with ROOT_RECORD_ID blank"
+ROOT_RECORD_ID=root-abc
+
 # The shipped template has every value blank — installing it without editing
 # must be caught before any request goes out.
 clear_creds
@@ -107,8 +112,9 @@ CF_TOKEN=tok-abc
 ZONE_ID=zone-abc
 require_vars || true
 LOG_TEXT="$(cat "$DDNS_LOG_FILE")"
-assert_contains "$LOG_TEXT" "ROOT_RECORD_ID" "require_vars names the missing ROOT_RECORD_ID"
 assert_contains "$LOG_TEXT" "HOME_RECORD_ID" "require_vars names the missing HOME_RECORD_ID"
+assert_eq "0" "$(grep -c 'ROOT_RECORD_ID' "$DDNS_LOG_FILE" || true)" \
+  "require_vars does not demand ROOT_RECORD_ID (optional since #10829-A3)"
 assert_eq "1" "$(grep -c 'ERROR: credential file missing' "$DDNS_LOG_FILE")" \
   "require_vars reports all missing vars on one line"
 
@@ -121,6 +127,32 @@ assert_eq "1" "$(rc_of cf_success '{"result":null,"success":false,"errors":[{"co
 assert_eq "1" "$(rc_of cf_success '{"success": true}')" \
   "cf_success rejects a body whose success key is not the compact form"
 assert_eq "1" "$(rc_of cf_success '')" "cf_success rejects an empty body"
+
+# --- record_field -----------------------------------------------------------
+
+A_REC='{"result":{"id":"r1","type":"A","name":"the-aspirant.com","content":"203.0.113.7","proxied":true},"success":true,"errors":[]}'
+CNAME_REC='{"result":{"id":"r1","type":"CNAME","name":"the-aspirant.com","content":"abc.cfargotunnel.com","proxied":true},"success":true,"errors":[]}'
+assert_eq "A" "$(record_field "$A_REC" type)" "record_field reads an A record's type"
+assert_eq "203.0.113.7" "$(record_field "$A_REC" content)" "record_field reads an A record's content"
+assert_eq "CNAME" "$(record_field "$CNAME_REC" type)" "record_field reads a CNAME's type"
+
+# --- apex_action (#10829-A3) ------------------------------------------------
+
+IP=203.0.113.9
+assert_eq "skip"   "$(apex_action ""   1 A     203.0.113.7 "$IP")" "apex: blank ROOT_RECORD_ID is not managed"
+assert_eq "error"  "$(apex_action r1   0 ""    ""          "$IP")" "apex: an unreadable configured record is an error"
+assert_eq "noop"   "$(apex_action r1   1 A     "$IP"       "$IP")" "apex: a current A record is left alone"
+assert_eq "update" "$(apex_action r1   1 A     203.0.113.7 "$IP")" "apex: a stale A record is updated"
+# The one that matters: the tunnel's CNAME never mismatches into an A-record PUT.
+assert_eq "skip"   "$(apex_action r1   1 CNAME abc.cfargotunnel.com "$IP")" \
+  "apex: a CNAME (the tunnel) is never PUT back as an A record"
+
+# --- home_action ------------------------------------------------------------
+
+assert_eq "error"  "$(home_action 0 ""          "$IP")" "home: an unreadable record is an error"
+assert_eq "noop"   "$(home_action 1 "$IP"       "$IP")" "home: a current record is left alone"
+# Previously only reached when the apex was stale: home is now judged on its own.
+assert_eq "update" "$(home_action 1 203.0.113.7 "$IP")" "home: a stale record is updated even if the apex is current"
 
 # --- no credential material in the repo -------------------------------------
 
