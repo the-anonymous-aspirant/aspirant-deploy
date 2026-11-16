@@ -37,8 +37,14 @@ cat > "$FAKE_BIN/docker" <<'SHIM'
 #!/usr/bin/env bash
 if [[ "$*" == *"run --rm duckdb"* ]]; then
   state="unset"
-  [[ -n "${LAKE_KEK_HEX:-}" ]] && state="SET"
-  echo "$state RUN: $*" >> "$DOCKER_FAKE_LOG"
+  # SET if the key is in docker's environment by any name, not only
+  # LAKE_KEK_HEX (security c70261 on #11344: no KEK in any environment).
+  if [[ -n "${LAKE_KEK_HEX:-}" ]] || env | grep -qF "feedfacefeedface"; then state="SET"; fi
+  staged="nokey"
+  if [[ -n "${LAKE_KEK_FILE_HOST:-}" && -f "$LAKE_KEK_FILE_HOST" ]] && grep -qF "feedfacefeedface" "$LAKE_KEK_FILE_HOST"; then
+    staged="STAGED"
+  fi
+  echo "$state $staged RUN: $*" >> "$DOCKER_FAKE_LOG"
 fi
 exit 0
 SHIM
@@ -78,17 +84,21 @@ PASS=0
 FAIL=0
 
 : > "$LOG"
+# The key is typed at the wrapper's hidden prompt through a pty (an exported
+# LAKE_KEK_HEX is refused since security F1, c70270 on #11428), after a pause
+# so the pty does not echo it as typeahead.
 set +e
-LAKE_KEK_HEX="feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface" \
-  LAKE_SKELETON_ROOT="$TMPDIR_TEST/root" \
-  GMAIL_STAGING_DIR="$STAGING" \
-  GMAIL_PULL_CMD="$PULL_STUB" \
-  LAKE_INGEST_CMD="$PWD/scripts/lake-skeleton.sh ingest" \
-  LAKE_VERIFY_CMD="$PWD/scripts/lake-skeleton.sh verify-at-rest" \
-  DOCKER_FAKE_LOG="$LOG" \
-  PATH="$FAKE_BIN:$PATH" \
-  bash scripts/gmail/gmail_pull_and_ingest.sh --verify >"$TMPDIR_TEST/out.log" 2>"$TMPDIR_TEST/err.log"
+{ sleep 2; printf '%s\n' "feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface"; } \
+  | env LAKE_SKELETON_ROOT="$TMPDIR_TEST/root" \
+    GMAIL_STAGING_DIR="$STAGING" \
+    GMAIL_PULL_CMD="$PULL_STUB" \
+    LAKE_INGEST_CMD="$PWD/scripts/lake-skeleton.sh ingest" \
+    LAKE_VERIFY_CMD="$PWD/scripts/lake-skeleton.sh verify-at-rest" \
+    DOCKER_FAKE_LOG="$LOG" \
+    PATH="$FAKE_BIN:$PATH" \
+    script -qec "bash scripts/gmail/gmail_pull_and_ingest.sh --verify" /dev/null >"$TMPDIR_TEST/out.log" 2>&1
 rc=$?
+cp "$TMPDIR_TEST/out.log" "$TMPDIR_TEST/err.log"
 set -e
 
 # Not asserting rc=0: verify-at-rest's own layer-1 check correctly reports
@@ -114,6 +124,14 @@ else
   PASS=$((PASS + 1)); echo "[PASS] both children reached 'compose ... run --rm duckdb' ($run_count calls captured)"
 fi
 
+# The key reached each child on fd 3 and the child staged it for compose:
+# without this, a child that ignored LAKE_KEK_FILE would "complete" keyless.
+if [ "$(printf '%s\n' "$run_lines" | grep -c ' STAGED RUN: ')" -ge 2 ]; then
+  PASS=$((PASS + 1)); echo "[PASS] both children staged the key they got on fd 3 (LAKE_KEK_FILE, #11344) for compose"
+else
+  FAIL=$((FAIL + 1)); echo "[FAIL] a child did not stage the key from LAKE_KEK_FILE"; printf '%s\n' "$run_lines"
+fi
+
 if printf '%s\n' "$run_lines" | grep -q '^SET'; then
   FAIL=$((FAIL + 1))
   echo "[FAIL] LAKE_KEK_HEX reached docker still SET on at least one child — the operator's real KEK would persist in dockerd's env"
@@ -124,9 +142,13 @@ else
 fi
 
 # --- negative control: with the structural guard removed from a mutated
-#     copy of lake-skeleton.sh, the verify-at-rest leg (the one this task's
-#     own real gap was in) must leak. If it doesn't, this test isn't
-#     testing the guard at all.
+#     copy of lake-skeleton.sh, a caller that exports the key one-shot (the
+#     documented direct path, `( read -rs LAKE_KEK_HEX; export LAKE_KEK_HEX;
+#     scripts/lake-skeleton.sh ingest ... )`) must leak it to docker. Since
+#     #11344 the wrapper above no longer has the key in any environment (it
+#     hands it over on fd 3), so its chain cannot be the leaking one; this
+#     control drives the unguarded copy directly instead. If it doesn't leak,
+#     this test isn't testing the guard at all.
 
 UNGUARDED="$TMPDIR_TEST/lake-skeleton-unguarded.sh"
 sed '/^# Structural, not per-verb (#10492):/,/^fi$/d' ./scripts/lake-skeleton.sh > "$UNGUARDED"
@@ -135,16 +157,15 @@ if diff -q ./scripts/lake-skeleton.sh "$UNGUARDED" >/dev/null; then
   echo "[FAIL] negative control: the guard-removal sed matched nothing — this test would pass even if the guard vanished"
 else
   : > "$LOG"
+  mkdir -p "$STAGING/runs/$RUN_ID"
+  echo '{"dataset_id": "gmail", "source": "unit test", "records": [{"path": "x", "sensitivity": "normal"}]}' \
+    > "$STAGING/runs/$RUN_ID/manifest.json"
   set +e
   LAKE_KEK_HEX="feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface" \
     LAKE_SKELETON_ROOT="$TMPDIR_TEST/root2" \
-    GMAIL_STAGING_DIR="$STAGING" \
-    GMAIL_PULL_CMD="$PULL_STUB_2" \
-    LAKE_INGEST_CMD="bash $UNGUARDED ingest" \
-    LAKE_VERIFY_CMD="bash $UNGUARDED verify-at-rest" \
     DOCKER_FAKE_LOG="$LOG" \
     PATH="$FAKE_BIN:$PATH" \
-    bash scripts/gmail/gmail_pull_and_ingest.sh --verify >/dev/null 2>&1
+    bash "$UNGUARDED" ingest "$STAGING/runs/$RUN_ID/manifest.json" >/dev/null 2>&1
   set -e
   if grep -q '^SET' "$LOG"; then
     PASS=$((PASS + 1))

@@ -80,14 +80,14 @@ scripts/gmail/gmail.sh consent --note 'consent screen: Testing'
 Google's redirect can never land on some other local process; without it ssh
 only warns and carries on.
 
-The tool asks for the KEK on a hidden prompt (the way to enter it). If you need
-it in the environment for a non-interactive run, read it hidden and export the
-variable, never type the hex on a command line, which would write the lake
-master key to the shell history on the cell:
-
-```bash
-read -rs LAKE_KEK_HEX && export LAKE_KEK_HEX    # one shell, one run; `unset LAKE_KEK_HEX` after
-```
+The tool asks for the KEK on a hidden prompt, which is the only way to enter
+it. Never type the hex on a command line: that would write the lake master key
+to the shell history on the cell. An exported `LAKE_KEK_HEX` is refused, by
+`gmail.sh` and by `gmail_pull_and_ingest.sh`. A process keeps its start-up
+environment in `/proc/<pid>/environ` for its whole life, even after `unset`,
+so an exported key would sit there for the run (security F1, c70270 on
+#11428). `gmail.sh` hands a key it was given to its container on stdin, never
+on `-e` and never in a file held for the run.
 
 It then prints an authorisation URL, you open it in your browser,
 grant read-only access, and Google's redirect lands on the cell through the
@@ -205,9 +205,50 @@ scripts/gmail/gmail_pull_and_ingest.sh            # incremental pull, then inges
 scripts/gmail/gmail_pull_and_ingest.sh --full     # full pull, then ingest
 scripts/gmail/gmail_pull_and_ingest.sh --verify   # ... then scripts/lake-skeleton.sh verify-at-rest
 scripts/gmail/gmail_pull_and_ingest.sh --dry-run  # pull for real; the ingest only reports what it would load
+scripts/gmail/gmail_pull_and_ingest.sh --detach --full --verify
+                                                  # ask for the KEK here, run the rest without this terminal
 ```
 
-One KEK prompt for both halves (or `LAKE_KEK_HEX` exported one-shot as above).
+One KEK prompt for both halves. Run it from a terminal and type the KEK at the
+hidden prompt; an exported `LAKE_KEK_HEX` is refused (see Consent above).
+
+**Where the KEK is during a run** (security c70261 on #11344). The wrapper keeps
+it in an unexported shell variable and hands it to each child on a pipe (fd 3,
+`LAKE_KEK_FILE=/dev/fd/3`) at the moment that child starts. `gmail.sh` passes it
+to the pull container on the container's stdin. The ingest stages it in a 0600
+tmpfs file for its own few minutes, as before (#10354). So no process has the
+key in its environment, and no key file sits on the tmpfs for the length of
+the pull.
+
+What a run still exposes, attended or detached: for its whole length the
+wrapper holds the KEK in memory, the pull holds the decrypted Gmail token, and
+the export sits in clear under `/data/gmail` until the ingest. Anything with
+docker access can reach all three, which on this cell means every agent
+session. The hand-off above removes the copies that leaked by accident (an
+`environ`, a file). It does not remove that one, and a detached first pull
+holds it for about 5 hours.
+
+### Detached (`--detach`)
+
+A first full pull takes hours (see *Pace* above), and the run must not depend
+on your SSH session staying open. `--detach` asks for the KEK in the foreground,
+then hands it to a systemd **user** unit through a 0600 file on the runtime
+tmpfs. Only the file's path is in the unit, so `systemctl --user show` reveals
+no key. The unit reads the file and deletes it as its first act, and the
+foreground waits for that, then prints:
+
+```
+gmail_pull_and_ingest: running detached as gmail-pull-<UTC stamp>; you can log out.
+  follow:  tail -f /data/gmail/pull-<UTC stamp>.log
+  status:  systemctl --user status gmail-pull-<UTC stamp>
+  stop:    systemctl --user stop gmail-pull-<UTC stamp>
+```
+
+The log is 0600 and holds what the attended run prints: progress, counts and
+the run id, never content. Linger is on for this user, so the unit outlives
+the session. A stopped run leaves no key file behind, and its history id stays
+where it was. `tests/gmail_pull_detach_unit.sh` checks all of this against the
+real `systemd-run`.
 The wrapper runs `gmail.sh pull`, reads the `run_id` from its one summary
 line, and hands `/data/gmail/runs/<run_id>/manifest.json` to
 `scripts/lake-skeleton.sh ingest`, which runs `scripts/lake_ingest.py`
