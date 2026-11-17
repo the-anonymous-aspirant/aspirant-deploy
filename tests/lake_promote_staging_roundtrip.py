@@ -335,6 +335,32 @@ def test_refuses_high_without_kek():
           summary["status"] == catalog.RUN_STATUS_SUCCESS and summary["written_normal"] == 1,
           summary["status"])
 
+    # The refusal's words match what happened (#11613): a real run points at
+    # its ledger row; a dry run, which writes none, must not claim one.
+    s3, bronze, staging = fresh_buckets()
+    store = fresh_store()
+    with tempfile.TemporaryDirectory() as spool_dir:
+        stage_upload(s3, staging, "upload-high", PHOTO, bucket="photos", sensitivity="high")
+        real_msg = dry_msg = None
+        try:
+            promote_mod.promote(s3=s3, staging_bucket=staging, bucket=bronze, store=store,
+                                kek=None, spool_dir=spool_dir)
+        except promote_mod.MissingKekError as exc:
+            real_msg = str(exc)
+        try:
+            promote_mod.promote(s3=s3, staging_bucket=staging, bucket=bronze,
+                                store=promote_mod._NullStore(), kek=None,
+                                spool_dir=spool_dir, dry_run=True)
+        except promote_mod.MissingKekError as exc:
+            dry_msg = str(exc)
+    check("a real refusal names its ledger row",
+          real_msg is not None and "is in the ledger as failed" in real_msg, str(real_msg))
+    check("a dry-run refusal claims no ledger row",
+          dry_msg is not None and "ledger as failed" not in dry_msg
+          and "no ledger row was recorded" in dry_msg, str(dry_msg))
+    check("the dry run added nothing to the real ledger",
+          len(rows(store, "ingest_runs")) == 1, str(len(rows(store, "ingest_runs"))))
+
 
 # --------------------------------------------------------------------------
 # 4. Idempotent re-run: skips on the catalog row, cleans up a leftover stage.
