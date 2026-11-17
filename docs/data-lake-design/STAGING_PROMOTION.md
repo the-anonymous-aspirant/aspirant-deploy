@@ -166,16 +166,47 @@ later reader does not mistake it for an oversight. Open to revision once
 
 ## Running it
 
+With only `normal` uploads staged, no key is needed:
+
 ```
 scripts/lake-skeleton.sh promote              # promote
 scripts/lake-skeleton.sh promote --dry-run     # report only
 ```
 
-Directly, outside compose: `python scripts/lake_promote_staging.py [--dry-run]`,
-with `LAKE_S3_*`, `LAKE_S3_STAGING_BUCKET`, `AWS_*`, `LAKE_CATALOG_DSN`,
-`LAKE_SPOOL_DIR` (default `/scratch-spool`) and (for a staged `high` upload)
-`LAKE_KEK_HEX` in the environment — the staging-bucket name and the spool
-directory are the only additions over `lake_ingest.py`'s own variables.
+With a `high` upload staged, the run needs the KEK. An upload is `high` if it
+went to `photos`, `finance` or `medical`, declares `high`, has no sensitivity,
+or names a bucket the runner does not know (`resolve_upload_sensitivity`
+always takes the stricter of the two). Type it in a
+subshell, the same way `docs/LAKE_SKELETON.md` gives `explorer-decrypt-up`, so
+it leaves no trace in your shell:
+
+```bash
+( read -rs LAKE_KEK_HEX; export LAKE_KEK_HEX
+  export LAKE_KEK_FINGERPRINT=<ceremony fingerprint, sha256(KEK)[:16]>
+  scripts/lake-skeleton.sh promote --dry-run   # then again without --dry-run
+)
+```
+
+`lake-skeleton.sh` never passes the key as a container environment variable.
+Before any verb but `seed` it runs `stage_real_kek`, which writes the key to a
+0600 file on tmpfs, unsets `LAKE_KEK_HEX`, mounts the file read-only into the
+container as `LAKE_KEK_FILE`, and deletes it on exit.
+
+**Set the fingerprint.** The loader checks the key against
+`LAKE_KEK_FINGERPRINT` only when it is set. Without it, a mistyped but
+well-formed 64-hex key is accepted, and the run encrypts under a key that
+nobody holds.
+
+With no key at all, the run refuses before writing anything. A real run
+records the refusal in the ledger as a failed run; a `--dry-run` records
+nothing.
+
+Directly, outside compose: `python scripts/lake_promote_staging.py [--dry-run]`.
+It needs these in the environment: `LAKE_S3_*`, `LAKE_S3_STAGING_BUCKET`,
+`AWS_*`, `LAKE_CATALOG_DSN` and `LAKE_SPOOL_DIR` (default `/scratch-spool`).
+For a staged `high` upload it also needs the key, as `LAKE_KEK_FILE` (preferred)
+or `LAKE_KEK_HEX`, plus `LAKE_KEK_FINGERPRINT`. Only the staging-bucket name and
+the spool directory are new over `lake_ingest.py`'s own variables.
 
 The runner key (`lake-skeleton-rw` on the skeleton; the prod grant is noted on
 #9601 per #9546 c59561 finding 3) needs read, write and delete on the staging
@@ -184,10 +215,11 @@ what `lake-skeleton.sh`'s `bootstrap_garage` already grants it.
 
 ## What this subtask did NOT do
 
-Promote a real upload. #9547 (the uploader) is not built, so nothing has ever
-been staged by the real path — this is tested against synthetic staged
-objects written directly to a test bucket. The first real promotion is gated
-on #9547 landing and a real multi-part upload completing.
+Promote a real upload. When this runner was written, nothing had been staged by
+the real path, so it was tested only against synthetic staged objects written
+straight to a test bucket. That has changed: the uploader (#9547) is built, and
+a real upload is staged (system_3 #11558). The first real promotion is the
+operator's keyed step, run as in "Running it" above.
 
 ## Testing
 
