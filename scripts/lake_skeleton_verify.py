@@ -574,7 +574,12 @@ else:
         else:
             target = sorted(others)[0]
             try:
-                lic.execute(f'CALL postgres_execute(\'li_cat\', \'INSERT INTO public."{target}" DEFAULT VALUES\')')
+                # Inside a transaction that is always rolled back (security's
+                # N1, c72556 on #11707): even a wrong grant cannot leave a row
+                # in a real catalog table.
+                lic.execute(
+                    f'CALL postgres_execute(\'li_cat\', \'BEGIN; INSERT INTO public."{target}" DEFAULT VALUES; ROLLBACK;\')'
+                )
                 refused, ref_detail = False, f"INSERT into {target} SUCCEEDED"
             except Exception as exc:  # noqa: BLE001
                 msg = str(exc).lower()
