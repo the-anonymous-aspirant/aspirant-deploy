@@ -586,7 +586,7 @@ docker image inspect aspirant-server-gotest:1.27.3-poppler >/dev/null 2>&1 || \
   docker build -q -t aspirant-server-gotest:1.27.3-poppler ~/.local/share/aspirant-gotest
 
 # From the repo root (aspirant-server's Go module is in server/).
-# The line the aspirant-server verify runs, as recorded in its make_verify rows.
+# The line the aspirant-server verify runs (`s3 pr verify-aspirant`).
 docker run --rm -v "$PWD:/src" -w /src/server \
   -v aspirant-go-modcache:/go/pkg/mod -v aspirant-go-buildcache:/root/.cache/go-build \
   aspirant-server-gotest:1.27.3-poppler sh -c "go vet ./... && go test ./..."
