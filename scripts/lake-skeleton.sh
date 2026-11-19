@@ -6,6 +6,9 @@
 #   lake-skeleton.sh seed      generate the obviously-synthetic fixture set
 #   lake-skeleton.sh ingest M  load REAL records from source manifest M (#4271)
 #   lake-skeleton.sh promote   promote verified staged uploads into bronze (#9546-A2)
+#   lake-skeleton.sh list-staged
+#                              mirror what waits in staging into the catalog
+#                              (system_3 #11615; run every 5 minutes by cron)
 #   lake-skeleton.sh verify    run the acceptance checks (bucket + catalog)
 #   lake-skeleton.sh verify-at-rest
 #                              prove data on disk is envelope-encrypted (#4273)
@@ -66,6 +69,17 @@ CATALOG_RO_ROLE="explorer_ro"
 # keeps its own part ledger (#9547 c59028).
 STAGING_BUCKET="${LAKE_S3_STAGING_BUCKET:-lake-skeleton-staging}"
 STAGING_KEY_NAME="lake-skeleton-explorer-staging-wo"
+
+# The staging lister's key and catalog role (system_3 #11615; security c71659
+# on #11611, c71693 on #11615). An unattended job lists staging every few
+# minutes into two catalog tables, so the explorer can show what is waiting.
+# It gets a key of its own, READ on staging only: Garage has no list-only
+# grant, and the promotion runner's key could write the whole lake. Its
+# catalog role can write the two tables and nothing else; the tables are
+# created here, by the catalog owner, so that role owns neither and
+# explorer_ro's default privilege reaches both.
+LISTER_KEY_NAME="lake-skeleton-staging-lister"
+CATALOG_LISTER_ROLE="staging_lister"
 
 ENV_FILE="$ROOT/lake-skeleton.env"
 
@@ -249,6 +263,11 @@ EXPLORER_S3_SECRET_KEY=pending
 LAKE_S3_STAGING_BUCKET=$STAGING_BUCKET
 EXPLORER_S3_STAGING_ACCESS_KEY=pending
 EXPLORER_S3_STAGING_SECRET_KEY=pending
+# The staging lister's read-on-staging pair and catalog role (#11615).
+LAKE_S3_STAGING_LISTER_ACCESS_KEY=pending
+LAKE_S3_STAGING_LISTER_SECRET_KEY=pending
+LAKE_CATALOG_STAGING_LISTER_PASSWORD=pending
+LAKE_CATALOG_STAGING_LISTER_DSN=pending
 LAKE_CATALOG_RO_PASSWORD=pending
 LAKE_CATALOG_RO_DSN=pending
 EOF
@@ -324,6 +343,15 @@ bootstrap_garage() {
   # there. It already writes bronze; this adds no new reach to bronze.
   garage_cli bucket allow --read --write "$STAGING_BUCKET" --key "$KEY_NAME" >/dev/null
 
+  # The staging lister (#11615): READ on staging, nothing on bronze, no write
+  # anywhere. Re-asserted in both directions every run, as above (c71659 1).
+  if ! garage_cli key info "$LISTER_KEY_NAME" >/dev/null 2>&1; then
+    garage_cli key create "$LISTER_KEY_NAME" >/dev/null
+  fi
+  garage_cli bucket allow --read "$STAGING_BUCKET" --key "$LISTER_KEY_NAME" >/dev/null
+  garage_cli bucket deny --write "$STAGING_BUCKET" --key "$LISTER_KEY_NAME" >/dev/null 2>&1 || true
+  garage_cli bucket deny --read --write "$BUCKET" --key "$LISTER_KEY_NAME" >/dev/null 2>&1 || true
+
   local key_id secret ro_key_id ro_secret
   key_id="$(garage_cli key info "$KEY_NAME" --show-secret | awk '/Key ID:/ {print $3}')"
   secret="$(garage_cli key info "$KEY_NAME" --show-secret | awk '/Secret key:/ {print $3}')"
@@ -345,6 +373,12 @@ bootstrap_garage() {
   env_set LAKE_S3_STAGING_BUCKET "$STAGING_BUCKET"
   env_set EXPLORER_S3_STAGING_ACCESS_KEY "$st_key_id"
   env_set EXPLORER_S3_STAGING_SECRET_KEY "$st_secret"
+
+  local li_key_id li_secret
+  li_key_id="$(garage_cli key info "$LISTER_KEY_NAME" --show-secret | awk '/Key ID:/ {print $3}')"
+  li_secret="$(garage_cli key info "$LISTER_KEY_NAME" --show-secret | awk '/Secret key:/ {print $3}')"
+  env_set LAKE_S3_STAGING_LISTER_ACCESS_KEY "$li_key_id"
+  env_set LAKE_S3_STAGING_LISTER_SECRET_KEY "$li_secret"
 }
 
 # SELECT-only catalog role, for the same reason and with the same history: it
@@ -402,6 +436,73 @@ SQL
 
   env_set LAKE_CATALOG_RO_DSN \
     "postgresql://$CATALOG_RO_ROLE:$pw@lake-skeleton-catalog:5432/lake_catalog_skeleton"
+}
+
+# The staging lister's two tables and its catalog role (system_3 #11615;
+# security c71693 on #11615). Both tables are created HERE, as ducklake, the
+# catalog owner: explorer_ro's `ALTER DEFAULT PRIVILEGES` (above) reaches only
+# tables ducklake creates, and a role that created them would own them and
+# could ALTER or GRANT on them. The role gets exactly what one run needs:
+# DELETE and INSERT on staged_uploads (DELETE, not TRUNCATE, which is its own
+# grant and takes a lock that blocks the explorer's reads), and INSERT and
+# UPDATE on the one-row staged_uploads_read. Idempotent; grants re-asserted.
+# The password reaches psql on stdin, with the same no-log settings and the
+# same redaction as the explorer_ro block.
+bootstrap_staging_lister_role() {
+  local pw
+  pw="$(grep '^LAKE_CATALOG_STAGING_LISTER_PASSWORD=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)"
+  if [ -z "$pw" ] || [ "$pw" = "pending" ]; then
+    pw="$(openssl rand -hex 24)"
+    env_set LAKE_CATALOG_STAGING_LISTER_PASSWORD "$pw"
+  fi
+
+  local err rc=0
+  err="$(catalog_psql 2>&1 >/dev/null <<SQL
+SET log_min_error_statement TO panic;
+SET log_statement TO 'none';
+SET pg_stat_statements.track_utility TO off;
+CREATE TABLE IF NOT EXISTS public.staged_uploads (
+  upload_id text PRIMARY KEY,
+  bucket text NOT NULL,
+  sensitivity text NOT NULL,
+  source_filename text NOT NULL,
+  mime text NOT NULL,
+  size_bytes bigint NOT NULL,
+  upload_time timestamptz NOT NULL
+);
+CREATE TABLE IF NOT EXISTS public.staged_uploads_read (
+  id smallint PRIMARY KEY CHECK (id = 1),
+  read_at timestamptz NOT NULL,
+  interval_seconds integer NOT NULL,
+  upload_count integer NOT NULL
+);
+-- explorer_ro's default privilege covers tables ducklake creates from now on;
+-- granted outright too, so a catalog that predates the default still reads them.
+GRANT SELECT ON public.staged_uploads, public.staged_uploads_read TO $CATALOG_RO_ROLE;
+DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$CATALOG_LISTER_ROLE') THEN
+    CREATE ROLE $CATALOG_LISTER_ROLE LOGIN;
+  END IF;
+END
+\$\$;
+ALTER ROLE $CATALOG_LISTER_ROLE WITH PASSWORD '$pw';
+REVOKE ALL ON SCHEMA public FROM $CATALOG_LISTER_ROLE;
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM $CATALOG_LISTER_ROLE;
+GRANT CONNECT ON DATABASE lake_catalog_skeleton TO $CATALOG_LISTER_ROLE;
+GRANT USAGE ON SCHEMA public TO $CATALOG_LISTER_ROLE;
+GRANT SELECT, INSERT, DELETE ON public.staged_uploads TO $CATALOG_LISTER_ROLE;
+GRANT SELECT, INSERT, UPDATE ON public.staged_uploads_read TO $CATALOG_LISTER_ROLE;
+SQL
+)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "refusing: the staging lister's catalog SQL failed (psql exit $rc); its error, password redacted:" >&2
+    printf '%s\n' "${err//"$pw"/<redacted>}" >&2
+    return 1
+  fi
+
+  env_set LAKE_CATALOG_STAGING_LISTER_DSN \
+    "postgresql://$CATALOG_LISTER_ROLE:$pw@lake-skeleton-catalog:5432/lake_catalog_skeleton"
 }
 
 # The write-denial proof lives in lake_skeleton_verify.py, not here.
@@ -619,9 +720,11 @@ case "${1:-}" in
     bootstrap_garage
     wait_healthy garage
     bootstrap_catalog_role
+    bootstrap_staging_lister_role
     echo "lake skeleton up — bucket '$BUCKET' on $ROOT (credentials in $ENV_FILE)"
     echo "explorer read-only credentials issued: '$RO_KEY_NAME' + catalog role '$CATALOG_RO_ROLE'"
     echo "explorer write-only staging key issued: '$STAGING_KEY_NAME' on bucket '$STAGING_BUCKET'"
+    echo "staging lister issued: '$LISTER_KEY_NAME' (read on staging) + catalog role '$CATALOG_LISTER_ROLE'"
     echo "their read-only-ness is PROVEN by 'verify', not asserted here — run it next"
     echo "explorer credentials in $DEPLOY_ENV_FILE:"
     explorer_env_check ||
@@ -686,6 +789,14 @@ case "${1:-}" in
     # staging bucket itself rather than from a host-mounted source tree.
     shift
     compose --profile client run --rm duckdb /work/promote.py "$@"
+    ;;
+
+  list-staged)
+    # The staging lister (system_3 #11615): what waits in staging, mirrored
+    # into the catalog's staged_uploads. Its own service, holding only its own
+    # key and catalog role; cron runs it every 5 minutes. Its output carries
+    # counts and upload ids only.
+    compose --profile client run --rm staging-lister /work/list_staged.py
     ;;
 
   verify)
