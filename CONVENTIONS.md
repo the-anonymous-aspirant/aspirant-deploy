@@ -586,13 +586,15 @@ docker image inspect aspirant-server-gotest:1.27.3-poppler >/dev/null 2>&1 || \
   docker build -q -t aspirant-server-gotest:1.27.3-poppler ~/.local/share/aspirant-gotest
 
 # From the repo root (aspirant-server's Go module is in server/).
-docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e GOCACHE=/tmp/gocache \
-  -v "$PWD:/src" -w /src/server -v aspirant-go-modcache:/go/pkg/mod \
+# The line the aspirant-server verify runs (`s3 pr verify-aspirant`).
+docker run --rm -v "$PWD:/src" -w /src/server \
+  -v aspirant-go-modcache:/go/pkg/mod -v aspirant-go-buildcache:/root/.cache/go-build \
   aspirant-server-gotest:1.27.3-poppler sh -c "go vet ./... && go test ./..."
 ```
 
-- **One shared cache volume: `aspirant-go-modcache`** (the module download cache). Never invent another volume name for a Go cache. On 2026-11-13 the root disk paged at 85.1% with 11 near-identical Go caches under 11 invented names, 2.53 GB (system_3 #10774). The daily `docker_prune_sweep` now removes any dangling Go-cache volume other than `aspirant-go-modcache` once it is 7 days old (system_3 #10812).
-- **No build-cache volume.** `GOCACHE=/tmp/gocache` keeps the build cache inside the throwaway container. A new named volume is created root-owned, and the non-root `--user` cannot write to it, so a `-v <name>:/gocache` mount fails with `permission denied` before a single test runs.
+- **Two shared cache volumes, and only these two:** `aspirant-go-modcache` (the module download cache, `/go/pkg/mod`) and `aspirant-go-buildcache` (the build cache, `/root/.cache/go-build`). They are the volumes every aspirant-server verify mounts, so a run that uses them starts warm. Never invent another volume name for a Go cache. On 2026-11-13 the root disk paged at 85.1% with 11 near-identical Go caches under 11 invented names, 2.53 GB (system_3 #10774). The daily `docker_prune_sweep` removes any other dangling Go-cache volume once it is 7 days old (system_3 #10812); system_3 #11589 adds `aspirant-go-buildcache` to the volumes it keeps.
+- **The container runs as its default user (root)**, which is what lets it write to the two named volumes: a new named volume is created root-owned, so a run with a non-root `--user` cannot write to it and fails with `permission denied`.
+- **No host folder as a Go cache.** Do not bind-mount a directory such as `~/.cache/<name>` for `/go/pkg/mod` or the build cache. Four such folders, about 1 GB, were left in `~/.cache` with nothing to reap them (system_3 #11588).
 - **The image** is built from two lines kept untracked at `~/.local/share/aspirant-gotest/Dockerfile`:
 
   ```dockerfile
