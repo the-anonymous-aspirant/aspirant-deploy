@@ -191,6 +191,55 @@ the scratch path with everything else, so `destroy` takes them too — a fresh
 (#4271), so these are live credentials. Never pass one on a command line or print
 one, and rotate any that leaks.
 
+### The staging lister: what waits in staging, in the catalog (system_3 #11615)
+
+An upload waits in staging until an attended promotion run moves it into
+bronze, and until then no explorer page could show it: the explorer reads the
+catalog, and the catalog knew only promoted files. `lake-skeleton.sh
+list-staged` mirrors staging into two catalog tables the explorer's read-only
+role can read:
+
+- `staged_uploads`: one row per staged upload, from its `manifest.json` only:
+  `upload_id`, `bucket`, `sensitivity`, `source_filename`, `mime`,
+  `size_bytes`, `upload_time`.
+- `staged_uploads_read`: one row, `read_at`, `interval_seconds` and
+  `upload_count`, so the page can say when staging was last read and show the
+  list as out of date when a run has failed.
+
+Security's conditions (c71659 on #11611, c71693 on #11615), and how they are
+met:
+
+- **A key of its own,** `lake-skeleton-staging-lister`: read on staging only.
+  `up` re-asserts `deny --write` on staging and `deny --read --write` on bronze
+  every run. It never uses the promotion runner's key, which can write the
+  whole lake.
+- **Listings and manifests only, never a payload object.** A staged `high`
+  upload is plaintext.
+- **A catalog role of its own,** `staging_lister`: `SELECT, INSERT, DELETE` on
+  `staged_uploads`, `SELECT, INSERT, UPDATE` on `staged_uploads_read`, nothing
+  else. `up` creates both tables as `ducklake`, the catalog owner, so the role
+  owns neither and `explorer_ro` can read both.
+- **One transaction per run, after a listing that succeeded:** every row
+  deleted (`DELETE`, not `TRUNCATE`), the new rows inserted, the stamp
+  updated. A failed run writes nothing, so `read_at` ages. An upload promoted
+  or removed by hand drops out at the next run. A manifest that cannot be read
+  is left out, by id.
+- **Logs carry counts and upload ids, never a file name.** Errors are logged by
+  type only, since an error's text can quote an object key.
+- **Fail closed:** with its key or its role missing, it writes nothing, says so
+  in one line and exits 2.
+
+It runs in its own compose service, `staging-lister`, which holds only those
+two credentials. Cron runs it every 5 minutes (`INTERVAL_SECONDS = 300` in
+`scripts/lake_list_staged.py`; the line lives in system_3's
+`cron/crontab.manifest`). `verify` proves the bounds by attempt:
+
+- the key can list staging, and is refused a write there and any read of
+  bronze;
+- the role is refused an insert into another catalog table;
+- `explorer_ro` can read both tables;
+- the role owns neither.
+
 ### Rotating the explorer's credentials (system_3 #11381)
 
 When a leak exposes the explorer's catalog password or its read-only key, the

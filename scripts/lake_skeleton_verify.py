@@ -509,6 +509,107 @@ else:
         ok, detail = denied(lambda: ro.put_object(Bucket=STAGING_BUCKET, Key=".ro-probe", Body=b"x"))
         check("Explorer read-only key CANNOT write staging", ok, detail)
 
+# --- 8. the staging lister's key and role are bounded (system_3 #11615) -----
+#
+# Security's conditions (c71659 on #11611, c71693 on #11615), each proven by an
+# attempt: the key can list staging and is refused a write there and any read
+# of bronze; the role is refused an insert into any other catalog table; the
+# explorer's role can read both new tables; and the lister's role owns neither,
+# so it cannot ALTER them or GRANT on them.
+LISTER_KEY = os.environ.get("LAKE_S3_STAGING_LISTER_ACCESS_KEY", "")
+LISTER_SECRET = os.environ.get("LAKE_S3_STAGING_LISTER_SECRET_KEY", "")
+LISTER_DSN = os.environ.get("LAKE_CATALOG_STAGING_LISTER_DSN", "")
+LISTER_TABLES = ("staged_uploads", "staged_uploads_read")
+
+if not (STAGING_BUCKET and LISTER_KEY and LISTER_SECRET and LISTER_DSN):
+    check(
+        "Staging lister is provisioned",
+        False,
+        "LAKE_S3_STAGING_LISTER_* / LAKE_CATALOG_STAGING_LISTER_DSN absent — run 'lake-skeleton.sh up'",
+    )
+else:
+    import boto3 as _boto3
+
+    li = _boto3.client(
+        "s3",
+        endpoint_url=f"http://{os.environ['LAKE_S3_ENDPOINT']}",
+        aws_access_key_id=LISTER_KEY,
+        aws_secret_access_key=LISTER_SECRET,
+        region_name=os.environ.get("LAKE_S3_REGION", "garage"),
+    )
+    try:
+        li.list_objects_v2(Bucket=STAGING_BUCKET, Prefix="bronze/staging/", Delimiter="/", MaxKeys=1)
+        listed, list_detail = True, "list_objects_v2 on staging succeeded"
+    except Exception as exc:  # noqa: BLE001
+        listed, list_detail = False, f"{type(exc).__name__}: {exc}"
+    check("Staging lister key can LIST staging", listed, list_detail)
+    ok, detail = denied(lambda: li.put_object(Bucket=STAGING_BUCKET, Key=".lister-probe", Body=b"x"))
+    check("Staging lister key CANNOT write staging", ok, detail)
+    ok, detail = denied(lambda: li.list_objects_v2(Bucket=BUCKET, MaxKeys=1))
+    check("Staging lister key CANNOT read bronze (list)", ok, detail)
+    ok, detail = denied(lambda: li.get_object(Bucket=BUCKET, Key="bronze/.lister-probe"))
+    check("Staging lister key CANNOT read bronze (get)", ok, detail)
+
+    lic = duckdb.connect()
+    lic.execute("LOAD postgres")
+    try:
+        lic.execute(f"ATTACH '{LISTER_DSN}' AS li_cat (TYPE postgres)")
+        lic.execute("SELECT count(*) FROM li_cat.public.staged_uploads").fetchone()
+        li_ok, li_detail = True, "SELECT on staged_uploads succeeded"
+    except Exception as exc:  # noqa: BLE001 - the DSN is never printed; the type is enough
+        li_ok, li_detail = False, f"{type(exc).__name__}"
+    check("Staging lister role can reach staged_uploads", li_ok, li_detail)
+
+    if li_ok:
+        # Another catalog table: any public table but the two of its own.
+        others = [
+            r[0] for r in lic.execute(
+                "SELECT table_name FROM li_cat.information_schema.tables "
+                "WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
+            ).fetchall()
+            if r[0] not in LISTER_TABLES
+        ]
+        if not others:
+            check("Staging lister role CANNOT insert into another catalog table", False, "no other table to probe")
+        else:
+            target = sorted(others)[0]
+            try:
+                # Inside a transaction that is always rolled back (security's
+                # N1, c72556 on #11707): even a wrong grant cannot leave a row
+                # in a real catalog table.
+                lic.execute(
+                    f'CALL postgres_execute(\'li_cat\', \'BEGIN; INSERT INTO public."{target}" DEFAULT VALUES; ROLLBACK;\')'
+                )
+                refused, ref_detail = False, f"INSERT into {target} SUCCEEDED"
+            except Exception as exc:  # noqa: BLE001
+                msg = str(exc).lower()
+                refused = "permission denied" in msg
+                ref_detail = f"{target}: " + ("permission denied" if refused else f"not a permission refusal ({type(exc).__name__})")
+            check("Staging lister role CANNOT insert into another catalog table", refused, ref_detail)
+
+    if RO_DSN:
+        roc2 = duckdb.connect()
+        roc2.execute("LOAD postgres")
+        roc2.execute(f"ATTACH '{RO_DSN}' AS ro_cat2 (TYPE postgres)")
+        for table in LISTER_TABLES:
+            try:
+                roc2.execute(f"SELECT count(*) FROM ro_cat2.public.{table}").fetchone()
+                ok, detail = True, "SELECT succeeded"
+            except Exception as exc:  # noqa: BLE001
+                ok, detail = False, f"{type(exc).__name__}"
+            check(f"Explorer catalog role can SELECT {table}", ok, detail)
+        owners = dict(roc2.execute(
+            "SELECT tablename, tableowner FROM ro_cat2.pg_catalog.pg_tables "
+            "WHERE schemaname = 'public' AND tablename IN ('staged_uploads', 'staged_uploads_read')"
+        ).fetchall())
+        for table in LISTER_TABLES:
+            owner = owners.get(table)
+            check(
+                f"Staging lister role does NOT own {table}",
+                owner is not None and owner != "staging_lister",
+                f"owner: {owner}" if owner else "table missing",
+            )
+
 print()
 if failures:
     print(f"FAILED: {len(failures)} check(s) — {', '.join(failures)}")
