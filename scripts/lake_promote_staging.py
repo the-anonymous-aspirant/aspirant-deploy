@@ -470,12 +470,18 @@ def promote(
     # --- pre-flight: refuse the whole run before touching a single object ---
     if kek is None and manifests_need_kek(manifests):
         finish(catalog.RUN_STATUS_FAILED, catalog.REASON_NO_KEK)
+        # finish() writes no ledger row on a dry run, so only a real run may
+        # point at one.
+        outcome = (
+            "This was a dry run: nothing was written, and no ledger row was recorded."
+            if dry_run
+            else f"No object was written; run {run_id} is in the ledger as failed."
+        )
         raise MissingKekError(
             "refusing to promote: at least one staged upload declares "
             "sensitivity=high (or defaults to it under the fail-closed intake "
             f"rule) and no KEK is loaded. Set {ENV_KEK_HEX} to the off-cell "
-            f"grouped hex (never on disk). Nothing was written; run {run_id} "
-            "is in the ledger as failed."
+            f"grouped hex (never on disk). {outcome}"
         )
 
     for upload_id, manifest in manifests.items():
