@@ -209,7 +209,11 @@ role can read:
   manifest, or one that does not parse): the page counts them as waiting
   rather than showing nothing (design c75275 on system_3 #12113). The run's
   log names their upload ids only. `up` adds the column to a catalog made
-  before it.
+  before it, nullable with no default, so a row an older lister wrote reads
+  `NULL`, "not recorded". **Deploy order:** run `up` on the cell before
+  deploying a lister that writes the column. The other order makes each
+  run's write fail, so `read_at` ages and the page says "out of date" until
+  `up` runs (security c75284 on system_3 #12113).
 
 Security's conditions (c71659 on #11611, c71693 on #11615), and how they are
 met:

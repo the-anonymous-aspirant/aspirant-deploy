@@ -94,7 +94,8 @@ class FailingList:
         raise RuntimeError("listing unavailable: bronze/staging/up-1111/SYNTHETIC-name.pdf")
 
 
-def fresh_catalog():
+def fresh_catalog(with_skipped=True):
+    """The catalog as `up` leaves it; `with_skipped=False` is one from before #12113."""
     con = duckdb.connect()
     con.execute("ATTACH ':memory:' AS cat")
     con.execute("CREATE SCHEMA cat.public")
@@ -105,9 +106,11 @@ def fresh_catalog():
     )
     con.execute(
         "CREATE TABLE cat.public.staged_uploads_read (id SMALLINT PRIMARY KEY CHECK (id = 1), "
-        "read_at TIMESTAMPTZ NOT NULL, interval_seconds INTEGER NOT NULL, upload_count INTEGER NOT NULL, "
-        "skipped_count INTEGER NOT NULL DEFAULT 0)"
+        "read_at TIMESTAMPTZ NOT NULL, interval_seconds INTEGER NOT NULL, upload_count INTEGER NOT NULL)"
     )
+    if with_skipped:
+        # The same statement `up` runs (lake-skeleton.sh): nullable, no default.
+        con.execute("ALTER TABLE cat.public.staged_uploads_read ADD COLUMN IF NOT EXISTS skipped_count INTEGER")
     return con
 
 
@@ -225,6 +228,30 @@ def main():
         code = job.main(env=env)
     check("a listing failure exits 1", code == 1, str(code))
     check("a listing failure logs the error's type, not its text", "listing failed (" in err.getvalue() and "SYNTHETIC" not in err.getvalue(), err.getvalue())
+
+    # A stamp an older lister wrote, before `up` added the column, reads NULL
+    # ("not recorded"), never 0 (security c75284, condition 2).
+    old = fresh_catalog(with_skipped=False)
+    old.execute("INSERT INTO cat.public.staged_uploads_read (id, read_at, interval_seconds, upload_count) VALUES (1, ?, 300, 0)", [t1])
+    old.execute("ALTER TABLE cat.public.staged_uploads_read ADD COLUMN IF NOT EXISTS skipped_count INTEGER")
+    check("an older lister's stamp reads NULL once the column is added, not 0", skipped_count(old) is None, str(skipped_count(old)))
+
+    # The wrong deploy order (c75284, condition 4): a catalog without the column
+    # refuses the write. The run raises, and the rows and read_at stay as they
+    # were, so the page shows the list as out of date instead of a fresh stamp.
+    old = fresh_catalog(with_skipped=False)
+    prior = datetime(2026, 11, 19, 5, 0, tzinfo=timezone.utc)
+    old.execute("INSERT INTO cat.public.staged_uploads VALUES ('up-0000', 'photos', 'normal', 'SYNTHETIC-old.jpg', 'image/jpeg', 1, ?)", [prior])
+    old.execute("INSERT INTO cat.public.staged_uploads_read VALUES (1, ?, 300, 1)", [prior])
+    stage(raw_client, bucket, "up-6666", manifest("up-6666", "y.pdf"))
+    before_rows, before_stamp = rows(old), stamp(old)
+    refused = False
+    try:
+        job.run(s3, bucket, old, "cat.public", now=t5 + timedelta(minutes=5))
+    except Exception:
+        refused = True
+    check("a catalog without skipped_count refuses the write", refused)
+    check("and keeps its rows and read_at as they were", rows(old) == before_rows and stamp(old) == before_stamp, str(stamp(old)))
 
     # No output of any run above carries a file name.
     logged = out.getvalue() + err.getvalue()

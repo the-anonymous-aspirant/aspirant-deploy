@@ -483,8 +483,12 @@ CREATE TABLE IF NOT EXISTS public.staged_uploads_read (
 );
 -- Uploads the lister found but could not read (design c75275 on #12113). A
 -- count about the job, naming no file. Added, not in the CREATE, so a catalog
--- made before it gains it; DEFAULT 0 until the first run that records it.
-ALTER TABLE public.staged_uploads_read ADD COLUMN IF NOT EXISTS skipped_count integer NOT NULL DEFAULT 0;
+-- made before it gains it. Nullable with no default (security c75284,
+-- condition 2): a row an older lister wrote reads NULL, "not recorded"; a
+-- DEFAULT 0 would claim nothing was skipped. Run this before deploying a
+-- lister that writes the column: the other order makes each run's write fail
+-- and leaves read_at to age, which is safe but shows "out of date".
+ALTER TABLE public.staged_uploads_read ADD COLUMN IF NOT EXISTS skipped_count integer;
 -- explorer_ro's default privilege covers tables ducklake creates from now on;
 -- granted outright too, so a catalog that predates the default still reads them.
 GRANT SELECT ON public.staged_uploads, public.staged_uploads_read TO $CATALOG_RO_ROLE;

@@ -101,6 +101,16 @@ if printf '%s\n' "$fn" | grep -qE 'TRUNCATE|GRANT ALL|ALTER TABLE .* OWNER'; the
 else
   pass "the role gets no TRUNCATE, no ALL and no ownership"
 fi
+if printf '%s\n' "$fn" | grep -qE '^ALTER TABLE public.staged_uploads_read ADD COLUMN IF NOT EXISTS skipped_count integer;$'; then
+  pass "skipped_count is added by the owner, nullable, with no default (c75284)"
+else
+  fail "skipped_count is not added as a nullable integer with no default"
+fi
+if printf '%s\n' "$fn" | grep -E 'skipped_count' | grep -qE 'NOT NULL|DEFAULT'; then
+  fail "skipped_count carries NOT NULL or a DEFAULT, which would claim nothing was skipped"
+else
+  pass "skipped_count carries no NOT NULL and no DEFAULT"
+fi
 if grep -qE '^  list-staged\)' "$SKEL" && grep -qE 'run --rm staging-lister /work/list_staged.py' "$SKEL"; then
   pass "lake-skeleton.sh list-staged runs the job in its own service"
 else
