@@ -30,7 +30,12 @@ mkdir -p "$FAKE_BIN" "$DEPLOY_DIR"
 
 cat > "$FAKE_BIN/docker" <<'SHIM'
 #!/usr/bin/env bash
+# DOCKER_FAKE_RCS="1 0" gives each call in turn its own exit code.
+n=$(( $(cat "$DOCKER_FAKE_LOG.n" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$DOCKER_FAKE_LOG.n"
 {
+  echo "CALL: $n"
+  echo "STAGED: $(find "$XDG_RUNTIME_DIR" -name 'lake_kek.*' | wc -l)"
   echo "ARGV: $*"
   echo "CWD: $PWD"
   if [[ -n "${LAKE_KEK_HEX:-}" ]]; then echo "HEX: SET"; else echo "HEX: unset"; fi
@@ -43,6 +48,10 @@ cat > "$FAKE_BIN/docker" <<'SHIM'
     echo "FILE_MODE: missing"
   fi
 } >> "$DOCKER_FAKE_LOG"
+if [[ -n "${DOCKER_FAKE_RCS:-}" ]]; then
+  rc="$(echo "$DOCKER_FAKE_RCS" | cut -d' ' -f"$n")"
+  exit "${rc:-0}"
+fi
 exit "${DOCKER_FAKE_RC:-0}"
 SHIM
 chmod +x "$FAKE_BIN/docker"
@@ -69,6 +78,7 @@ run_verb() {
   local script="$1"
   shift
   : > "$LOG"
+  rm -f "$LOG.n"
   RC=0
   env -u LAKE_KEK_HEX -u LAKE_KEK_FINGERPRINT -u LAKE_KEK_FILE_HOST \
     LAKE_SKELETON_ROOT="$TMPDIR_TEST/root" \
@@ -97,6 +107,8 @@ check "no fingerprint: the staged file is deleted on the refusal" "$([ "$(staged
 run_verb ./scripts/lake-skeleton.sh LAKE_KEK_HEX="$HEX" LAKE_KEK_FINGERPRINT="$FPR"
 check "with key and fingerprint: exit 0" "$([ "$RC" = 0 ] && echo yes || echo no)"
 check "one docker call" "$([ "$(grep -c '^ARGV:' "$LOG")" = 1 ] && echo yes || echo no)"
+check "the closing message says a restart leaves it stopped, and how to bring it back" \
+  "$(has "$OUT" "A restart (a crash, a daemon restart, a reboot) leaves it stopped")"
 check "it recreates explorer-api alone and waits for it to be healthy" \
   "$(has "$LOG" "ARGV: compose --profile explorer up -d --wait --wait-timeout 180 --force-recreate --no-deps explorer-api")"
 check "it runs from the deploy checkout" "$(has "$LOG" "CWD: $DEPLOY_DIR")"
@@ -114,6 +126,42 @@ run_verb ./scripts/lake-skeleton.sh LAKE_KEK_HEX="$HEX" LAKE_KEK_FINGERPRINT="$F
 check "unhealthy start: exit 1" "$([ "$RC" = 1 ] && echo yes || echo no)"
 check "unhealthy start: the staged file is deleted" "$([ "$(staged_files)" = 0 ] && echo yes || echo no)"
 check "unhealthy start: names the decrypt-off way back" "$(has "$OUT" "up -d --force-recreate explorer-api")"
+
+# --- a refused key: the verb recovers with decrypt off (#12202, c75726) -----
+
+# call_block <n>: the fake docker's record of its n-th call.
+call_block() { awk -v n="$1" '/^CALL: /{c=($2==n)} c' "$LOG"; }
+# refused_key_checks <script> <prefix>: run the refused-key path; sets OK_* flags.
+refused_key_checks() {
+  run_verb "$1" LAKE_KEK_HEX="$HEX" LAKE_KEK_FINGERPRINT="$FPR" DOCKER_FAKE_RCS="1 0"
+  second="$(call_block 2)"
+  OK_ENV="$(printf '%s\n' "$second" | grep -qx 'FILE_HOST: ' && printf '%s\n' "$second" | grep -qx 'FINGERPRINT: ' && echo yes || echo no)"
+}
+refused_key_checks ./scripts/lake-skeleton.sh
+check "refused key: still exits 1, since decrypt-on failed" "$([ "$RC" = 1 ] && echo yes || echo no)"
+check "refused key: two docker calls, the start and the recovery" "$([ "$(grep -c '^ARGV:' "$LOG")" = 2 ] && echo yes || echo no)"
+check "refused key: the recovery sees neither LAKE_KEK_FILE_HOST nor LAKE_KEK_FINGERPRINT" "$OK_ENV"
+check "refused key: the key file is deleted before the recovery runs" \
+  "$(printf '%s\n' "$second" | grep -qx 'STAGED: 0' && echo yes || echo no)"
+check "refused key: the recovery recreates explorer-api alone and waits" \
+  "$(printf '%s\n' "$second" | grep -qxF 'ARGV: compose --profile explorer up -d --wait --wait-timeout 180 --force-recreate --no-deps explorer-api' && echo yes || echo no)"
+check "refused key: the recovery runs from the deploy checkout" \
+  "$(printf '%s\n' "$second" | grep -qxF "CWD: $DEPLOY_DIR" && echo yes || echo no)"
+check "refused key: one line says it is back up with decrypt off" "$(has "$OUT" "explorer-api is back up with decrypt off.")"
+check "refused key: no key text in the output" "$(grep -qF "$HEX" "$OUT" && echo no || echo yes)"
+check "refused key: the staged file is deleted after the verb" "$([ "$(staged_files)" = 0 ] && echo yes || echo no)"
+
+# Negative control (c75726, condition 2): a recovery written without the
+# `env -u` inherits the refused key, and the env check above must catch it.
+NO_UNSET="$TMPDIR_TEST/lake-skeleton-no-unset.sh"
+sed 's/env -u LAKE_KEK_FILE_HOST -u LAKE_KEK_FINGERPRINT //' ./scripts/lake-skeleton.sh > "$NO_UNSET"
+if diff -q ./scripts/lake-skeleton.sh "$NO_UNSET" >/dev/null; then
+  check "negative control: the env -u cut matched something" no
+else
+  refused_key_checks "$NO_UNSET"
+  check "negative control: a recovery without env -u is caught (it sees the key's variables)" \
+    "$([ "$OK_ENV" = no ] && echo yes || echo no)"
+fi
 
 # --- negative control: a copy whose verb skips the staging must fail above ---
 
