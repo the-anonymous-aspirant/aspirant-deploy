@@ -202,9 +202,14 @@ role can read:
 - `staged_uploads`: one row per staged upload, from its `manifest.json` only:
   `upload_id`, `bucket`, `sensitivity`, `source_filename`, `mime`,
   `size_bytes`, `upload_time`.
-- `staged_uploads_read`: one row, `read_at`, `interval_seconds` and
-  `upload_count`, so the page can say when staging was last read and show the
-  list as out of date when a run has failed.
+- `staged_uploads_read`: one row, `read_at`, `interval_seconds`,
+  `upload_count` and `skipped_count`, so the page can say when staging was
+  last read and show the list as out of date when a run has failed.
+  `skipped_count` is how many uploads the run found but could not read (no
+  manifest, or one that does not parse): the page counts them as waiting
+  rather than showing nothing (design c75275 on system_3 #12113). The run's
+  log names their upload ids only. `up` adds the column to a catalog made
+  before it.
 
 Security's conditions (c71659 on #11611, c71693 on #11615), and how they are
 met:

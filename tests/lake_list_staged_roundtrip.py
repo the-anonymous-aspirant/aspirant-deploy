@@ -105,7 +105,8 @@ def fresh_catalog():
     )
     con.execute(
         "CREATE TABLE cat.public.staged_uploads_read (id SMALLINT PRIMARY KEY CHECK (id = 1), "
-        "read_at TIMESTAMPTZ NOT NULL, interval_seconds INTEGER NOT NULL, upload_count INTEGER NOT NULL)"
+        "read_at TIMESTAMPTZ NOT NULL, interval_seconds INTEGER NOT NULL, upload_count INTEGER NOT NULL, "
+        "skipped_count INTEGER NOT NULL DEFAULT 0)"
     )
     return con
 
@@ -124,6 +125,10 @@ def rows(con):
 
 def stamp(con):
     return con.execute("SELECT read_at, interval_seconds, upload_count FROM cat.public.staged_uploads_read WHERE id = 1").fetchone()
+
+
+def skipped_count(con):
+    return con.execute("SELECT skipped_count FROM cat.public.staged_uploads_read WHERE id = 1").fetchone()[0]
 
 
 @mock_aws
@@ -172,6 +177,7 @@ def main():
     summary = job.run(s3, bucket, con, "cat.public", now=t3)
     check("unreadable and malformed manifests are left out", [r[0] for r in rows(con)] == ["up-1111"], str(rows(con)))
     check("their ids are reported", summary["skipped_ids"] == ["up-3333", "up-4444"], str(summary))
+    check("the stamp records how many were left out (c75275)", skipped_count(con) == 2, str(skipped_count(con)))
     raw_client.delete_object(Bucket=bucket, Key="bronze/staging/up-3333/manifest.json")
     raw_client.delete_object(Bucket=bucket, Key="bronze/staging/up-3333/object")
     raw_client.delete_object(Bucket=bucket, Key="bronze/staging/up-4444/manifest.json")
@@ -194,6 +200,7 @@ def main():
     job.run(s3, bucket, con, "cat.public", now=t5)
     check("an empty staging leaves no rows", rows(con) == [], str(rows(con)))
     check("an empty staging still stamps read_at, with count 0", stamp(con)[0] == t5 and stamp(con)[2] == 0, str(stamp(con)))
+    check("and a run that left none out records 0 skipped", skipped_count(con) == 0, str(skipped_count(con)))
 
     # A file name longer than 255 characters is kept to 255.
     long_name = "SYNTHETIC-" + "x" * 300 + ".pdf"
