@@ -891,7 +891,20 @@ services:
   explorer-api:
     logging: *default-logging
     image: ghcr.io/the-anonymous-aspirant/aspirant-explorer:latest
-    restart: unless-stopped
+    # `unless-stopped`, except the decrypt-on container (system_3 #12203,
+    # security c75726 on #12202): `explorer-decrypt-up` sets
+    # EXPLORER_API_RESTART=no on its one recreate. That container's key file
+    # is deleted once it is healthy, so dockerd could not restart it anyway
+    # (the bind source is gone). It stays exited instead, and a host-side
+    # unit recreates it with decrypt off. Every other recreate (a plain `up`,
+    # an auto-pull, the refused-key recovery) leaves the variable unset.
+    restart: ${EXPLORER_API_RESTART:-unless-stopped}
+    # What the host-side unit keys on, with the restart policy: `on` only
+    # when a key file is mounted, derived from the same variable as the
+    # mount below, so the label cannot say decrypt-on for a container that
+    # has no key. Empty on every plain recreate.
+    labels:
+      aspirant.explorer.decrypt: ${LAKE_KEK_FILE_HOST:+on}
     # Opt-in: `docker compose --profile explorer up -d`. Until a host is
     # deliberately running the explorer, these two services are inert.
     profiles: ["explorer"]

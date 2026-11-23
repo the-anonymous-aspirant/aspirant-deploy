@@ -41,6 +41,13 @@ echo "$n" > "$DOCKER_FAKE_LOG.n"
   if [[ -n "${LAKE_KEK_HEX:-}" ]]; then echo "HEX: SET"; else echo "HEX: unset"; fi
   echo "FILE_HOST: ${LAKE_KEK_FILE_HOST:-}"
   echo "FINGERPRINT: ${LAKE_KEK_FINGERPRINT:-}"
+  echo "RESTART: ${EXPLORER_API_RESTART:-}"
+  # A new open of the lock file conflicts with the verb's flock, if it holds it.
+  if flock -n "$XDG_RUNTIME_DIR/explorer-api-decrypt.lock" true; then
+    echo "LOCK: free"
+  else
+    echo "LOCK: held"
+  fi
   if [[ -n "${LAKE_KEK_FILE_HOST:-}" && -f "$LAKE_KEK_FILE_HOST" ]]; then
     echo "FILE_MODE: $(stat -c %a "$LAKE_KEK_FILE_HOST")"
     echo "FILE_BODY: $(cat "$LAKE_KEK_FILE_HOST")"
@@ -80,7 +87,7 @@ run_verb() {
   : > "$LOG"
   rm -f "$LOG.n"
   RC=0
-  env -u LAKE_KEK_HEX -u LAKE_KEK_FINGERPRINT -u LAKE_KEK_FILE_HOST \
+  env -u LAKE_KEK_HEX -u LAKE_KEK_FINGERPRINT -u LAKE_KEK_FILE_HOST -u EXPLORER_API_RESTART \
     LAKE_SKELETON_ROOT="$TMPDIR_TEST/root" \
     XDG_RUNTIME_DIR="$RUNTIME_DIR" \
     ASPIRANT_DEPLOY_DIR="$DEPLOY_DIR" \
@@ -88,7 +95,8 @@ run_verb() {
     PATH="$FAKE_BIN:$PATH" \
     "$@" bash "$script" explorer-decrypt-up >"$OUT" 2>&1 || RC=$?
 }
-staged_files() { find "$RUNTIME_DIR" -mindepth 1 | wc -l; }
+# Key files only: the verb's lock file (#12203) sits in the same runtime dir.
+staged_files() { find "$RUNTIME_DIR" -mindepth 1 -name 'lake_kek.*' | wc -l; }
 
 # --- refusals: no key, or a key without its fingerprint ----------------------
 
@@ -119,6 +127,13 @@ check "the staged file is on the runtime tmpfs" "$(has "$LOG" "FILE_HOST: $RUNTI
 check "the staged file is 0600 while compose runs" "$(has "$LOG" "FILE_MODE: 600")"
 check "the staged file holds the key while compose runs" "$(has "$LOG" "FILE_BODY: $HEX")"
 check "the staged file is deleted after the verb" "$([ "$(staged_files)" = 0 ] && echo yes || echo no)"
+# #12203: the decrypt-on container is created with restart "no", under the lock.
+check "the decrypt-on recreate sees EXPLORER_API_RESTART=no" "$(has "$LOG" "RESTART: no")"
+check "the decrypt-on recreate runs under the lock" "$(has "$LOG" "LOCK: held")"
+check "EXPLORER_API_RESTART is set on that call only, not left in the verb's environment" \
+  "$(grep -q 'EXPLORER_API_RESTART=no docker compose' ./scripts/lake-skeleton.sh \
+     && ! grep -qE 'export +EXPLORER_API_RESTART|^ *EXPLORER_API_RESTART=' ./scripts/lake-skeleton.sh \
+     && echo yes || echo no)"
 
 # --- a start that never becomes healthy: non-zero, file deleted, way back ----
 
@@ -131,11 +146,16 @@ check "unhealthy start: names the decrypt-off way back" "$(has "$OUT" "up -d --f
 
 # call_block <n>: the fake docker's record of its n-th call.
 call_block() { awk -v n="$1" '/^CALL: /{c=($2==n)} c' "$LOG"; }
-# refused_key_checks <script> <prefix>: run the refused-key path; sets OK_* flags.
+# refused_key_checks <script> [VAR=value ...]: run the refused-key path; sets
+# OK_ENV (the recovery saw neither key variable) and OK_RESTART (it saw no
+# EXPLORER_API_RESTART, so the decrypt-off container is `unless-stopped`).
 refused_key_checks() {
-  run_verb "$1" LAKE_KEK_HEX="$HEX" LAKE_KEK_FINGERPRINT="$FPR" DOCKER_FAKE_RCS="1 0"
+  local script="$1"
+  shift
+  run_verb "$script" LAKE_KEK_HEX="$HEX" LAKE_KEK_FINGERPRINT="$FPR" DOCKER_FAKE_RCS="1 0" "$@"
   second="$(call_block 2)"
   OK_ENV="$(printf '%s\n' "$second" | grep -qx 'FILE_HOST: ' && printf '%s\n' "$second" | grep -qx 'FINGERPRINT: ' && echo yes || echo no)"
+  OK_RESTART="$(printf '%s\n' "$second" | grep -qx 'RESTART: ' && echo yes || echo no)"
 }
 refused_key_checks ./scripts/lake-skeleton.sh
 check "refused key: still exits 1, since decrypt-on failed" "$([ "$RC" = 1 ] && echo yes || echo no)"
@@ -150,17 +170,79 @@ check "refused key: the recovery runs from the deploy checkout" \
 check "refused key: one line says it is back up with decrypt off" "$(has "$OUT" "explorer-api is back up with decrypt off.")"
 check "refused key: no key text in the output" "$(grep -qF "$HEX" "$OUT" && echo no || echo yes)"
 check "refused key: the staged file is deleted after the verb" "$([ "$(staged_files)" = 0 ] && echo yes || echo no)"
+check "refused key: the decrypt-on start had EXPLORER_API_RESTART=no" \
+  "$(call_block 1 | grep -qx 'RESTART: no' && echo yes || echo no)"
+check "refused key: the recovery has no EXPLORER_API_RESTART, so it is unless-stopped again" "$OK_RESTART"
+check "refused key: the recovery runs under the verb's lock" \
+  "$(printf '%s\n' "$second" | grep -qx 'LOCK: held' && echo yes || echo no)"
+
+# A caller's shell that exports EXPLORER_API_RESTART=no must not reach the
+# recovery: the decrypt-off container must restart on its own (#12203).
+refused_key_checks ./scripts/lake-skeleton.sh EXPLORER_API_RESTART=no
+check "refused key, EXPLORER_API_RESTART=no exported by the caller: the recovery still has none" "$OK_RESTART"
+NO_UNSET_RESTART="$TMPDIR_TEST/lake-skeleton-no-unset-restart.sh"
+sed 's/env -u EXPLORER_API_RESTART /env /' ./scripts/lake-skeleton.sh > "$NO_UNSET_RESTART"
+if diff -q ./scripts/lake-skeleton.sh "$NO_UNSET_RESTART" >/dev/null; then
+  check "negative control: the -u EXPLORER_API_RESTART cut matched something" no
+else
+  refused_key_checks "$NO_UNSET_RESTART" EXPLORER_API_RESTART=no
+  check "negative control: a recovery without -u EXPLORER_API_RESTART is caught" \
+    "$([ "$OK_RESTART" = no ] && echo yes || echo no)"
+fi
 
 # Negative control (c75726, condition 2): a recovery written without the
-# `env -u` inherits the refused key, and the env check above must catch it.
+# `env -u` of the key variables inherits the refused key, and the env check
+# above must catch it.
 NO_UNSET="$TMPDIR_TEST/lake-skeleton-no-unset.sh"
-sed 's/env -u LAKE_KEK_FILE_HOST -u LAKE_KEK_FINGERPRINT //' ./scripts/lake-skeleton.sh > "$NO_UNSET"
+sed 's/ -u LAKE_KEK_FILE_HOST -u LAKE_KEK_FINGERPRINT / /' ./scripts/lake-skeleton.sh > "$NO_UNSET"
 if diff -q ./scripts/lake-skeleton.sh "$NO_UNSET" >/dev/null; then
   check "negative control: the env -u cut matched something" no
 else
   refused_key_checks "$NO_UNSET"
   check "negative control: a recovery without env -u is caught (it sees the key's variables)" \
     "$([ "$OK_ENV" = no ] && echo yes || echo no)"
+fi
+
+# Negative control (#12203): a decrypt-on recreate without
+# EXPLORER_API_RESTART=no keeps `unless-stopped`, and the check must see it.
+NO_RESTART_NO="$TMPDIR_TEST/lake-skeleton-no-restart-no.sh"
+sed 's/EXPLORER_API_RESTART=no docker compose/docker compose/' ./scripts/lake-skeleton.sh > "$NO_RESTART_NO"
+if diff -q ./scripts/lake-skeleton.sh "$NO_RESTART_NO" >/dev/null; then
+  check "negative control: the EXPLORER_API_RESTART=no cut matched something" no
+else
+  run_verb "$NO_RESTART_NO" LAKE_KEK_HEX="$HEX" LAKE_KEK_FINGERPRINT="$FPR"
+  check "negative control: a decrypt-on recreate without EXPLORER_API_RESTART=no is caught" \
+    "$(grep -qx 'RESTART: no' "$LOG" && echo no || echo yes)"
+fi
+
+# --- the lock: the verb refuses while the host-side unit holds it (#12203) ---
+
+LOCK_PATH="$RUNTIME_DIR/explorer-api-decrypt.lock"
+# run_verb_locked <script>: run the verb while this shell holds the lock.
+run_verb_locked() {
+  exec 9>"$LOCK_PATH"
+  flock -n 9
+  run_verb "$1" LAKE_KEK_HEX="$HEX" LAKE_KEK_FINGERPRINT="$FPR"
+  flock -u 9
+  exec 9>&-
+}
+run_verb_locked ./scripts/lake-skeleton.sh
+check "lock held: refuses (exit 1)" "$([ "$RC" = 1 ] && echo yes || echo no)"
+check "lock held: docker is never called" "$([ ! -s "$LOG" ] && echo yes || echo no)"
+check "lock held: says the explorer is being brought back with decrypt off" "$(has "$OUT" "is held, so explorer-api is being brought back")"
+check "lock held: the staged file is deleted on the refusal" "$([ "$(staged_files)" = 0 ] && echo yes || echo no)"
+check "lock held: no key text in the output" "$(grep -qF "$HEX" "$OUT" && echo no || echo yes)"
+check "the lock is on the runtime tmpfs, at the path the unit takes" "$([ -e "$LOCK_PATH" ] && echo yes || echo no)"
+
+# Negative control: a verb without the flock runs while the lock is held.
+NO_FLOCK="$TMPDIR_TEST/lake-skeleton-no-flock.sh"
+sed 's/if ! flock -n 8; then/if false; then/' ./scripts/lake-skeleton.sh > "$NO_FLOCK"
+if diff -q ./scripts/lake-skeleton.sh "$NO_FLOCK" >/dev/null; then
+  check "negative control: the flock cut matched something" no
+else
+  run_verb_locked "$NO_FLOCK"
+  check "negative control: a verb without the flock is caught (it calls docker under a held lock)" \
+    "$([ -s "$LOG" ] && echo yes || echo no)"
 fi
 
 # --- negative control: a copy whose verb skips the staging must fail above ---
@@ -194,6 +276,15 @@ want = {
 for k, v in want.items():
     if env.get(k) != v:
         problems.append(f"{k} is {env.get(k)!r}, want {v!r}")
+# #12203: restart "no" only on the verb's say-so, and a label derived from the
+# key mount's own variable.
+if svc.get("restart") != "${EXPLORER_API_RESTART:-unless-stopped}":
+    problems.append(f"restart is {svc.get('restart')!r}")
+labels = svc.get("labels") or {}
+if isinstance(labels, list):
+    labels = dict(l.split("=", 1) if "=" in l else (l, "") for l in labels)
+if labels.get("aspirant.explorer.decrypt") != "${LAKE_KEK_FILE_HOST:+on}":
+    problems.append(f"label aspirant.explorer.decrypt is {labels.get('aspirant.explorer.decrypt')!r}")
 vols = svc.get("volumes") or []
 want_mount = {
     "type": "bind",
@@ -228,6 +319,50 @@ EOF
 rc=0; static_check "$BAD" >/dev/null 2>&1 || rc=$?
 check "negative control: the static check fails a compose that adds LAKE_KEK_HEX" \
   "$([ "$rc" = 1 ] && echo yes || echo no)"
+
+# Negative control (#12203): a fixed `restart: unless-stopped` is caught.
+BAD_RESTART="$TMPDIR_TEST/compose-bad-restart.yml"
+python3 - docker-compose.yml "$BAD_RESTART" <<'EOF'
+import sys, yaml
+d = yaml.safe_load(open(sys.argv[1]))
+d["services"]["explorer-api"]["restart"] = "unless-stopped"
+yaml.safe_dump(d, open(sys.argv[2], "w"))
+EOF
+rc=0; static_check "$BAD_RESTART" >/dev/null 2>&1 || rc=$?
+check "negative control: the static check fails a compose with a fixed restart policy" \
+  "$([ "$rc" = 1 ] && echo yes || echo no)"
+
+# --- the rendered config, through the real compose (#12203) ------------------
+# What dockerd is given, not only the source text: with a key staged, restart
+# "no" and the label `on`; without one, `unless-stopped` and an empty label,
+# even when EXPLORER_API_RESTART=no leaks in alone (the unit then still leaves
+# it, since it needs both). Needs `docker compose` on the host; a missing one
+# fails the check rather than skipping it.
+RENDER_DIR="$TMPDIR_TEST/render"
+mkdir -p "$RENDER_DIR"
+cp docker-compose.yml "$RENDER_DIR/"
+: > "$RENDER_DIR/.env"
+# render <VAR=value ...>: prints "<restart>|<label>|<mount source>".
+render() {
+  (cd "$RENDER_DIR" && env -i PATH="$PATH" HOME="$HOME" \
+     DB_PASSWORD=x JWT_SECRET=x PENPOT_DB_PASSWORD=x PENPOT_SECRET_KEY=x "$@" \
+     docker compose -f docker-compose.yml --profile explorer config --format json explorer-api 2>/dev/null) |
+  python3 -c '
+import json, sys
+s = json.load(sys.stdin)["services"]["explorer-api"]
+src = [v.get("source") for v in s.get("volumes", []) if v.get("target") == "/run/secrets/lake_kek"]
+print("%s|%s|%s" % (s.get("restart"), (s.get("labels") or {}).get("aspirant.explorer.decrypt"), src[0] if src else None))
+' 2>/dev/null || echo "render failed"
+}
+KEYED="$(render LAKE_KEK_FILE_HOST=/dev/shm/lake_kek.test LAKE_KEK_FINGERPRINT="$FPR" EXPLORER_API_RESTART=no)"
+PLAIN="$(render)"
+STRAY="$(render EXPLORER_API_RESTART=no)"
+check "rendered, key staged: restart no, label on, the key file mounted (got $KEYED)" \
+  "$([ "$KEYED" = "no|on|/dev/shm/lake_kek.test" ] && echo yes || echo no)"
+check "rendered, plain recreate: unless-stopped, empty label, /dev/null mounted (got $PLAIN)" \
+  "$([ "$PLAIN" = "unless-stopped||/dev/null" ] && echo yes || echo no)"
+check "rendered, EXPLORER_API_RESTART=no without a key: the label stays empty (got $STRAY)" \
+  "$([ "$STRAY" = "no||/dev/null" ] && echo yes || echo no)"
 
 echo
 echo "$PASS passed, $FAIL failed"

@@ -992,24 +992,45 @@ case "${1:-}" in
       exit 1
     fi
     export LAKE_KEK_FINGERPRINT
+    # One writer of explorer-api at a time (system_3 #12203, security c75726
+    # condition 3 on #12202): the host-side unit that brings an exited
+    # decrypt-on container back with decrypt off takes this same lock, so it
+    # never recreates the container under this verb's start or under the
+    # refused-key recovery below. Held until the verb exits. On the runtime
+    # tmpfs, beside the staged key, so a reboot leaves no stale lock.
+    lock_file="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/explorer-api-decrypt.lock"
+    exec 8>"$lock_file"
+    if ! flock -n 8; then
+      echo "refusing: $lock_file is held, so explorer-api is being brought back" \
+           "with decrypt off right now. Run this verb again in a few minutes." >&2
+      exit 1
+    fi
     # The deploy checkout's own compose run, as the operator's plain `up`, so
     # its project name and override file apply. --wait returns once the
     # service is healthy. uvicorn serves /health only after the startup hook
     # loaded the key, so healthy means the key is in memory and the file may
     # go. A wrong or unreadable key never reaches healthy.
+    #
+    # EXPLORER_API_RESTART=no on this one call, never exported (#12203): once
+    # the key file is deleted dockerd cannot restart this container anyway,
+    # so it stays exited, for the host-side unit to recreate with decrypt off
+    # (docker-compose.yml, explorer-api's `restart:`). The recovery below
+    # runs without it and gets `unless-stopped` back.
     deploy_dir="${ASPIRANT_DEPLOY_DIR:-$SRC_DIR}"
-    if ! (cd "$deploy_dir" && docker compose --profile explorer up -d --wait --wait-timeout 180 \
-          --force-recreate --no-deps explorer-api); then
+    if ! (cd "$deploy_dir" && EXPLORER_API_RESTART=no docker compose --profile explorer up -d \
+          --wait --wait-timeout 180 --force-recreate --no-deps explorer-api); then
       # A refused key must not leave the explorer down (system_3 #12202: a
       # mistyped key stopped it for 18h, and every restart then failed on the
       # deleted key file). Recover here, with decrypt off, under security's
       # c75726 conditions: delete the key first, and recreate with neither
       # LAKE_KEK_FILE_HOST nor LAKE_KEK_FINGERPRINT, so compose interpolates
       # decrypt off and mounts /dev/null. The request still failed: exit 1.
+      # Nor EXPLORER_API_RESTART (#12203), should the caller's shell export
+      # it: the decrypt-off container restarts as `unless-stopped`.
       echo "explorer-api did not become healthy with the key (a wrong key or" \
            "fingerprint refuses to boot)." >&2
       _cleanup_kek_file
-      if (cd "$deploy_dir" && env -u LAKE_KEK_FILE_HOST -u LAKE_KEK_FINGERPRINT \
+      if (cd "$deploy_dir" && env -u EXPLORER_API_RESTART -u LAKE_KEK_FILE_HOST -u LAKE_KEK_FINGERPRINT \
             docker compose --profile explorer up -d --wait --wait-timeout 180 \
             --force-recreate --no-deps explorer-api); then
         echo "explorer-api is back up with decrypt off. Run this verb again with the right key." >&2
