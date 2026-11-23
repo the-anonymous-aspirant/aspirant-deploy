@@ -244,8 +244,10 @@ services:
   # in c75393). Same image as `duckdb`, its own service so it holds ONLY the
   # linker's catalog role, which can INSERT into gmail_attachment_links and do
   # nothing else. No S3 key, never the owner's DSN. Run per Gmail run by
-  # `lake-skeleton.sh link-gmail <links.json>`, whose directory is mounted
-  # read-only at /source.
+  # `lake-skeleton.sh link-gmail <links.json>`. Only that one file is mounted,
+  # read-only, at /source/links.json: the run's directory also holds the clear
+  # messages.json export and every attachment blob, and this container is on
+  # the non-internal `lake` bridge (security c75631 on #12146).
   gmail-linker:
     logging: *default-logging
     image: aspirant-lake-duckdb:local
@@ -258,7 +260,7 @@ services:
       LAKE_CATALOG_GMAIL_LINKER_DSN: ${LAKE_CATALOG_GMAIL_LINKER_DSN:-}
     volumes:
       - ./scripts/lake_gmail_link.py:/work/lake_gmail_link.py:ro
-      - ${GMAIL_LINK_SOURCE:-/nonexistent}:/source:ro
+      - ${GMAIL_LINK_FILE:-/nonexistent}:/source/links.json:ro
       # The postgres extension, from the host cache, as for `duckdb` (#5366).
       - ${LAKE_DUCKDB_EXT_DIR:-${HOME}/.duckdb/extensions}:/root/.duckdb/extensions:ro
     networks:

@@ -865,14 +865,16 @@ case "${1:-}" in
     # amended in c75393): one run's links.json into gmail_attachment_links.
     # Its own service, holding only the linker's catalog role. Run by
     # scripts/gmail/gmail_pull_and_ingest.sh after a fully successful ingest,
-    # never before. The file's directory is mounted read-only at /source.
+    # never before. Only the file itself is mounted, read-only, at
+    # /source/links.json; never its run directory, which holds the export and
+    # the attachment blobs (security c75631 on #12146).
     links="${2:-}"
     if [ -z "$links" ] || [ ! -f "$links" ]; then
       echo "usage: lake-skeleton.sh link-gmail <links.json>" >&2
       exit 1
     fi
-    export GMAIL_LINK_SOURCE="$(cd "$(dirname "$links")" && pwd)"
-    compose --profile client run --rm gmail-linker /work/lake_gmail_link.py "/source/$(basename "$links")"
+    export GMAIL_LINK_FILE="$(cd "$(dirname "$links")" && pwd)/$(basename "$links")"
+    compose --profile client run --rm gmail-linker /work/lake_gmail_link.py /source/links.json
     ;;
 
   list-staged)

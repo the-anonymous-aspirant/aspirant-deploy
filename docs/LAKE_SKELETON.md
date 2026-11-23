@@ -259,8 +259,9 @@ Security's A6 (c75385 on #11557, amended in c75393), and how it is met:
   it. The ingest itself still attaches as `ducklake`; moving it off the owner
   is not part of this.
 - **Its own step and its own service,** `gmail-linker`, which holds only that
-  role's DSN: `lake-skeleton.sh link-gmail <run>/links.json`. The run's
-  directory is mounted read-only.
+  role's DSN: `lake-skeleton.sh link-gmail <run>/links.json`. Only that file
+  is mounted, read-only, at `/source/links.json`. The run's directory, with
+  the export and the attachment blobs, never is.
 - **Writes are `INSERT ... ON CONFLICT DO NOTHING`, with no conflict target,**
   in one transaction, so a re-run is a no-op. A conflict target would need
   `SELECT` on its columns: measured on Postgres 16, it is refused without it.

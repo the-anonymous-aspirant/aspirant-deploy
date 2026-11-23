@@ -15,6 +15,8 @@
 #      The job and the A6c probes then run as the role, from python:3.11-slim
 #      with the lake image's duckdb pin and the host's cached postgres
 #      extension. A grant question is settled by the attempt, not the docs.
+#      Then the real gmail-linker service, run with `ls`, must see exactly
+#      links.json at /source, with a negative control on the old directory mount.
 #
 # Every id and hash is invented. Passwords are per-run, from openssl, handed to
 # containers by --env-file only, and removed with the run. Nothing here reaches
@@ -52,10 +54,15 @@ else
   else
     fail "the gmail-linker service's environment is not the linker's DSN alone" "$envs"
   fi
-  if printf '%s\n' "$svc" | grep -q 'GMAIL_LINK_SOURCE.*:/source:ro'; then
-    pass "the run's directory is mounted read-only"
+  if printf '%s\n' "$svc" | grep -q 'GMAIL_LINK_FILE.*:/source/links.json:ro$'; then
+    pass "only links.json is mounted, read-only"
   else
-    fail "the run's directory is not mounted read-only"
+    fail "links.json is not mounted alone and read-only"
+  fi
+  if printf '%s\n' "$svc" | grep -qE ':/source:ro$|:/source$'; then
+    fail "a directory is mounted at /source (the run's export and blobs)"
+  else
+    pass "no directory is mounted at /source"
   fi
 fi
 
@@ -84,6 +91,7 @@ chmod 700 "$work"
 cleanup() {
   docker rm -f "$run-pg" >/dev/null 2>&1 || true
   docker network rm "$run" >/dev/null 2>&1 || true
+  docker network rm "${run}_lake" >/dev/null 2>&1 || true
   rm -rf "$work"
 }
 trap cleanup EXIT
@@ -137,6 +145,43 @@ docker run --rm --network "$run" --env-file "$work/run.env" \
   -v "$PWD:/repo:ro" -v "$EXT_DIR:/root/.duckdb/extensions:ro" -w /repo "$IMAGE" \
   sh -c "pip install --quiet --disable-pip-version-check --root-user-action=ignore --timeout 120 --retries 5 duckdb==1.5.4 \
     && python tests/lake_gmail_link_roundtrip.py" || fails=$((fails + 1))
+
+# The linker's mount (security c75631 on #12146): the real gmail-linker service,
+# run with `ls` in place of the job, must see exactly links.json at /source,
+# never the run directory's clear export or its attachment blobs. Its own
+# compose project (this run's name) and --no-deps, so nothing real is touched.
+echo "runtime: the gmail-linker service sees only links.json at /source:"
+LINK_IMAGE=aspirant-lake-duckdb:local
+only_links() { [ "$1" = "links.json" ]; }
+if ! docker image inspect "$LINK_IMAGE" >/dev/null 2>&1; then
+  fail "the lake client image $LINK_IMAGE is not built, so the linker's mount is untested"
+else
+  rundir="$work/run-mount"
+  mkdir -p "$rundir/attachments"
+  printf '{}\n' >"$rundir/links.json"
+  printf '[]\n' >"$rundir/messages.json"
+  : >"$rundir/attachments/0000000000000000000000000000000000000000000000000000000000000000"
+  # Compose interpolates every service, and other services require values
+  # (`${VAR?}` / `${VAR:?}`). --no-deps starts none of them; each gets a
+  # placeholder, never a credential. The list is read from the file itself.
+  grep -oE '\$\{[A-Z_0-9]+:?\?' "$COMPOSE" | sed -E 's/\$\{([A-Z_0-9]+).*/\1=unused-by-this-check/' \
+    | sort -u >"$work/compose.env"
+  listing="$(GMAIL_LINK_FILE="$rundir/links.json" docker compose -p "$run" -f "$COMPOSE" \
+    --env-file "$work/compose.env" --profile client run --rm --no-deps --entrypoint ls \
+    gmail-linker -A /source 2>"$work/compose.err" | tr -d '\r' | sort | tr '\n' ' ' | sed 's/ $//')" || true
+  if only_links "$listing"; then
+    pass "the gmail-linker service lists /source as exactly links.json"
+  else
+    fail "the gmail-linker service does not see exactly links.json at /source" "${listing:-$(tail -1 "$work/compose.err")}"
+  fi
+  # Negative control: the directory mount this replaced. The same check must refuse it.
+  old="$(docker run --rm --entrypoint ls -v "$rundir:/source:ro" "$LINK_IMAGE" -A /source | sort | tr '\n' ' ' | sed 's/ $//')"
+  if only_links "$old"; then
+    fail "negative control: the check passed the old directory mount" "$old"
+  else
+    pass "negative control: the old directory mount is refused (it shows: $old)"
+  fi
+fi
 
 echo
 if [ "$fails" -eq 0 ]; then
