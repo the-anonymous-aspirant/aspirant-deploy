@@ -1045,7 +1045,9 @@ case "${1:-}" in
     echo "the key stays only in the running process. A recreate (a plain 'up', an"
     echo "auto-pull) brings explorer-api back with decrypt off: run this verb again."
     echo "A restart (a crash, a daemon restart, a reboot) leaves it stopped, because"
-    echo "the key file is gone: bring it back with decrypt off by"
+    echo "the key file is gone. scripts/explorer-decrypt-off-recover.sh, if it is in"
+    echo "your crontab, brings it back with decrypt off within a few minutes, and adds"
+    echo "a line to ~/.local/state/aspirant/explorer-decrypt-off.log. Without it, by hand:"
     echo "(cd $deploy_dir && docker compose --profile explorer up -d --force-recreate explorer-api)."
     ;;
 
