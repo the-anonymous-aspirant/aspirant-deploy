@@ -81,6 +81,15 @@ STAGING_KEY_NAME="lake-skeleton-explorer-staging-wo"
 LISTER_KEY_NAME="lake-skeleton-staging-lister"
 CATALOG_LISTER_ROLE="staging_lister"
 
+# The Gmail attachment linker's catalog role (system_3 #11557; security c75385
+# A6 as amended in c75393). After a fully successful ingest of a Gmail run that
+# fetched attachments, a step of its own writes (message_id, part_id, sha256)
+# rows into gmail_attachment_links. The ingest attaches as ducklake, the owner,
+# so the link rows are not written there: this role can INSERT into that one
+# table and do nothing else, not even SELECT it. The table is created here, by
+# the catalog owner, so the role owns nothing and explorer_ro can read it.
+CATALOG_GMAIL_LINKER_ROLE="gmail_linker"
+
 ENV_FILE="$ROOT/lake-skeleton.env"
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -268,6 +277,9 @@ LAKE_S3_STAGING_LISTER_ACCESS_KEY=pending
 LAKE_S3_STAGING_LISTER_SECRET_KEY=pending
 LAKE_CATALOG_STAGING_LISTER_PASSWORD=pending
 LAKE_CATALOG_STAGING_LISTER_DSN=pending
+# The Gmail attachment linker's catalog role (#11557).
+LAKE_CATALOG_GMAIL_LINKER_PASSWORD=pending
+LAKE_CATALOG_GMAIL_LINKER_DSN=pending
 LAKE_CATALOG_RO_PASSWORD=pending
 LAKE_CATALOG_RO_DSN=pending
 EOF
@@ -505,6 +517,61 @@ SQL
     "postgresql://$CATALOG_LISTER_ROLE:$pw@lake-skeleton-catalog:5432/lake_catalog_skeleton"
 }
 
+# The Gmail attachment links table and the linker's catalog role (system_3
+# #11557; security c75385 A6, amended in c75393). Created HERE, as ducklake, for
+# the same reasons as the lister's tables: the role must own nothing, and
+# explorer_ro must be able to read it. The role gets INSERT on that one table
+# and nothing else; its writes are INSERT ... ON CONFLICT DO NOTHING, and
+# `verify` proves by attempt that this works without SELECT, and that SELECT,
+# UPDATE, DELETE and an INSERT into any other table are refused (A6c). The
+# columns are the three A6 names and nothing else: no file name, no type, no
+# size (A1). Idempotent; grants re-asserted. The password reaches psql on
+# stdin, with the same no-log settings and redaction as the blocks above.
+bootstrap_gmail_linker_role() {
+  local pw
+  pw="$(grep '^LAKE_CATALOG_GMAIL_LINKER_PASSWORD=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)"
+  if [ -z "$pw" ] || [ "$pw" = "pending" ]; then
+    pw="$(openssl rand -hex 24)"
+    env_set LAKE_CATALOG_GMAIL_LINKER_PASSWORD "$pw"
+  fi
+
+  local err rc=0
+  err="$(catalog_psql 2>&1 >/dev/null <<SQL
+SET log_min_error_statement TO panic;
+SET log_statement TO 'none';
+SET pg_stat_statements.track_utility TO off;
+CREATE TABLE IF NOT EXISTS public.gmail_attachment_links (
+  message_id text NOT NULL CHECK (message_id ~ '^[0-9a-f]{1,32}\$'),
+  part_id text NOT NULL CHECK (part_id ~ '^[0-9]+(\.[0-9]+)*\$'),
+  sha256 text NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}\$'),
+  PRIMARY KEY (message_id, part_id)
+);
+GRANT SELECT ON public.gmail_attachment_links TO $CATALOG_RO_ROLE;
+DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$CATALOG_GMAIL_LINKER_ROLE') THEN
+    CREATE ROLE $CATALOG_GMAIL_LINKER_ROLE LOGIN;
+  END IF;
+END
+\$\$;
+ALTER ROLE $CATALOG_GMAIL_LINKER_ROLE WITH PASSWORD '$pw';
+REVOKE ALL ON SCHEMA public FROM $CATALOG_GMAIL_LINKER_ROLE;
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM $CATALOG_GMAIL_LINKER_ROLE;
+GRANT CONNECT ON DATABASE lake_catalog_skeleton TO $CATALOG_GMAIL_LINKER_ROLE;
+GRANT USAGE ON SCHEMA public TO $CATALOG_GMAIL_LINKER_ROLE;
+GRANT INSERT ON public.gmail_attachment_links TO $CATALOG_GMAIL_LINKER_ROLE;
+SQL
+)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "refusing: the gmail linker's catalog SQL failed (psql exit $rc); its error, password redacted:" >&2
+    printf '%s\n' "${err//"$pw"/<redacted>}" >&2
+    return 1
+  fi
+
+  env_set LAKE_CATALOG_GMAIL_LINKER_DSN \
+    "postgresql://$CATALOG_GMAIL_LINKER_ROLE:$pw@lake-skeleton-catalog:5432/lake_catalog_skeleton"
+}
+
 # The write-denial proof lives in lake_skeleton_verify.py, not here.
 #
 # It belongs with the other acceptance checks because that is what it is: the
@@ -721,10 +788,12 @@ case "${1:-}" in
     wait_healthy garage
     bootstrap_catalog_role
     bootstrap_staging_lister_role
+    bootstrap_gmail_linker_role
     echo "lake skeleton up — bucket '$BUCKET' on $ROOT (credentials in $ENV_FILE)"
     echo "explorer read-only credentials issued: '$RO_KEY_NAME' + catalog role '$CATALOG_RO_ROLE'"
     echo "explorer write-only staging key issued: '$STAGING_KEY_NAME' on bucket '$STAGING_BUCKET'"
     echo "staging lister issued: '$LISTER_KEY_NAME' (read on staging) + catalog role '$CATALOG_LISTER_ROLE'"
+    echo "gmail linker issued: catalog role '$CATALOG_GMAIL_LINKER_ROLE' (INSERT on gmail_attachment_links only)"
     echo "their read-only-ness is PROVEN by 'verify', not asserted here — run it next"
     echo "explorer credentials in $DEPLOY_ENV_FILE:"
     explorer_env_check ||
@@ -789,6 +858,21 @@ case "${1:-}" in
     # staging bucket itself rather than from a host-mounted source tree.
     shift
     compose --profile client run --rm duckdb /work/promote.py "$@"
+    ;;
+
+  link-gmail)
+    # The Gmail attachment linker (system_3 #11557; security c75385 A6 as
+    # amended in c75393): one run's links.json into gmail_attachment_links.
+    # Its own service, holding only the linker's catalog role. Run by
+    # scripts/gmail/gmail_pull_and_ingest.sh after a fully successful ingest,
+    # never before. The file's directory is mounted read-only at /source.
+    links="${2:-}"
+    if [ -z "$links" ] || [ ! -f "$links" ]; then
+      echo "usage: lake-skeleton.sh link-gmail <links.json>" >&2
+      exit 1
+    fi
+    export GMAIL_LINK_SOURCE="$(cd "$(dirname "$links")" && pwd)"
+    compose --profile client run --rm gmail-linker /work/lake_gmail_link.py "/source/$(basename "$links")"
     ;;
 
   list-staged)

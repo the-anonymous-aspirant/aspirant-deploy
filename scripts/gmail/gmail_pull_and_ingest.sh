@@ -12,6 +12,12 @@
 #   scripts/gmail/gmail_pull_and_ingest.sh --full     full pull, then ingest
 #   scripts/gmail/gmail_pull_and_ingest.sh --dry-run  pull for real; the ingest only reports
 #   scripts/gmail/gmail_pull_and_ingest.sh --verify   ... and run verify-at-rest afterwards
+#   scripts/gmail/gmail_pull_and_ingest.sh --attachments
+#                                   also fetch attachment content (system_3 #11557);
+#                                   the pull prints its estimate first
+#   scripts/gmail/gmail_pull_and_ingest.sh --link-run=<run id>
+#                                   only the link step, for a run kept after it failed;
+#                                   no KEK, no pull
 #   scripts/gmail/gmail_pull_and_ingest.sh --detach [--full ...]
 #                                   ask for the KEK here, then run the rest as a
 #                                   systemd user unit that outlives this SSH
@@ -24,16 +30,29 @@
 # unit; the detached instance reads it and deletes it at once.
 #
 # Exit codes: the pull's own when it fails (3 re-consent needed, 4 transport,
-# 7 another pull holds the lock), in which case nothing is ingested; 2 for a
-# missing KEK or a bad argument; otherwise the ingest's (0 success, 1 partial).
+# 7 another pull holds the lock, 8 the attachments do not fit the staging
+# disk), in which case nothing is ingested; 2 for a missing KEK or a bad
+# argument; the ingest's when it fails (1 partial); the link step's when it
+# fails; otherwise 0.
 # A pull that finds no change writes no run directory, and this exits 0 with
 # "no new run to ingest". After a successful real ingest the run directory
 # (the export in clear) is deleted; after a failed or --dry-run ingest it is
 # kept for a retry and named on stderr. state.json is never touched.
 #
+# Attachments (system_3 #11557; security c75385, A6 as amended in c75393). A
+# run pulled with --attachments holds links.json: (message id, part id, sha256)
+# for each part it fetched. After a successful real ingest, the link step
+# (scripts/lake-skeleton.sh link-gmail, the gmail_linker role) writes those
+# rows; only once it succeeds is links.json moved to
+# <staging>/attachments-linked/<run id>.json, which the next pull reads as the
+# parts already done, and only then is the run directory removed (A6a). If the
+# link step fails, the run directory is kept, the wrapper exits with the link
+# step's code, and --link-run=<run id> runs that step again; a repeat is a
+# no-op (ON CONFLICT DO NOTHING).
+#
 # Overridable for the unit test (tests/gmail_pull_and_ingest_unit.sh), never
 # set in normal use: GMAIL_PULL_CMD, LAKE_INGEST_CMD, LAKE_VERIFY_CMD,
-# GMAIL_STAGING_DIR (also honoured by gmail.sh).
+# GMAIL_LINK_CMD, GMAIL_STAGING_DIR (also honoured by gmail.sh).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
@@ -41,25 +60,70 @@ STAGING="${GMAIL_STAGING_DIR:-/data/gmail}"
 PULL_CMD="${GMAIL_PULL_CMD:-scripts/gmail/gmail.sh pull}"
 INGEST_CMD="${LAKE_INGEST_CMD:-scripts/lake-skeleton.sh ingest}"
 VERIFY_CMD="${LAKE_VERIFY_CMD:-scripts/lake-skeleton.sh verify-at-rest}"
+LINK_CMD="${GMAIL_LINK_CMD:-scripts/lake-skeleton.sh link-gmail}"
 
 usage() {
   # The leading comment block, whatever its length.
   awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
 }
 
-full=0; verify=0; dry=0; detach=0; detached=0
+full=0; verify=0; dry=0; detach=0; detached=0; attachments=0; link_run=""
 passthrough=()
 for arg in "$@"; do
   case "$arg" in
     --full) full=1; passthrough+=("$arg") ;;
     --verify) verify=1; passthrough+=("$arg") ;;
     --dry-run) dry=1; passthrough+=("$arg") ;;
+    --attachments) attachments=1; passthrough+=("$arg") ;;
+    --link-run=*) link_run="${arg#--link-run=}" ;;
     --detach) detach=1 ;;
     --kek-from-file) detached=1 ;;  # internal: the detached instance
     -h|--help) usage; exit 0 ;;
-    *) echo "gmail_pull_and_ingest: unknown argument '$arg' (--full, --dry-run, --verify, --detach)" >&2; exit 2 ;;
+    *) echo "gmail_pull_and_ingest: unknown argument '$arg' (--full, --dry-run, --verify, --attachments, --detach, --link-run=<run id>)" >&2; exit 2 ;;
   esac
 done
+
+# The link step for one run: write its links, then commit them as done, then
+# remove the run directory, in that order (A6a). Returns the link step's code;
+# on a failure the run directory and its links.json stay where they are.
+link_and_remove() {
+  local run_id="$1" run_dir="$STAGING/runs/$1" rc
+  local links="$run_dir/links.json"
+  if [[ -f "$links" ]]; then
+    set +e
+    $LINK_CMD "$links"
+    rc=$?
+    set -e
+    if [[ $rc -ne 0 ]]; then
+      echo "gmail_pull_and_ingest: the link step exited $rc; run kept at $run_dir (clear export and attachments);" \
+           "link it with --link-run=$run_id" >&2
+      return "$rc"
+    fi
+    # Guarded one by one: called under `||`, this function runs without
+    # errexit, and a failed move must never reach the removal below.
+    if ! { mkdir -p "$STAGING/attachments-linked" && chmod 700 "$STAGING/attachments-linked"            && mv "$links" "$STAGING/attachments-linked/$run_id.json"; }; then
+      echo "gmail_pull_and_ingest: links written, but links.json could not be moved to"            "$STAGING/attachments-linked/; run kept at $run_dir; link it with --link-run=$run_id" >&2
+      return 1
+    fi
+  fi
+  rm -rf "$run_dir"
+  echo "gmail_pull_and_ingest: clear export removed ($run_dir); the lake holds the envelope"
+}
+
+# --link-run: only the link step, for a run kept after it failed. It needs no
+# KEK (the link writer holds none) and pulls nothing.
+if [[ -n "$link_run" ]]; then
+  if [[ ! "$link_run" =~ ^[0-9]{8}T[0-9]{6}Z-(full|incremental)$ ]]; then
+    echo "gmail_pull_and_ingest: not a run id: '$link_run'" >&2
+    exit 2
+  fi
+  if [[ ! -f "$STAGING/runs/$link_run/links.json" ]]; then
+    echo "gmail_pull_and_ingest: no kept run $link_run with links to write" >&2
+    exit 2
+  fi
+  link_and_remove "$link_run"
+  exit $?
+fi
 
 # An exported LAKE_KEK_HEX is refused, not taken over (security F1, c70270 on
 # #11428): `unset` keeps it from children, but this process's own
@@ -125,7 +189,7 @@ if [[ $detach -eq 1 ]]; then
   kek=""
   setenv=(-E "LAKE_KEK_FILE=$handoff")
   for v in LAKE_KEK_FINGERPRINT LAKE_KEK_VERSION GMAIL_STAGING_DIR GMAIL_SECRETS_DIR GMAIL_UNITS_PER_MINUTE \
-           GMAIL_PULL_CMD LAKE_INGEST_CMD LAKE_VERIFY_CMD; do
+           GMAIL_PULL_CMD LAKE_INGEST_CMD LAKE_VERIFY_CMD GMAIL_LINK_CMD; do
     if [[ -n "${!v:-}" ]]; then setenv+=(-E "$v=${!v}"); fi
   done
   if ! systemd-run --user --quiet --collect --unit "$unit" --working-directory "$PWD" \
@@ -156,6 +220,7 @@ fi
 
 pull_args=()
 if [[ $full -eq 1 ]]; then pull_args+=(--full); fi
+if [[ $attachments -eq 1 ]]; then pull_args+=(--attachments); fi
 
 # The pull prints exactly one summary line on stdout (counts only) and its
 # diagnostics on stderr; keep stderr flowing to the terminal and read the line.
@@ -192,8 +257,9 @@ set -e
 # so, because a kept copy must never be a surprise (security review c58623).
 run_dir="$STAGING/runs/$run_id"
 if [[ $ingest_rc -eq 0 && $dry -eq 0 ]]; then
-  rm -rf "$run_dir"
-  echo "gmail_pull_and_ingest: clear export removed ($run_dir); the lake holds the envelope"
+  # A part whose bytes the lake already held is skipped by the ingest and still
+  # linked here (A7): the link step runs on the ingest's success, not its count.
+  link_and_remove "$run_id" || exit $?
 else
   echo "gmail_pull_and_ingest: clear export kept at $run_dir; re-run to ingest it" >&2
   if [[ $ingest_rc -ne 0 ]]; then exit "$ingest_rc"; fi

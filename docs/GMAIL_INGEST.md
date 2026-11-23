@@ -146,12 +146,57 @@ is complete:
 /data/gmail/runs/<YYYYMMDDTHHMMSSZ>-<full|incremental>/
   messages.json   {"messages": [...], "deleted_ids": [...], "mode", "base_history_id", "history_id", "pulled_at", "format"}
   manifest.json   the source manifest for scripts/lake_ingest.py: dataset_id gmail, kind message_export, sensitivity high
+  attachments/<sha256>   with --attachments only: each fetched part, named by its hash
+  links.json      with --attachments only: (message_id, part_id, sha256) per fetched part, refused parts by id and reason
 ```
 
 Each message has `id, threadId, date (UTC), from, to, cc, subject, labels, text,
 attachments`. `text` is the text/plain part, or the visible text of the HTML
-when there is none. `attachments` lists `name, mime, size` only: no attachment
-content is fetched until the security review (#8806-D1) decides otherwise.
+when there is none. `attachments` lists each part's `name, mime, size, part_id`.
+This sealed export is the only place an attachment's file name is kept.
+
+### Attachment content (`--attachments`, #11557)
+
+Off by default. With `scripts/gmail/gmail.sh pull --attachments`, the pull also
+fetches the content of attachment parts not yet linked, under the conditions
+security set in c75385 on #11557:
+
+- **Names (A1).** A part is written as `attachments/<sha256>`. Its file name is
+  kept only in `messages.json`, never in a path, the catalog's `source_path`,
+  `links.json` or a log line.
+- **Type (A2).** Gmail's declared type, normalised as the explorer normalises a
+  stored one (cut at `;`, lower case, one `type/subtype`, otherwise
+  `application/octet-stream`). Nothing sniffs, opens or parses the bytes.
+- **Calls (A3).** `users.messages.attachments.get` under `gmail.readonly`, or
+  the part's inline data. No link in a message is ever followed.
+- **Size (A4).** A part over 25 MB is not fetched. A part whose decoded length
+  differs from its reported size is refused. Each part is held in memory whole
+  (Gmail answers base64url JSON), and the cap bounds that. A refused part is
+  recorded in `links.json` and the summary by message id, part id and reason
+  code (`over_cap`, `size_mismatch`, `gone`, `no_content`, `undecodable`).
+- **Space (A5).** Before any fetch the pull prints the parts and bytes to fetch
+  and the free space under the staging directory. If the bytes plus a margin
+  (a tenth, at least 64 MB) do not fit, it exits 8 and writes nothing, so the
+  history id stays and the next run repeats the window. A backfill of the old
+  mail is `--full --attachments`, run only on the operator's word.
+- **Sensitivity (A7).** Each blob's manifest record is `kind
+  message_attachment, sensitivity high`, whatever its type.
+- **Logs (A8).** Counts, bytes, ids and reason codes only.
+
+- **Links (A6).** After a fully successful ingest, the wrapper's link step
+  writes `(message_id, part_id, sha256)` for each fetched part into the
+  catalog's `gmail_attachment_links`, as the `gmail_linker` role, which can do
+  nothing else (`docs/LAKE_SKELETON.md`, "The Gmail attachment linker"). A part
+  whose bytes the lake already held is skipped by the ingest and still linked.
+  The run directory is removed only after the link step succeeds. If it fails,
+  the run is kept and `scripts/gmail/gmail_pull_and_ingest.sh
+  --link-run=<run id>` finishes it.
+
+A part counts as done once its links are in the lake. The pull reads that from
+`/data/gmail/attachments-linked/<run id>.json`: a run's `links.json`, moved
+there after its link step succeeds. The pull itself never writes there, so a
+run whose links did not land is fetched again, which is harmless: the ingest
+dedups by content address and the link writer skips rows it already has.
 
 A full run's export is the whole mailbox. An incremental run's export is the
 change: messages added or changed since the last run, and `deleted_ids` for
