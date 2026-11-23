@@ -144,7 +144,7 @@ def read_staging(s3, staging_bucket: str) -> tuple[list[dict[str, Any]], list[st
     return rows, skipped
 
 
-def write_snapshot(con, schema: str, rows: list[dict[str, Any]], read_at: datetime, skipped_count: int = 0) -> None:
+def write_snapshot(con, schema: str, rows: list[dict[str, Any]], read_at: datetime, skipped_count: int) -> None:
     """Replace `staged_uploads` and stamp `staged_uploads_read`, in one transaction.
 
     `schema` is the qualified schema the two tables live in: `cat.public` on
@@ -154,7 +154,9 @@ def write_snapshot(con, schema: str, rows: list[dict[str, Any]], read_at: dateti
 
     `skipped_count` is how many uploads the listing found but could not read
     (design c75275 on #12113): the explorer counts them as waiting, so a page
-    never says nothing is waiting while one sits in staging unlisted.
+    never says nothing is waiting while one sits in staging unlisted. It has
+    no default: a caller that forgets it fails rather than stamping 0, which
+    would claim nothing was skipped (security c75692 on #12113).
     """
     con.execute("BEGIN TRANSACTION")
     try:
@@ -222,7 +224,7 @@ def main(env: dict[str, str] | None = None) -> int:
     con.execute("LOAD postgres")
     try:
         con.execute(f"ATTACH '{env[ENV_DSN]}' AS cat (TYPE postgres)")
-        write_snapshot(con, "cat.public", rows, datetime.now(timezone.utc))
+        write_snapshot(con, "cat.public", rows, datetime.now(timezone.utc), len(skipped))
     except Exception as exc:  # noqa: BLE001 - see above; and never echo the DSN
         print(f"{LOG} catalog write failed ({type(exc).__name__}); nothing committed", file=sys.stderr)
         return 1

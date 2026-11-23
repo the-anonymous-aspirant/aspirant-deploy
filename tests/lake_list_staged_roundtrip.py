@@ -253,6 +253,39 @@ def main():
     check("a catalog without skipped_count refuses the write", refused)
     check("and keeps its rows and read_at as they were", rows(old) == before_rows and stamp(old) == before_stamp, str(stamp(old)))
 
+    # main(), the entry the staging-lister service runs, records the skipped
+    # count too (security c75692 on #12113): every case above writes through
+    # run(). The S3 client and the catalog attach are swapped for the moto
+    # client and an in-memory catalog; everything between them is main()'s own.
+    main_bucket = "lake-test-staging-main"
+    raw_client.create_bucket(Bucket=main_bucket)
+    stage(raw_client, main_bucket, "up-7777", manifest("up-7777", NAMES["up-1111"]))
+    stage(raw_client, main_bucket, "up-8888", raw=b"{not json")
+    stage(raw_client, main_bucket, "up-9999", man={**manifest("up-9999", "z.pdf"), "size_bytes": "big"})
+    cat_con = fresh_catalog()
+
+    class AttachedCatalog:
+        """The in-memory catalog, with main()'s LOAD and ATTACH as no-ops."""
+        def execute(self, sql, *args):
+            if sql.startswith(("LOAD postgres", "ATTACH ")):
+                return None
+            return cat_con.execute(sql, *args)
+
+    env = {name: "x" for name in job.REQUIRED_ENV}
+    env["LAKE_S3_STAGING_BUCKET"] = main_bucket
+    real_client, real_connect = boto3.client, duckdb.connect
+    boto3.client, duckdb.connect = (lambda *a, **k: raw_client), (lambda *a, **k: AttachedCatalog())
+    main_out, main_err = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.redirect_stdout(main_out), contextlib.redirect_stderr(main_err):
+            code = job.main(env=env)
+    finally:
+        boto3.client, duckdb.connect = real_client, real_connect
+    check("main() with two unreadable uploads exits 0", code == 0, f"{code} {main_err.getvalue()}")
+    check("main() stamps the count it listed", stamp(cat_con)[2] == 1, str(stamp(cat_con)))
+    check("main() stamps the skipped count, not 0 (c75692)", skipped_count(cat_con) == 2, str(skipped_count(cat_con)))
+    check("main()'s log names the skipped ids only", "up-8888" in main_out.getvalue() and NAMES["up-1111"] not in main_out.getvalue(), main_out.getvalue())
+
     # No output of any run above carries a file name.
     logged = out.getvalue() + err.getvalue()
     check("no output carries a file name", not any(n in logged for n in NAMES.values()), logged)
