@@ -221,6 +221,23 @@ assert_eq "and the password is redacted from it" "0" "$(grep -cF "$failed_pw" <<
 assert_eq "where it stood, <redacted> is printed" "1" \
   "$(grep -c "PASSWORD '<redacted>'" <<<"$err_out")"
 
+# system_3 #12113: an env file made before a password key existed has no line
+# for it. Under pipefail the bootstrap's grep then failed the assignment and
+# `up` exited 1 with no message. Each bootstrap now runs on such a file,
+# generates the password and writes it.
+for fn_key in bootstrap_catalog_role:LAKE_CATALOG_RO_PASSWORD \
+              bootstrap_staging_lister_role:LAKE_CATALOG_STAGING_LISTER_PASSWORD; do
+  fn="${fn_key%%:*}"; key="${fn_key#*:}"
+  ENV_FILE="$TMPDIR_TEST/no-$key.env"
+  printf 'LAKE_S3_BUCKET=lake-skeleton-bronze\n' > "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+  rc=0
+  ( catalog_psql() { cat > /dev/null; }; "$fn" ) > /dev/null 2>&1 || rc=$?
+  assert_rc "$fn runs on an env file with no $key line" "0" "$rc"
+  assert_eq "and writes a 48-hex $key" "1" \
+    "$(grep "^$key=" "$ENV_FILE" | cut -d= -f2- | grep -cE '^[0-9a-f]{48}$')"
+done
+
 rc=0; ENV_FILE="$TMPDIR_TEST/nl.env" env_set SOME_KEY $'a\nINJECTED=1' 2>/dev/null || rc=$?
 assert_rc "env_set refuses a value containing a newline" "1" "$rc"
 
