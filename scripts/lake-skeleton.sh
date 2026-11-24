@@ -397,7 +397,10 @@ bootstrap_garage() {
 # existed on one host and in no script.
 bootstrap_catalog_role() {
   local pw
-  pw="$(grep '^LAKE_CATALOG_RO_PASSWORD=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)"
+  # `|| true`: under pipefail a grep that matches nothing fails the whole
+  # assignment, and `set -e` then ends `up` with no message. An env file made
+  # before a key existed has no line for it (system_3 #12113).
+  pw="$({ grep '^LAKE_CATALOG_RO_PASSWORD=' "$ENV_FILE" 2>/dev/null || true; } | cut -d= -f2-)"
   if [ -z "$pw" ] || [ "$pw" = "pending" ]; then
     pw="$(openssl rand -hex 24)"
     env_set LAKE_CATALOG_RO_PASSWORD "$pw"
@@ -462,7 +465,9 @@ SQL
 # same redaction as the explorer_ro block.
 bootstrap_staging_lister_role() {
   local pw
-  pw="$(grep '^LAKE_CATALOG_STAGING_LISTER_PASSWORD=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)"
+  # `|| true`, as in bootstrap_catalog_role: every env file made before
+  # #11615 lacks this line, and without it `up` exited 1 silently (#12113).
+  pw="$({ grep '^LAKE_CATALOG_STAGING_LISTER_PASSWORD=' "$ENV_FILE" 2>/dev/null || true; } | cut -d= -f2-)"
   if [ -z "$pw" ] || [ "$pw" = "pending" ]; then
     pw="$(openssl rand -hex 24)"
     env_set LAKE_CATALOG_STAGING_LISTER_PASSWORD "$pw"
@@ -488,6 +493,14 @@ CREATE TABLE IF NOT EXISTS public.staged_uploads_read (
   interval_seconds integer NOT NULL,
   upload_count integer NOT NULL
 );
+-- Uploads the lister found but could not read (design c75275 on #12113). A
+-- count about the job, naming no file. Added, not in the CREATE, so a catalog
+-- made before it gains it. Nullable with no default (security c75284,
+-- condition 2): a row an older lister wrote reads NULL, "not recorded"; a
+-- DEFAULT 0 would claim nothing was skipped. Run this before deploying a
+-- lister that writes the column: the other order makes each run's write fail
+-- and leaves read_at to age, which is safe but shows "out of date".
+ALTER TABLE public.staged_uploads_read ADD COLUMN IF NOT EXISTS skipped_count integer;
 -- explorer_ro's default privilege covers tables ducklake creates from now on;
 -- granted outright too, so a catalog that predates the default still reads them.
 GRANT SELECT ON public.staged_uploads, public.staged_uploads_read TO $CATALOG_RO_ROLE;

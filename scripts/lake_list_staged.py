@@ -144,13 +144,19 @@ def read_staging(s3, staging_bucket: str) -> tuple[list[dict[str, Any]], list[st
     return rows, skipped
 
 
-def write_snapshot(con, schema: str, rows: list[dict[str, Any]], read_at: datetime) -> None:
+def write_snapshot(con, schema: str, rows: list[dict[str, Any]], read_at: datetime, skipped_count: int) -> None:
     """Replace `staged_uploads` and stamp `staged_uploads_read`, in one transaction.
 
     `schema` is the qualified schema the two tables live in: `cat.public` on
     the catalog (a DuckDB postgres attach), anything with the same tables in a
     test. `DELETE`, not `TRUNCATE`: the role is granted DELETE only, and a
     TRUNCATE would take a lock that blocks the explorer's reads (c71693).
+
+    `skipped_count` is how many uploads the listing found but could not read
+    (design c75275 on #12113): the explorer counts them as waiting, so a page
+    never says nothing is waiting while one sits in staging unlisted. It has
+    no default: a caller that forgets it fails rather than stamping 0, which
+    would claim nothing was skipped (security c75692 on #12113).
     """
     con.execute("BEGIN TRANSACTION")
     try:
@@ -166,13 +172,15 @@ def write_snapshot(con, schema: str, rows: list[dict[str, Any]], read_at: dateti
         stamped = con.execute(f"SELECT count(*) FROM {schema}.staged_uploads_read WHERE id = 1").fetchone()[0]
         if stamped:
             con.execute(
-                f"UPDATE {schema}.staged_uploads_read SET read_at = ?, interval_seconds = ?, upload_count = ? WHERE id = 1",
-                [read_at, INTERVAL_SECONDS, len(rows)],
+                f"UPDATE {schema}.staged_uploads_read SET read_at = ?, interval_seconds = ?, upload_count = ?, "
+                "skipped_count = ? WHERE id = 1",
+                [read_at, INTERVAL_SECONDS, len(rows), skipped_count],
             )
         else:
             con.execute(
-                f"INSERT INTO {schema}.staged_uploads_read (id, read_at, interval_seconds, upload_count) VALUES (1, ?, ?, ?)",
-                [read_at, INTERVAL_SECONDS, len(rows)],
+                f"INSERT INTO {schema}.staged_uploads_read (id, read_at, interval_seconds, upload_count, skipped_count) "
+                "VALUES (1, ?, ?, ?, ?)",
+                [read_at, INTERVAL_SECONDS, len(rows), skipped_count],
             )
         con.execute("COMMIT")
     except Exception:
@@ -183,7 +191,7 @@ def write_snapshot(con, schema: str, rows: list[dict[str, Any]], read_at: dateti
 def run(s3, staging_bucket: str, con, schema: str, now: datetime | None = None) -> dict[str, Any]:
     """One pass: read staging, then write it. Returns counts and ids only."""
     rows, skipped = read_staging(s3, staging_bucket)
-    write_snapshot(con, schema, rows, now or datetime.now(timezone.utc))
+    write_snapshot(con, schema, rows, now or datetime.now(timezone.utc), len(skipped))
     return {"listed": len(rows) + len(skipped), "written": len(rows), "skipped_ids": skipped}
 
 
@@ -216,7 +224,7 @@ def main(env: dict[str, str] | None = None) -> int:
     con.execute("LOAD postgres")
     try:
         con.execute(f"ATTACH '{env[ENV_DSN]}' AS cat (TYPE postgres)")
-        write_snapshot(con, "cat.public", rows, datetime.now(timezone.utc))
+        write_snapshot(con, "cat.public", rows, datetime.now(timezone.utc), len(skipped))
     except Exception as exc:  # noqa: BLE001 - see above; and never echo the DSN
         print(f"{LOG} catalog write failed ({type(exc).__name__}); nothing committed", file=sys.stderr)
         return 1

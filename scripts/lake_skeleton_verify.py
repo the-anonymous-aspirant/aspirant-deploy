@@ -562,10 +562,14 @@ else:
 
     if li_ok:
         # Another catalog table: any public table but the two of its own.
+        # Listed through Postgres's pg_tables, which every role can read, and
+        # not information_schema: that shows a role only the tables it holds
+        # a privilege on, so on a correctly bounded catalog it listed none and
+        # this check could never pass (system_3 #12113).
         others = [
             r[0] for r in lic.execute(
-                "SELECT table_name FROM li_cat.information_schema.tables "
-                "WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
+                "SELECT tablename FROM postgres_query('li_cat', "
+                "'SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = ''public''')"
             ).fetchall()
             if r[0] not in LISTER_TABLES
         ]

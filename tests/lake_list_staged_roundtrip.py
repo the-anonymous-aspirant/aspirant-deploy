@@ -94,7 +94,8 @@ class FailingList:
         raise RuntimeError("listing unavailable: bronze/staging/up-1111/SYNTHETIC-name.pdf")
 
 
-def fresh_catalog():
+def fresh_catalog(with_skipped=True):
+    """The catalog as `up` leaves it; `with_skipped=False` is one from before #12113."""
     con = duckdb.connect()
     con.execute("ATTACH ':memory:' AS cat")
     con.execute("CREATE SCHEMA cat.public")
@@ -107,6 +108,9 @@ def fresh_catalog():
         "CREATE TABLE cat.public.staged_uploads_read (id SMALLINT PRIMARY KEY CHECK (id = 1), "
         "read_at TIMESTAMPTZ NOT NULL, interval_seconds INTEGER NOT NULL, upload_count INTEGER NOT NULL)"
     )
+    if with_skipped:
+        # The same statement `up` runs (lake-skeleton.sh): nullable, no default.
+        con.execute("ALTER TABLE cat.public.staged_uploads_read ADD COLUMN IF NOT EXISTS skipped_count INTEGER")
     return con
 
 
@@ -124,6 +128,10 @@ def rows(con):
 
 def stamp(con):
     return con.execute("SELECT read_at, interval_seconds, upload_count FROM cat.public.staged_uploads_read WHERE id = 1").fetchone()
+
+
+def skipped_count(con):
+    return con.execute("SELECT skipped_count FROM cat.public.staged_uploads_read WHERE id = 1").fetchone()[0]
 
 
 @mock_aws
@@ -172,6 +180,7 @@ def main():
     summary = job.run(s3, bucket, con, "cat.public", now=t3)
     check("unreadable and malformed manifests are left out", [r[0] for r in rows(con)] == ["up-1111"], str(rows(con)))
     check("their ids are reported", summary["skipped_ids"] == ["up-3333", "up-4444"], str(summary))
+    check("the stamp records how many were left out (c75275)", skipped_count(con) == 2, str(skipped_count(con)))
     raw_client.delete_object(Bucket=bucket, Key="bronze/staging/up-3333/manifest.json")
     raw_client.delete_object(Bucket=bucket, Key="bronze/staging/up-3333/object")
     raw_client.delete_object(Bucket=bucket, Key="bronze/staging/up-4444/manifest.json")
@@ -194,6 +203,7 @@ def main():
     job.run(s3, bucket, con, "cat.public", now=t5)
     check("an empty staging leaves no rows", rows(con) == [], str(rows(con)))
     check("an empty staging still stamps read_at, with count 0", stamp(con)[0] == t5 and stamp(con)[2] == 0, str(stamp(con)))
+    check("and a run that left none out records 0 skipped", skipped_count(con) == 0, str(skipped_count(con)))
 
     # A file name longer than 255 characters is kept to 255.
     long_name = "SYNTHETIC-" + "x" * 300 + ".pdf"
@@ -218,6 +228,63 @@ def main():
         code = job.main(env=env)
     check("a listing failure exits 1", code == 1, str(code))
     check("a listing failure logs the error's type, not its text", "listing failed (" in err.getvalue() and "SYNTHETIC" not in err.getvalue(), err.getvalue())
+
+    # A stamp an older lister wrote, before `up` added the column, reads NULL
+    # ("not recorded"), never 0 (security c75284, condition 2).
+    old = fresh_catalog(with_skipped=False)
+    old.execute("INSERT INTO cat.public.staged_uploads_read (id, read_at, interval_seconds, upload_count) VALUES (1, ?, 300, 0)", [t1])
+    old.execute("ALTER TABLE cat.public.staged_uploads_read ADD COLUMN IF NOT EXISTS skipped_count INTEGER")
+    check("an older lister's stamp reads NULL once the column is added, not 0", skipped_count(old) is None, str(skipped_count(old)))
+
+    # The wrong deploy order (c75284, condition 4): a catalog without the column
+    # refuses the write. The run raises, and the rows and read_at stay as they
+    # were, so the page shows the list as out of date instead of a fresh stamp.
+    old = fresh_catalog(with_skipped=False)
+    prior = datetime(2026, 11, 19, 5, 0, tzinfo=timezone.utc)
+    old.execute("INSERT INTO cat.public.staged_uploads VALUES ('up-0000', 'photos', 'normal', 'SYNTHETIC-old.jpg', 'image/jpeg', 1, ?)", [prior])
+    old.execute("INSERT INTO cat.public.staged_uploads_read VALUES (1, ?, 300, 1)", [prior])
+    stage(raw_client, bucket, "up-6666", manifest("up-6666", "y.pdf"))
+    before_rows, before_stamp = rows(old), stamp(old)
+    refused = False
+    try:
+        job.run(s3, bucket, old, "cat.public", now=t5 + timedelta(minutes=5))
+    except Exception:
+        refused = True
+    check("a catalog without skipped_count refuses the write", refused)
+    check("and keeps its rows and read_at as they were", rows(old) == before_rows and stamp(old) == before_stamp, str(stamp(old)))
+
+    # main(), the entry the staging-lister service runs, records the skipped
+    # count too (security c75692 on #12113): every case above writes through
+    # run(). The S3 client and the catalog attach are swapped for the moto
+    # client and an in-memory catalog; everything between them is main()'s own.
+    main_bucket = "lake-test-staging-main"
+    raw_client.create_bucket(Bucket=main_bucket)
+    stage(raw_client, main_bucket, "up-7777", manifest("up-7777", NAMES["up-1111"]))
+    stage(raw_client, main_bucket, "up-8888", raw=b"{not json")
+    stage(raw_client, main_bucket, "up-9999", man={**manifest("up-9999", "z.pdf"), "size_bytes": "big"})
+    cat_con = fresh_catalog()
+
+    class AttachedCatalog:
+        """The in-memory catalog, with main()'s LOAD and ATTACH as no-ops."""
+        def execute(self, sql, *args):
+            if sql.startswith(("LOAD postgres", "ATTACH ")):
+                return None
+            return cat_con.execute(sql, *args)
+
+    env = {name: "x" for name in job.REQUIRED_ENV}
+    env["LAKE_S3_STAGING_BUCKET"] = main_bucket
+    real_client, real_connect = boto3.client, duckdb.connect
+    boto3.client, duckdb.connect = (lambda *a, **k: raw_client), (lambda *a, **k: AttachedCatalog())
+    main_out, main_err = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.redirect_stdout(main_out), contextlib.redirect_stderr(main_err):
+            code = job.main(env=env)
+    finally:
+        boto3.client, duckdb.connect = real_client, real_connect
+    check("main() with two unreadable uploads exits 0", code == 0, f"{code} {main_err.getvalue()}")
+    check("main() stamps the count it listed", stamp(cat_con)[2] == 1, str(stamp(cat_con)))
+    check("main() stamps the skipped count, not 0 (c75692)", skipped_count(cat_con) == 2, str(skipped_count(cat_con)))
+    check("main()'s log names the skipped ids only", "up-8888" in main_out.getvalue() and NAMES["up-1111"] not in main_out.getvalue(), main_out.getvalue())
 
     # No output of any run above carries a file name.
     logged = out.getvalue() + err.getvalue()
