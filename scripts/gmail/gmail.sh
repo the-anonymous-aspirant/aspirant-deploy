@@ -29,7 +29,7 @@
 #
 # Usage: scripts/gmail/gmail.sh consent [--port 8765] [--note TEXT]
 #        scripts/gmail/gmail.sh status [--check]
-#        scripts/gmail/gmail.sh pull [--full]
+#        scripts/gmail/gmail.sh pull [--full] [--attachments]
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 IMAGE="${GMAIL_IMAGE:-aspirant-gmail:local}"

@@ -73,7 +73,23 @@ echo verify-ran > "$STUB_LOG.verify"
 if [[ -n "${LAKE_KEK_FILE:-}" && "$(<"$LAKE_KEK_FILE")" == "$(cat "$EXPECT_FILE")" ]]; then echo fd > "$STUB_LOG.verify.kek"; fi
 echo "GREEN (stub)"
 EOF
-chmod +x "$T/pull" "$T/ingest" "$T/verify"
+# The link step stand-in (#11557): records its argv, whether it saw a KEK, and
+# exits STUB_LINK_RC.
+cat > "$T/link" <<'EOF2'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$STUB_LOG.link.args"
+if [[ -n "${LAKE_KEK_FILE:-}${LAKE_KEK_HEX:-}" ]]; then echo kek > "$STUB_LOG.link.kek"; fi
+exit "${STUB_LINK_RC:-0}"
+EOF2
+chmod +x "$T/pull" "$T/ingest" "$T/verify" "$T/link"
+# A run that fetched attachments: links.json beside the export.
+attach_run() {
+  mkdir -p "$T/runs/$1/attachments"
+  echo '{"dataset_id":"gmail","source":"stub","records":[]}' > "$T/runs/$1/manifest.json"
+  echo '{"messages":[],"deleted_ids":[]}' > "$T/runs/$1/messages.json"
+  echo '{"links":[],"refused":[]}' > "$T/runs/$1/links.json"
+  echo 'synthetic' > "$T/runs/$1/attachments/0000"
+}
 
 # run NAME [wrapper args...]; the stub env is set by the caller. Captures stdout
 # and stderr separately; the wrapper's exit code lands in rc.
@@ -86,7 +102,8 @@ run() {
   export STUB_LOG="$T/$name"
   rm -f "$T/$name".*
   local envs=(GMAIL_STAGING_DIR="$T" GMAIL_PULL_CMD="$T/pull" LAKE_INGEST_CMD="$T/ingest"
-              LAKE_VERIFY_CMD="$T/verify" STUB_INGEST_RC="${STUB_INGEST_RC:-0}")
+              LAKE_VERIFY_CMD="$T/verify" GMAIL_LINK_CMD="$T/link" STUB_INGEST_RC="${STUB_INGEST_RC:-0}"
+              STUB_LINK_RC="${STUB_LINK_RC:-0}")
   set +e
   case "${KEY_MODE:-prompt}" in
     prompt)
@@ -129,6 +146,41 @@ grep -q 'run stub-run: success' "$T/normal.out" && pass "the ingest's report lin
 [[ ! -e "$T/runs/20261101T120000Z-full" ]] && pass "after a successful real ingest the clear export (run dir) is gone" || fail "run dir kept after success"
 [[ -f "$T/state.json" ]] && pass "state.json survives the deletion" || fail "state.json deleted"
 grep -q 'clear export removed' "$T/normal.out" && pass "the deletion is reported" || fail "deletion not reported"
+[[ ! -f "$T/normal.link.args" ]] && pass "a run without links.json has no link step" || fail "the link step ran without links.json"
+
+echo "== --attachments: the link step runs after the ingest, then the links are committed, then the run goes (#11557, A6a)"
+A=20261101T150000Z-incremental
+attach_run "$A"
+STUB_SUMMARY="gmail pull: run_id=$A mode=incremental exported=1 deleted=0 history=1008->1009 att_fetched=1" run attach --attachments
+[[ $rc -eq 0 ]] && pass "attachments: exit 0" || fail "attachments: exit 0" "rc=$rc $(cat "$T/attach.err")"
+[[ "$(cat "$T/attach.pull.args")" == "--attachments" ]] && pass "--attachments reaches the pull" || fail "--attachments reaches the pull" "$(cat "$T/attach.pull.args")"
+[[ "$(cat "$T/attach.link.args" 2>/dev/null)" == "$T/runs/$A/links.json" ]] && pass "the link step got the run's links.json" || fail "link argv" "$(cat "$T/attach.link.args" 2>/dev/null)"
+[[ ! -f "$T/attach.link.kek" ]] && pass "the link step gets no KEK" || fail "the link step got the KEK"
+[[ -f "$T/attachments-linked/$A.json" ]] && pass "links.json is committed to attachments-linked/<run id>.json" || fail "links not committed"
+[[ "$(stat -c %a "$T/attachments-linked")" == 700 ]] && pass "attachments-linked is 0700" || fail "attachments-linked mode" "$(stat -c %a "$T/attachments-linked")"
+[[ ! -e "$T/runs/$A" ]] && pass "then the run directory, attachments and all, is gone" || fail "run dir kept after a linked run"
+
+echo "== a failed link step keeps the run and exits with its code; --link-run finishes it (A6a)"
+B=20261101T160000Z-incremental
+attach_run "$B"
+STUB_SUMMARY="gmail pull: run_id=$B mode=incremental exported=1 deleted=0 history=1009->1010 att_fetched=1" STUB_LINK_RC=5 run linkfail --attachments
+[[ $rc -eq 5 ]] && pass "link exit 5 propagates as 5" || fail "link exit propagates" "rc=$rc"
+[[ -f "$T/runs/$B/links.json" && -f "$T/runs/$B/attachments/0000" ]] && pass "failed link: the run, links and attachments are kept" || fail "failed link: run not kept"
+[[ ! -f "$T/attachments-linked/$B.json" ]] && pass "failed link: nothing committed as done" || fail "failed link: committed anyway"
+grep -q -- "--link-run=$B" "$T/linkfail.err" && pass "failed link: says how to finish it" || fail "failed link: message" "$(cat "$T/linkfail.err")"
+STUB_SUMMARY="unused" KEY_MODE=none run linkrun "--link-run=$B"
+[[ $rc -eq 0 ]] && pass "--link-run: exit 0 with no terminal and no KEK" || fail "--link-run: exit 0" "rc=$rc $(cat "$T/linkrun.err")"
+[[ ! -f "$T/linkrun.pull.args" && ! -f "$T/linkrun.ingest.args" ]] && pass "--link-run: no pull, no ingest" || fail "--link-run pulled or ingested"
+[[ -f "$T/attachments-linked/$B.json" && ! -e "$T/runs/$B" ]] && pass "--link-run: committed, then the run is gone" || fail "--link-run: not committed/removed"
+STUB_SUMMARY="unused" KEY_MODE=none run linkrunbad "--link-run=../../etc"
+[[ $rc -eq 2 && ! -f "$T/linkrunbad.link.args" ]] && pass "--link-run refuses what is not a run id" || fail "--link-run bad id" "rc=$rc"
+
+echo "== a failed ingest never reaches the link step"
+C=20261101T170000Z-incremental
+attach_run "$C"
+STUB_SUMMARY="gmail pull: run_id=$C mode=incremental exported=1 deleted=0 history=1010->1011" STUB_INGEST_RC=1 run ingestfaillinks --attachments
+[[ $rc -eq 1 && ! -f "$T/ingestfaillinks.link.args" && -f "$T/runs/$C/links.json" ]] \
+  && pass "ingest failed: no link step, run kept" || fail "ingest failed with links" "rc=$rc"
 
 echo "== flags reach the right half"
 STUB_SUMMARY="gmail pull: run_id=20261101T121500Z-incremental mode=incremental exported=1 deleted=2 history=1002->1008" run flags --full --dry-run --verify

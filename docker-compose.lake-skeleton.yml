@@ -129,6 +129,9 @@ services:
       LAKE_S3_STAGING_LISTER_ACCESS_KEY: ${LAKE_S3_STAGING_LISTER_ACCESS_KEY:-}
       LAKE_S3_STAGING_LISTER_SECRET_KEY: ${LAKE_S3_STAGING_LISTER_SECRET_KEY:-}
       LAKE_CATALOG_STAGING_LISTER_DSN: ${LAKE_CATALOG_STAGING_LISTER_DSN:-}
+      # The Gmail linker's role, passed SO THAT verify can prove its bounds by
+      # attempt (system_3 #11557, A6c). Nothing else here uses it.
+      LAKE_CATALOG_GMAIL_LINKER_DSN: ${LAKE_CATALOG_GMAIL_LINKER_DSN:-}
       # KEK for layer-2 envelope encryption of sensitivity=high blobs (§9, #4134).
       # Defaulted rather than `:?` so a skeleton with no high-sensitivity data
       # still seeds; the fixtures loader fails closed only when it actually
@@ -152,6 +155,9 @@ services:
       # because `LAKE_KEK_FILE` above is empty in that case.
       - ${LAKE_KEK_FILE_HOST:-/dev/null}:/run/secrets/lake_kek:ro
       - ./scripts/lake_skeleton_verify.py:/work/verify.py:ro
+      # The Gmail linker, whose prove_bounds verify calls as the linker's role
+      # (system_3 #11557, A6c).
+      - ./scripts/lake_gmail_link.py:/work/lake_gmail_link.py:ro
       - ./scripts/lake_skeleton_fixtures.py:/work/fixtures.py:ro
       # The at-rest checker (#4299 / #4273-A1), layer 2 of #4273. Mounted at
       # /work so its own `sys.path.insert(_HERE, "kek"/"lake")` resolves
@@ -229,6 +235,32 @@ services:
       LAKE_CATALOG_STAGING_LISTER_DSN: ${LAKE_CATALOG_STAGING_LISTER_DSN:-}
     volumes:
       - ./scripts/lake_list_staged.py:/work/list_staged.py:ro
+      # The postgres extension, from the host cache, as for `duckdb` (#5366).
+      - ${LAKE_DUCKDB_EXT_DIR:-${HOME}/.duckdb/extensions}:/root/.duckdb/extensions:ro
+    networks:
+      - lake
+
+  # The Gmail attachment linker (system_3 #11557; security c75385 A6 as amended
+  # in c75393). Same image as `duckdb`, its own service so it holds ONLY the
+  # linker's catalog role, which can INSERT into gmail_attachment_links and do
+  # nothing else. No S3 key, never the owner's DSN. Run per Gmail run by
+  # `lake-skeleton.sh link-gmail <links.json>`. Only that one file is mounted,
+  # read-only, at /source/links.json: the run's directory also holds the clear
+  # messages.json export and every attachment blob, and this container is on
+  # the non-internal `lake` bridge (security c75631 on #12146).
+  gmail-linker:
+    logging: *default-logging
+    image: aspirant-lake-duckdb:local
+    container_name: lake-skeleton-gmail-linker
+    profiles: ["client"]
+    depends_on:
+      catalog:
+        condition: service_healthy
+    environment:
+      LAKE_CATALOG_GMAIL_LINKER_DSN: ${LAKE_CATALOG_GMAIL_LINKER_DSN:-}
+    volumes:
+      - ./scripts/lake_gmail_link.py:/work/lake_gmail_link.py:ro
+      - ${GMAIL_LINK_FILE:-/nonexistent}:/source/links.json:ro
       # The postgres extension, from the host cache, as for `duckdb` (#5366).
       - ${LAKE_DUCKDB_EXT_DIR:-${HOME}/.duckdb/extensions}:/root/.duckdb/extensions:ro
     networks:

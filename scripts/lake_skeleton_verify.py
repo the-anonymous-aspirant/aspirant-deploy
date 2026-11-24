@@ -610,6 +610,46 @@ else:
                 f"owner: {owner}" if owner else "table missing",
             )
 
+# --- 9. the Gmail linker's role is bounded (system_3 #11557) -----------------
+#
+# Security's A6c (c75393 on #11557), as the role itself: INSERT ... ON CONFLICT
+# DO NOTHING of an existing key succeeds without SELECT; SELECT, UPDATE and
+# DELETE on the link table and an INSERT into any other catalog table are
+# refused; the role owns nothing. The probes live with the job
+# (lake_gmail_link.prove_bounds) so its own test runs the same ones against a
+# real Postgres. And the explorer's role can read the table.
+LINKER_DSN = os.environ.get("LAKE_CATALOG_GMAIL_LINKER_DSN", "")
+if not LINKER_DSN or LINKER_DSN == "pending":
+    check(
+        "Gmail linker is provisioned",
+        False,
+        "LAKE_CATALOG_GMAIL_LINKER_DSN absent — run 'lake-skeleton.sh up'",
+    )
+else:
+    import lake_gmail_link
+
+    glc = duckdb.connect()
+    glc.execute("LOAD postgres")
+    try:
+        glc.execute(f"ATTACH '{LINKER_DSN}' AS gl_cat (TYPE postgres)")
+        attached, att_detail = True, "attached"
+    except Exception as exc:  # noqa: BLE001 - the DSN is never printed
+        attached, att_detail = False, type(exc).__name__
+    check("Gmail linker role can connect", attached, att_detail)
+    if attached:
+        for label, ok, detail in lake_gmail_link.prove_bounds(glc, "gl_cat"):
+            check(label, ok, detail)
+    if RO_DSN:
+        roc3 = duckdb.connect()
+        roc3.execute("LOAD postgres")
+        roc3.execute(f"ATTACH '{RO_DSN}' AS ro_cat3 (TYPE postgres)")
+        try:
+            roc3.execute("SELECT count(*) FROM ro_cat3.public.gmail_attachment_links").fetchone()
+            ok, detail = True, "SELECT succeeded"
+        except Exception as exc:  # noqa: BLE001
+            ok, detail = False, type(exc).__name__
+        check("Explorer catalog role can SELECT gmail_attachment_links", ok, detail)
+
 print()
 if failures:
     print(f"FAILED: {len(failures)} check(s) — {', '.join(failures)}")

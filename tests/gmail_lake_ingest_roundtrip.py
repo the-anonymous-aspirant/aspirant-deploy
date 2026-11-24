@@ -15,7 +15,10 @@ with an ephemeral KEK and proves, byte by byte:
     harness (`scripts/lake_verify_at_rest.py`) is green over the bucket, checks
     0-7;
   - the envelope decrypts back to the export's exact bytes;
-  - an incremental run is a second object, and a re-run of the first skips it.
+  - an incremental run is a second object, and a re-run of the first skips it;
+  - an attachment run (#11557, security c75385): each fetched part is its own
+    `message_attachment` object at `high`, catalogued under `attachments/<sha256>`
+    with no file name in any column, and decrypts back to the part's bytes.
 
 The export is built from the synthetic mailbox in `tests/fixtures/gmail/` with
 the pull's own normaliser and writer (`normalize_message`, `write_run`), so the
@@ -219,6 +222,120 @@ def test_incremental_run_and_rerun(store, s3, bucket, staging: Path, kek: bytes,
     check("the ledger has three runs", len(harness.rows(store, "ingest_runs")) == 3)
 
 
+# Invented names, one hostile (a path), one personal (an invented person): the
+# catalog may hold neither (A1).
+ATTACHMENT_NAMES = ("../../x", "Erika Mustermann Kontoauszug.pdf")
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+PDF = b"%PDF-1.4 synthetic statement\n" + bytes(range(256)) * 8
+PNG = b"\x89PNG\r\n\x1a\n synthetic" + bytes(range(256)) * 3
+
+
+def build_attachment_run(staging: Path, run_id: str) -> Path:
+    """An incremental run with one message and two attachment parts, written by
+    the pull's own planner, fetcher and writer (inline data: no API call)."""
+    pdf, png = PDF, PNG
+    message = {
+        "id": "18f00000000000a1",
+        "threadId": "18f00000000000a1",
+        "labelIds": ["INBOX"],
+        "internalDate": "1793448000000",
+        "payload": {
+            "partId": "",
+            "mimeType": "multipart/mixed",
+            "headers": [{"name": "Subject", "value": "synthetic attachments"}],
+            "body": {"size": 0},
+            "parts": [
+                {"partId": "1", "mimeType": "Application/PDF; name=x", "filename": ATTACHMENT_NAMES[1],
+                 "body": {"size": len(pdf), "data": _b64url(pdf)}},
+                {"partId": "2", "mimeType": "image/png", "filename": ATTACHMENT_NAMES[0],
+                 "body": {"size": len(png), "data": _b64url(png)}},
+            ],
+        },
+    }
+    export = {
+        "mode": "incremental",
+        "base_history_id": "1002",
+        "history_id": "1003",
+        "messages": [gmail_pull.normalize_message(message)],
+        "deleted_ids": [],
+        "counts": {},
+    }
+    to_fetch, over, _ = gmail_pull.plan_attachments(gmail_pull.attachment_refs(message), set())
+    partial = gmail_pull._open_partial(staging, run_id)
+    fetched = gmail_pull.fetch_attachments(None, partial, to_fetch, over)  # inline data: no call
+    now = datetime(2026, 11, 1, 12, 30, 0, tzinfo=timezone.utc)
+    return gmail_pull.write_run(staging, run_id, export, now, partial=partial, attachments=fetched)
+
+
+def test_attachment_run(staging: Path, kek: bytes):
+    pdf, png = PDF, PNG
+    run = build_attachment_run(staging, "20261101T123000Z-incremental")
+    manifest = lake_ingest.load_manifest(str(run / gmail_pull.MANIFEST_NAME))
+    attach = [r for r in manifest["records"] if r["kind"] == gmail_pull.ATTACHMENT_KIND]
+    check("two attachment records, each declared high", len(attach) == 2 and all(r["declared_sensitivity"] == "high" for r in attach))
+
+    store = harness.fresh_store()
+    s3, bucket = harness.fresh_bucket()
+    summary = lake_ingest.ingest(manifest, s3=s3, bucket=bucket, store=store, kek=kek, kek_version=1)
+    check("the attachment run succeeds", summary["status"] == catalog.RUN_STATUS_SUCCESS, summary["status"])
+    objects = harness.stored(s3, bucket)
+    check("three objects: the export and two parts", len(objects) == 3, sorted(objects))
+    check("every stored object is an envelope", all(b[:4] == b"AOBJ" for b in objects.values()))
+    rows = [r for r in asset_dicts(store) if r["kind"] == gmail_pull.ATTACHMENT_KIND]
+    by_sha = {r["sha256"]: r for r in rows}
+    for data, mime in ((pdf, "application/pdf"), (png, "image/png")):
+        digest = hashlib.sha256(data).hexdigest()
+        row = by_sha.get(digest) or {}
+        check(f"{mime} part: source_path is attachments/<sha256>", row.get("source_path") == f"attachments/{digest}", row.get("source_path"))
+        check(f"{mime} part: sensitivity high (declared)", row.get("sensitivity") == catalog.SENSITIVITY_HIGH
+              and row.get("sensitivity_source") == catalog.SOURCE_DECLARED)
+        check(f"{mime} part: the declared type, normalised", row.get("mime") == mime, row.get("mime"))
+        body = s3.get_object(Bucket=bucket, Key=row["object_key"])["Body"].read() if row else b""
+        plain = decrypt_from_storage(body, row["wrapped_dek"], lambda version: kek) if row else b""
+        check(f"{mime} part: decrypts to the part's bytes", plain == data)
+    columns = json.dumps(asset_dicts(store) + [list(r) for r in harness.rows(store, "ingest_runs")], default=str)
+    for name in ATTACHMENT_NAMES + ("Mustermann",):
+        check(f"no catalog column holds {name!r}", name not in columns)
+        check(f"no stored object holds {name!r}", all(name.encode() not in b for b in objects.values()))
+
+
+def test_attachment_already_in_the_lake(staging: Path, kek: bytes):
+    """A7: a part whose bytes the lake already holds, here as an earlier
+    `normal` synthetic blob, is skipped by the ingest's content-address dedup;
+    the run still succeeds and its links.json still names the part, so the
+    link step (which runs on the ingest's success) still links it."""
+    store = harness.fresh_store()
+    s3, bucket = harness.fresh_bucket()
+    earlier = staging / "earlier-normal"
+    earlier.mkdir(parents=True)
+    (earlier / "synthetic.png").write_bytes(PNG)
+    (earlier / "manifest.json").write_text(json.dumps({
+        "dataset_id": "synthetic-fixtures",
+        "source": "a synthetic normal blob loaded before the gmail run",
+        "records": [{"path": "synthetic.png", "mime": "image/png", "sensitivity": "normal"}],
+    }), "utf-8")
+    first = lake_ingest.ingest(lake_ingest.load_manifest(str(earlier / "manifest.json")), s3=s3, bucket=bucket, store=store, kek=kek, kek_version=1)
+    check("the earlier normal blob loads", first["status"] == catalog.RUN_STATUS_SUCCESS, first["status"])
+
+    run = build_attachment_run(staging, "20261101T124500Z-incremental")
+    summary = lake_ingest.ingest(lake_ingest.load_manifest(str(run / gmail_pull.MANIFEST_NAME)), s3=s3, bucket=bucket, store=store, kek=kek, kek_version=1)
+    check("the attachment run succeeds", summary["status"] == catalog.RUN_STATUS_SUCCESS, summary["status"])
+    check("the part already in the lake is skipped by dedup", summary["skipped"] == 1, summary["skipped"])
+    links = json.loads((run / gmail_pull.LINKS_NAME).read_text("utf-8"))["links"]
+    check("links.json still names the skipped part, so it is linked",
+          {link["sha256"] for link in links} == {hashlib.sha256(PDF).hexdigest(), hashlib.sha256(PNG).hexdigest()})
+    rows = {r["sha256"]: r for r in asset_dicts(store)}
+    existing = rows[hashlib.sha256(PNG).hexdigest()]
+    check("the skipped blob keeps the first loader's row (dedup is global; first loader wins)",
+          existing["dataset_id"] == "synthetic-fixtures" and existing["sensitivity"] == catalog.SENSITIVITY_NORMAL,
+          f"{existing['dataset_id']} / {existing['sensitivity']}")
+
+
 @mock_aws
 def main() -> int:
     kek = os.urandom(32)  # ephemeral, synthetic, never persisted
@@ -233,6 +350,10 @@ def main() -> int:
         store, s3, bucket = test_encrypted_write_and_verify(manifest, run1, kek)
         print("\nincremental run and re-run:")
         test_incremental_run_and_rerun(store, s3, bucket, staging, kek, manifest)
+        print("\nattachment run (#11557):")
+        test_attachment_run(staging, kek)
+        print("\nan attachment the lake already holds (A7):")
+        test_attachment_already_in_the_lake(staging, kek)
     print()
     if harness.FAILED:
         print(f"FAILED: {harness.FAILED} failed, {harness.PASSED} passed")

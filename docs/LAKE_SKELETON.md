@@ -240,6 +240,45 @@ two credentials. Cron runs it every 5 minutes (`INTERVAL_SECONDS = 300` in
 - `explorer_ro` can read both tables;
 - the role owns neither.
 
+### The Gmail attachment linker (system_3 #11557)
+
+A Gmail run pulled with `--attachments` (`docs/GMAIL_INGEST.md`) stores each
+attachment part as its own `message_attachment` object under
+`attachments/<sha256>`. Which message and part a blob came from is written
+separately, after a fully successful ingest, into one table:
+
+- `gmail_attachment_links`: `message_id`, `part_id`, `sha256`, and nothing
+  else. It holds no file name, type or size. Each column is CHECKed to its
+  shape, and the key is `(message_id, part_id)`.
+
+Security's A6 (c75385 on #11557, amended in c75393), and how it is met:
+
+- **A catalog role of its own,** `gmail_linker`: `INSERT` on
+  `gmail_attachment_links` and nothing else, not even `SELECT`. `up` creates
+  the table as `ducklake`, so the role owns nothing and `explorer_ro` can read
+  it. The ingest itself still attaches as `ducklake`; moving it off the owner
+  is not part of this.
+- **Its own step and its own service,** `gmail-linker`, which holds only that
+  role's DSN: `lake-skeleton.sh link-gmail <run>/links.json`. Only that file
+  is mounted, read-only, at `/source/links.json`. The run's directory, with
+  the export and the attachment blobs, never is.
+- **Writes are `INSERT ... ON CONFLICT DO NOTHING`, with no conflict target,**
+  in one transaction, so a re-run is a no-op. A conflict target would need
+  `SELECT` on its columns: measured on Postgres 16, it is refused without it.
+- **A link row only for a part the pull wrote and hashed** (A6b). Parts refused
+  at fetch are listed apart in `links.json` and get no row.
+- **The run directory goes only after both steps succeed** (A6a). See
+  `scripts/gmail/gmail_pull_and_ingest.sh`; `--link-run=<run id>` repeats the
+  link step for a kept run.
+
+`verify` proves the role's bounds as the role itself (A6c): an insert of an
+existing key with `ON CONFLICT DO NOTHING` succeeds; `SELECT`, `UPDATE` and
+`DELETE` on the table, and an `INSERT` into another catalog table, are
+refused; the role owns no relation and has no superuser, create or bypass
+flag. Every write it attempts is rolled back. `explorer_ro` can read the
+table. `tests/lake_gmail_link_unit.sh` runs the same probes, and the job,
+against a throwaway Postgres 16 with `up`'s own bootstrap.
+
 ### Rotating the explorer's credentials (system_3 #11381)
 
 When a leak exposes the explorer's catalog password or its read-only key, the

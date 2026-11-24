@@ -31,8 +31,39 @@ The export
 `/api/assets/{sha}/messages` route parses (`from`, `text`, `date` are the keys
 it reads first). One entry per message:
 `id, threadId, date, from, to, cc, subject, labels, text, attachments`, where
-`attachments` is metadata only (`name, mime, size`) until the security review
-(#8806-D1) says otherwise.
+`attachments` is each part's metadata: `name, mime, size, part_id`. The file
+name lives here and nowhere else (security c75385 A1 on system_3 #11557): this
+export is sealed at ingest.
+
+Attachment content (system_3 #11557, security c75385 on #11557)
+---------------------------------------------------------------
+Off unless the run is given `--attachments`. Then, after the messages:
+
+1. Plan. Every attachment part of the run's messages, less the ones already
+   linked: the parts named in `attachments-linked/<run id>.json` under the
+   staging directory, keyed by message id and part id (stable in Gmail: a
+   message's content never changes). The pull never writes that directory.
+   The wrapper moves a run's `links.json` there only once its links are in the
+   lake, so a run whose link step did not finish is fetched again, which the
+   ingest's content-address dedup and the link writer's ON CONFLICT DO NOTHING
+   make harmless. A part whose reported size is over ATTACHMENT_CAP is not
+   fetched.
+2. Estimate, before any fetch (A5): parts and reported bytes to fetch, and the
+   free space under the staging directory. If the bytes plus a margin do not
+   fit, the run refuses (exit 8) and writes nothing, so the history id stays
+   where it was and the next run repeats the window.
+3. Fetch (A3): `users.messages.attachments.get` only, or the part's inline data
+   when Gmail sent it with the message. No URL in a message is ever fetched.
+   The call answers base64url JSON, so each part is in memory whole: the cap is
+   the memory bound, and the bytes are not streamed. A part whose decoded
+   length differs from the reported size is refused (A4).
+4. Write (A1): `attachments/<sha256>` in the run directory, named by its hash,
+   never by its file name. `links.json` holds `(message_id, part_id, sha256)`
+   for each fetched part, and the refused parts by id and reason code. The
+   manifest gains one `message_attachment` record per distinct blob, at
+   `sensitivity=high` whatever its type (A7), with Gmail's declared type
+   normalised as the explorer normalises it (A2). Nothing opens, parses or
+   previews the bytes.
 
 A full export is the mailbox. An incremental export is a **delta**: the
 messages added or changed since the stored history id, plus `deleted_ids` for
@@ -57,20 +88,23 @@ fails only after 30 minutes of waiting on one call.
 What is never printed
 ---------------------
 Counts, times and the run id only: never a subject, an address, a body, a
-message id or a token. A failure names the call, its HTTP status and Google's
-reason code; Google's message is printed with anything shaped like an id or an
+message id or a token. The one exception is an attachment part refused at
+fetch, which the summary names by message id, part id and reason code, never by
+file name or type (security c75385 A4, A8). A failure names the call, its HTTP
+status and Google's reason code; Google's message is printed with anything shaped like an id or an
 address redacted. While it runs, the pull prints its progress on stderr once a
 minute: messages fetched of those listed, and the time left at the current pace.
 
 Exit codes: 0 ok; 2 KEK or envelope failure; 3 re-consent needed; 4 transport
 or API error; 5 configuration refused; 6 no token stored; 7 another pull holds
-the staging lock.
+the staging lock; 8 the attachments to fetch do not fit the staging disk.
 """
 from __future__ import annotations
 
 import argparse
 import base64
 import fcntl
+import hashlib
 import html
 import json
 import os
@@ -106,7 +140,13 @@ RETRIES = 5
 # Gmail API quota units per call (developers.google.com/workspace/gmail/api/
 # reference/quota, as design read it for #11344): the per-user limit is 6,000
 # units a minute, and a full get costs 60 of them.
-UNIT_COST = {"getProfile": 1, "messages.list": 5, "messages.get": 60, "history.list": 2}
+UNIT_COST = {
+    "getProfile": 1,
+    "messages.list": 5,
+    "messages.get": 60,
+    "history.list": 2,
+    "messages.attachments.get": 5,
+}
 USER_UNITS_PER_MINUTE = 6000
 DEFAULT_UNITS_PER_MINUTE = 5100  # 85%: headroom under the per-user limit
 RATE_LIMIT_REASONS = frozenset({"rateLimitExceeded", "userRateLimitExceeded"})
@@ -117,10 +157,33 @@ SLOW_DOWN = 0.8
 PROGRESS_EVERY = 60
 
 EXIT_LOCKED = 7
+EXIT_NO_SPACE = 8
+
+# Attachment content (#11557, security c75385). The cap is Gmail's own limit on
+# a received attachment, and the memory bound of one fetch (A4).
+ATTACHMENT_CAP = 25 * 1024 * 1024
+ATTACHMENTS_DIR = "attachments"
+LINKS_NAME = "links.json"
+LINKED_DIR = "attachments-linked"
+ATTACHMENT_KIND = "message_attachment"
+# Free space the attachment phase leaves: a tenth of what it fetches, and never
+# less than this.
+SPACE_MARGIN_MIN = 64 * 1024 * 1024
+# The explorer's rule for a stored type (aspirant-explorer app/routes.py,
+# `_content_type_and_disposition`): cut at ";", stripped, lower case, exactly
+# one type/subtype. Anything else is application/octet-stream (A2).
+_MIME_SHAPE = re.compile(r"^[a-z0-9.+-]+/[a-z0-9.+-]+$")
+OCTET_STREAM = "application/octet-stream"
 
 
 class HistoryExpired(Exception):
     """users.history.list answered 404: the stored history id is too old."""
+
+
+class NoSpaceError(Exception):
+    """The attachments a run would fetch do not fit the staging disk (A5).
+
+    `str()` is counts and bytes only."""
 
 
 class PullError(Exception):
@@ -252,7 +315,7 @@ def _http_status(exc) -> int | None:
 
 
 class GmailApi:
-    """The only code that talks to Google: four read-only calls.
+    """The only code that talks to Google: five read-only calls.
 
     `service` is what `googleapiclient.discovery.build("gmail", "v1")` returns;
     the test passes a fake with the same call chain, so this wrapper (pagination
@@ -327,6 +390,15 @@ class GmailApi:
         self.progress.fetched += 1
         self.progress.emit()
         return message
+
+    def get_attachment(self, message_id: str, attachment_id: str) -> dict | None:
+        """One attachment part's body, `{"size": n, "data": base64url}`, or
+        None if it no longer exists. The only call that fetches content."""
+        return self._run(
+            self._users.messages().attachments().get(userId="me", messageId=message_id, id=attachment_id),
+            "messages.attachments.get",
+            not_found=lambda: None,
+        )
 
     def list_history(self, start_history_id: str, page_token: str | None = None) -> dict:
         def expired():
@@ -443,17 +515,47 @@ def extract_text(payload: dict) -> str:
     return ""
 
 
-def extract_attachments(payload: dict) -> list[dict]:
-    """Metadata only (#8806-D1 decides whether content is ever pulled)."""
-    out = []
+def _attachment_parts(payload: dict):
     for part in _walk(payload):
-        if part is payload or not _is_attachment(part):
-            continue
+        if part is not payload and _is_attachment(part):
+            yield part
+
+
+def extract_attachments(payload: dict) -> list[dict]:
+    """Each attachment part's metadata, for the sealed export. The attachment
+    id is not kept: it is a fetch handle, not a fact about the mail."""
+    return [
+        {
+            "name": part.get("filename") or "",
+            "mime": part.get("mimeType") or OCTET_STREAM,
+            "size": int((part.get("body") or {}).get("size") or 0),
+            "part_id": str(part.get("partId") or ""),
+        }
+        for part in _attachment_parts(payload)
+    ]
+
+
+def normalize_mime(raw) -> str:
+    """Gmail's declared type as the explorer normalises a stored one (A2).
+    Never sniffed from the bytes."""
+    norm = str(raw or "").split(";", 1)[0].strip().lower()
+    return norm if _MIME_SHAPE.match(norm) else OCTET_STREAM
+
+
+def attachment_refs(message: dict) -> list[dict]:
+    """What the attachment phase needs of each part, kept out of the export:
+    the fetch handle (or inline data), the reported size and the type."""
+    out = []
+    for part in _attachment_parts(message.get("payload") or {}):
+        body = part.get("body") or {}
         out.append(
             {
-                "name": part.get("filename") or "",
-                "mime": part.get("mimeType") or "application/octet-stream",
-                "size": int((part.get("body") or {}).get("size") or 0),
+                "message_id": message["id"],
+                "part_id": str(part.get("partId") or ""),
+                "attachment_id": body.get("attachmentId"),
+                "data": body.get("data"),
+                "size": int(body.get("size") or 0),
+                "mime": normalize_mime(part.get("mimeType")),
             }
         )
     return out
@@ -504,7 +606,7 @@ def full_pull(api: GmailApi) -> dict:
     history_id = str(api.profile()["historyId"])
     ids = [m["id"] for page in _pages(api.list_message_ids) for m in page.get("messages") or []]
     api.progress.enter("fetching", listed=len(ids))
-    messages, counts = {}, {"listed": len(ids), "gone": 0, "excluded": 0}
+    messages, refs, counts = {}, [], {"listed": len(ids), "gone": 0, "excluded": 0}
     for message_id in ids:
         message = api.get_message(message_id)
         if message is None:
@@ -513,6 +615,7 @@ def full_pull(api: GmailApi) -> dict:
             counts["excluded"] += 1
         else:
             messages[message_id] = normalize_message(message)
+            refs.extend(attachment_refs(message))
     return {
         "mode": "full",
         "base_history_id": None,
@@ -520,6 +623,7 @@ def full_pull(api: GmailApi) -> dict:
         "messages": [messages[k] for k in sorted(messages)],
         "deleted_ids": [],
         "counts": counts,
+        "attachment_refs": refs,
     }
 
 
@@ -536,7 +640,8 @@ def incremental_pull(api: GmailApi, start_history_id: str) -> dict:
                     touched.add(entry["message"]["id"])
             for entry in record.get("messagesDeleted") or []:
                 deleted.add(entry["message"]["id"])
-    messages, counts = {}, {"history_records": records, "touched": len(touched), "gone": 0, "excluded": 0}
+    messages, refs = {}, []
+    counts = {"history_records": records, "touched": len(touched), "gone": 0, "excluded": 0}
     api.progress.enter("fetching", listed=len(touched - deleted))
     for message_id in sorted(touched - deleted):
         message = api.get_message(message_id)
@@ -548,6 +653,7 @@ def incremental_pull(api: GmailApi, start_history_id: str) -> dict:
             deleted.add(message_id)
         else:
             messages[message_id] = normalize_message(message)
+            refs.extend(attachment_refs(message))
     return {
         "mode": "incremental",
         "base_history_id": start_history_id,
@@ -555,6 +661,7 @@ def incremental_pull(api: GmailApi, start_history_id: str) -> dict:
         "messages": [messages[k] for k in sorted(messages)],
         "deleted_ids": sorted(deleted),
         "counts": counts,
+        "attachment_refs": refs,
     }
 
 
@@ -612,30 +719,151 @@ def write_state(staging: Path, history_id: str, run_id: str, now: datetime) -> N
     _fsync_dir(staging)
 
 
-def build_manifest(run_id: str, export: dict) -> dict:
-    """The source manifest `scripts/lake_ingest.py` loads (REAL_DATA_INGEST.md)."""
+def build_manifest(run_id: str, export: dict, attachments: dict | None = None) -> dict:
+    """The source manifest `scripts/lake_ingest.py` loads (REAL_DATA_INGEST.md).
+
+    One record for the export, and one per distinct attachment blob. A blob's
+    path is its hash, so the catalog's `source_path` names no file (A1)."""
+    records = [
+        {
+            "path": EXPORT_NAME,
+            "mime": "application/json",
+            "kind": "message_export",
+            "sensitivity": "high",
+        }
+    ]
+    for digest, mime in sorted((attachments or {}).get("blobs", {}).items()):
+        records.append(
+            {
+                "path": f"{ATTACHMENTS_DIR}/{digest}",
+                "mime": mime,
+                "kind": ATTACHMENT_KIND,
+                # Whatever its type (A7).
+                "sensitivity": "high",
+            }
+        )
     return {
         "dataset_id": DATASET_ID,
         "source": f"{SOURCE} {export['mode']} run {run_id}",
-        "records": [
-            {
-                "path": EXPORT_NAME,
-                "mime": "application/json",
-                "kind": "message_export",
-                "sensitivity": "high",
-            }
-        ],
+        "records": records,
     }
 
 
-def write_run(staging: Path, run_id: str, export: dict, now: datetime) -> Path:
-    """Write the export and its manifest; the run dir appears only when complete."""
+# --- attachment content (#11557, security c75385) ----------------------------
+
+def _part_key(message_id: str, part_id: str) -> str:
+    return f"{message_id}/{part_id}"
+
+
+def read_seen(staging: Path) -> set[str]:
+    """The parts whose links are in the lake, as `message id/part id`: every
+    committed run's `links.json`, moved under LINKED_DIR by the wrapper."""
+    directory = staging / LINKED_DIR
+    if not directory.is_dir():
+        return set()
+    seen = set()
+    for path in sorted(directory.glob("*.json")):
+        for link in json.loads(path.read_text("utf-8")).get("links") or []:
+            seen.add(_part_key(link["message_id"], link["part_id"]))
+    return seen
+
+
+def plan_attachments(refs: list[dict], seen: set[str]) -> tuple[list[dict], list[dict], int]:
+    """(to fetch, over the cap, already fetched by a past run)."""
+    to_fetch, over, already = [], [], 0
+    for ref in refs:
+        if _part_key(ref["message_id"], ref["part_id"]) in seen:
+            already += 1
+        elif ref["size"] > ATTACHMENT_CAP:
+            over.append(ref)
+        else:
+            to_fetch.append(ref)
+    return to_fetch, over, already
+
+
+def check_space(staging: Path, to_fetch: list[dict], progress: "Progress", disk_free=None) -> None:
+    """A5: print the estimate, then refuse if it does not fit. Before any fetch
+    and before the run directory exists, so a refusal writes nothing."""
+    want = sum(ref["size"] for ref in to_fetch)
+    need = want + max(want // 10, SPACE_MARGIN_MIN)
+    free = (disk_free or (lambda path: shutil.disk_usage(path).free))(staging)
+    progress.note(f"attachments: {len(to_fetch)} part(s) to fetch, {want} bytes reported; {free} bytes free on staging")
+    if need > free:
+        raise NoSpaceError(
+            f"{len(to_fetch)} attachment part(s) to fetch, {want} bytes reported, "
+            f"{need} bytes needed with the margin; {free} bytes free on staging"
+        )
+
+
+def fetch_attachments(api: GmailApi, partial: Path, to_fetch: list[dict], over: list[dict]) -> dict:
+    """Fetch, check and write each part. Returns the links, the refused parts
+    (ids and a reason code) and the distinct blobs with their types."""
+    directory = partial / ATTACHMENTS_DIR
+    links, refused, blobs, written = [], [], {}, 0
+
+    def refuse(ref: dict, reason: str) -> None:
+        refused.append({"message_id": ref["message_id"], "part_id": ref["part_id"], "reason": reason})
+
+    for ref in over:
+        refuse(ref, "over_cap")
+    for ref in to_fetch:
+        data = ref["data"]
+        if data is None:
+            if not ref["attachment_id"]:
+                refuse(ref, "no_content")
+                continue
+            body = api.get_attachment(ref["message_id"], ref["attachment_id"])
+            if body is None:
+                refuse(ref, "gone")
+                continue
+            data = body.get("data") or ""
+        # Whole in memory (base64url JSON from Gmail): ATTACHMENT_CAP bounds it.
+        try:
+            raw = base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+        except ValueError:
+            refuse(ref, "undecodable")
+            continue
+        if len(raw) > ATTACHMENT_CAP:
+            refuse(ref, "over_cap")
+            continue
+        if len(raw) != ref["size"]:
+            refuse(ref, "size_mismatch")
+            continue
+        digest = hashlib.sha256(raw).hexdigest()
+        if digest not in blobs:
+            directory.mkdir(mode=0o700, exist_ok=True)
+            _write_private(directory / digest, raw)
+            blobs[digest] = ref["mime"]
+            written += len(raw)
+        links.append({"message_id": ref["message_id"], "part_id": ref["part_id"], "sha256": digest})
+        del raw
+    if blobs:
+        _fsync_dir(directory)
+    return {"links": links, "refused": refused, "blobs": blobs, "bytes": written}
+
+
+def _open_partial(staging: Path, run_id: str) -> Path:
     runs = staging / "runs"
     runs.mkdir(mode=0o700, parents=True, exist_ok=True)
     partial = runs / f".{run_id}.partial"
     if partial.exists():
         shutil.rmtree(partial)
     partial.mkdir(mode=0o700)
+    return partial
+
+
+def write_run(
+    staging: Path,
+    run_id: str,
+    export: dict,
+    now: datetime,
+    partial: Path | None = None,
+    attachments: dict | None = None,
+) -> Path:
+    """Write the export and its manifest (and the attachment links, when the
+    run fetched any); the run dir appears only when complete."""
+    runs = staging / "runs"
+    partial = partial or _open_partial(staging, run_id)
     document = {
         "format": EXPORT_FORMAT,
         "mode": export["mode"],
@@ -646,7 +874,11 @@ def write_run(staging: Path, run_id: str, export: dict, now: datetime) -> Path:
         "deleted_ids": export["deleted_ids"],
     }
     _write_private(partial / EXPORT_NAME, canonical_json(document))
-    _write_private(partial / MANIFEST_NAME, json.dumps(build_manifest(run_id, export), indent=1).encode("utf-8"))
+    if attachments is not None:
+        links = {"links": attachments["links"], "refused": attachments["refused"]}
+        _write_private(partial / LINKS_NAME, canonical_json(links))
+    manifest = build_manifest(run_id, export, attachments)
+    _write_private(partial / MANIFEST_NAME, json.dumps(manifest, indent=1).encode("utf-8"))
     _fsync_dir(partial)
     final = runs / run_id
     os.rename(partial, final)
@@ -654,7 +886,15 @@ def write_run(staging: Path, run_id: str, export: dict, now: datetime) -> Path:
     return final
 
 
-def run_pull(api: GmailApi, staging: Path, *, force_full: bool = False, now: datetime | None = None) -> dict:
+def run_pull(
+    api: GmailApi,
+    staging: Path,
+    *,
+    force_full: bool = False,
+    now: datetime | None = None,
+    attachments: bool = False,
+    disk_free=None,
+) -> dict:
     """One pull, end to end. Returns a summary of counts (no mail content)."""
     now = now or datetime.now(timezone.utc)
     staging.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -671,7 +911,33 @@ def run_pull(api: GmailApi, staging: Path, *, force_full: bool = False, now: dat
 
     run_id = f"{now.strftime('%Y%m%dT%H%M%SZ')}-{export['mode']}"
     changed = bool(export["messages"] or export["deleted_ids"]) or export["mode"] == "full"
-    run_dir = write_run(staging, run_id, export, now) if changed else None
+    fetched, att_counts = None, {}
+    if attachments:
+        to_fetch, over, already = plan_attachments(export["attachment_refs"], read_seen(staging))
+        check_space(staging, to_fetch, api.progress, disk_free)
+        att_counts = {"att_parts": len(export["attachment_refs"]), "att_already": already}
+    run_dir = None
+    if changed:
+        partial = _open_partial(staging, run_id)
+        try:
+            if attachments:
+                api.progress.note(f"fetching attachments: {len(to_fetch)} part(s)")
+                fetched = fetch_attachments(api, partial, to_fetch, over)
+            run_dir = write_run(staging, run_id, export, now, partial=partial, attachments=fetched)
+        except BaseException:
+            # Clear attachment bytes are not left in a partial run directory.
+            shutil.rmtree(partial, ignore_errors=True)
+            raise
+    if fetched is not None:
+        refused = fetched["refused"]
+        att_counts.update(
+            att_fetched=len(fetched["links"]),
+            att_blobs=len(fetched["blobs"]),
+            att_bytes=fetched["bytes"],
+            att_refused=len(refused),
+            # By ids and reason code only (A4, A8).
+            att_refused_parts=",".join(f"{r['message_id']}/{r['part_id']}:{r['reason']}" for r in refused) or None,
+        )
     # Last, and only once the run directory is in place: the history id the
     # next run starts from.
     write_state(staging, export["history_id"], run_id, now)
@@ -684,6 +950,7 @@ def run_pull(api: GmailApi, staging: Path, *, force_full: bool = False, now: dat
         "history": f"{export['base_history_id'] or '-'}->{export['history_id']}",
         "run_dir": str(run_dir) if run_dir else None,
         **{f"n_{k}": v for k, v in export["counts"].items()},
+        **att_counts,
     }
 
 
@@ -761,13 +1028,16 @@ def cmd_pull(args, staging: Path = STAGING_DIR, secrets_dir: Path | None = None)
         return code
     try:
         with _Lock(staging):
-            summary = run_pull(_build_api(creds), staging, force_full=args.full)
+            summary = run_pull(_build_api(creds), staging, force_full=args.full, attachments=args.attachments)
     except BlockingIOError:
         print("another gmail pull holds the staging lock; try again when it ends", file=sys.stderr)
         return EXIT_LOCKED
     except PullError as exc:
         print(f"pull failed (transport or API): {exc}; the stored history id is unchanged", file=sys.stderr)
         return gmail_auth.EXIT_TRANSPORT
+    except NoSpaceError as exc:
+        print(f"refused: {exc}; nothing written, the stored history id is unchanged", file=sys.stderr)
+        return EXIT_NO_SPACE
     print(render_summary(summary))
     return gmail_auth.EXIT_OK
 
@@ -775,6 +1045,11 @@ def cmd_pull(args, staging: Path = STAGING_DIR, secrets_dir: Path | None = None)
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--full", action="store_true", help="ignore the stored history id and pull everything")
+    parser.add_argument(
+        "--attachments",
+        action="store_true",
+        help="also fetch attachment content not fetched before (system_3 #11557); prints the estimate first",
+    )
     args = parser.parse_args(argv)
     return cmd_pull(args)
 
