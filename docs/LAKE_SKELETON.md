@@ -363,8 +363,12 @@ environment to the unencrypted root disk, and `docker inspect` shows it to the
 docker group (security c64754 on system_3 #8814).
 
 Healthy means the key is loaded. The explorer loads it in its startup hook,
-before it serves `/health`. A wrong key or fingerprint refuses to boot, and the
-verb exits non-zero and says how to bring the service back without a key.
+before it serves `/health`. A wrong key or fingerprint refuses to boot. The
+verb then deletes the key file and recreates `explorer-api` with decrypt off,
+with neither the key file nor the fingerprint in compose's environment. It
+prints one line saying the explorer is back with decrypt off, and still exits
+non-zero, because decrypt-on failed (system_3 #12202, security c75726). Before
+this, a mistyped key left the service stopped.
 
 **Decrypt does not survive a recreate.** After the verb, the key is only in the
 running container, never on the cell's disks, which is the custody rule of
@@ -374,7 +378,10 @@ metadata and refusing contents. Turning decrypt back on is always the operator
 running the verb again with the key. A restart of the same container cannot
 start either: its mount names the deleted file, and the mount uses
 `create_host_path: false`, so the restart fails with "no such file or
-directory" and creates nothing.
+directory" and creates nothing. The service then stays stopped (`Exited`) until
+a recreate: `docker compose --profile explorer up -d --force-recreate
+explorer-api` brings it back with decrypt off (system_3 #12202, where a recovery
+that does this on its own is the next step).
 
 Two side effects while decrypt is on, measured on the #10777 rig:
 - The mounted file stays readable inside the container until it stops, because

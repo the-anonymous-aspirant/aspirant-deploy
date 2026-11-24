@@ -1000,15 +1000,32 @@ case "${1:-}" in
     deploy_dir="${ASPIRANT_DEPLOY_DIR:-$SRC_DIR}"
     if ! (cd "$deploy_dir" && docker compose --profile explorer up -d --wait --wait-timeout 180 \
           --force-recreate --no-deps explorer-api); then
+      # A refused key must not leave the explorer down (system_3 #12202: a
+      # mistyped key stopped it for 18h, and every restart then failed on the
+      # deleted key file). Recover here, with decrypt off, under security's
+      # c75726 conditions: delete the key first, and recreate with neither
+      # LAKE_KEK_FILE_HOST nor LAKE_KEK_FINGERPRINT, so compose interpolates
+      # decrypt off and mounts /dev/null. The request still failed: exit 1.
       echo "explorer-api did not become healthy with the key (a wrong key or" \
-           "fingerprint refuses to boot). Without a key it comes back with decrypt" \
-           "off: (cd $deploy_dir && docker compose --profile explorer up -d" \
-           "--force-recreate explorer-api)" >&2
+           "fingerprint refuses to boot)." >&2
+      _cleanup_kek_file
+      if (cd "$deploy_dir" && env -u LAKE_KEK_FILE_HOST -u LAKE_KEK_FINGERPRINT \
+            docker compose --profile explorer up -d --wait --wait-timeout 180 \
+            --force-recreate --no-deps explorer-api); then
+        echo "explorer-api is back up with decrypt off. Run this verb again with the right key." >&2
+      else
+        echo "explorer-api did not come back with decrypt off either. By hand:" \
+             "(cd $deploy_dir && docker compose --profile explorer up -d" \
+             "--force-recreate explorer-api)" >&2
+      fi
       exit 1
     fi
     echo "explorer-api is up with decrypt-on-read. The staged key file is deleted now;"
-    echo "the key stays only in the running process. Any later recreate (a plain 'up',"
-    echo "an auto-pull) brings explorer-api back with decrypt off: run this verb again."
+    echo "the key stays only in the running process. A recreate (a plain 'up', an"
+    echo "auto-pull) brings explorer-api back with decrypt off: run this verb again."
+    echo "A restart (a crash, a daemon restart, a reboot) leaves it stopped, because"
+    echo "the key file is gone: bring it back with decrypt off by"
+    echo "(cd $deploy_dir && docker compose --profile explorer up -d --force-recreate explorer-api)."
     ;;
 
   status)
