@@ -110,7 +110,7 @@ scripts/lake-skeleton.sh rotate-explorer-ro  # new explorer_ro password (see "Ro
 scripts/lake-skeleton.sh explorer-decrypt-up  # recreate explorer-api able to decrypt (needs the KEK)
 scripts/lake-skeleton.sh status   # containers, published ports, disk use
 scripts/lake-skeleton.sh down     # stop, keep data
-scripts/lake-skeleton.sh destroy  # stop and delete every byte it owns
+scripts/lake-skeleton.sh destroy  # stop and delete every byte it owns; refuses real data (see Teardown)
 ```
 
 `up` is idempotent: it generates `garage.toml` and the credentials env-file only
@@ -607,6 +607,28 @@ changes, not only the first time.
 
 `destroy` uses `sudo rm -rf` on the scratch tree: Postgres and Garage write as
 their own container users, so the tree is not owned by the invoking user.
+
+**`destroy` refuses real data (system_3 #12471).** Since 2026-10-30 this tree
+holds the operator's real records (#11565), so the cycle above is for a
+skeleton of fixtures only. `destroy` checks before it stops anything:
+
+- The path must be the skeleton's own. It is resolved first, so a symlink
+  cannot redirect the delete. It must be at least two levels deep and off
+  `/data`, and it may hold only what the script creates (`catalog`, `config`,
+  `garage`, `promote-spool`, `lake-skeleton.env`, `deploy-env.bak-*` and the
+  marker below). Anything else is refused, with or without confirmation.
+- The data must be disposable. Either `garage/data` and `catalog` are empty,
+  or the tree carries `.fixtures-only`. `up` writes that marker only on a root
+  that did not exist, and every verb that can bring real data (`ingest`,
+  `promote`, `list-staged`, `link-gmail`, `explorer-env`,
+  `rotate-explorer-ro`, `explorer-decrypt-up`, and any verb added later)
+  removes it before it runs.
+- Otherwise it needs `LAKE_SKELETON_DESTROY_REAL_DATA=<the resolved path>`,
+  the exact path, so that "1" or "yes" cannot stand in for reading what is
+  about to go. Make a copy first.
+
+`tests/lake_skeleton_destroy_unit.sh` covers each case with a fake `docker`
+and a fake `sudo` that cannot delete outside its own temp directory.
 
 ---
 

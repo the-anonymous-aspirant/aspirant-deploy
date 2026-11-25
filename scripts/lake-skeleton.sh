@@ -21,11 +21,16 @@
 #                              recreate explorer-api with decrypt-on-read (#10777)
 #   lake-skeleton.sh status    show containers, published ports, and disk use
 #   lake-skeleton.sh down      stop the stack, keep the scratch data
-#   lake-skeleton.sh destroy   stop the stack and delete every byte it owns
+#   lake-skeleton.sh destroy   stop the stack and delete every byte it owns,
+#                              unless it may hold real data (system_3 #12471)
 #
-# `destroy` is the point, not an afterthought: under §11.0 this stack runs
-# before encryption exists, so its safety rests on being genuinely disposable.
-# If anything it wrote survives `destroy`, the guardrail has failed.
+# `destroy` was the point, not an afterthought: under §11.0 this stack ran
+# before encryption existed, so its safety rested on being genuinely
+# disposable. It is no longer disposable: since 2026-10-30 it holds the
+# operator's real records, the only copy on one unmirrored disk (#11565). So
+# `destroy` now clears only a skeleton that is empty or provably fixture-only,
+# and anything else only on an explicit, path-naming confirmation. See
+# destroy_check below.
 #
 # All state lives under $LAKE_SKELETON_ROOT (default /scratch/lake-skeleton) —
 # the scratch spindle, never /data, which is reserved for the real lake.
@@ -771,6 +776,118 @@ explorer_env_sync() {
   echo "next: recreate explorer-api (explorer-decrypt-up if it decrypts; see docs/LAKE_SKELETON.md)"
 }
 
+# --- destroy's guard (system_3 #12471, child 2 of #11565) -------------------
+#
+# `destroy` used to `sudo rm -rf "$ROOT"` unconditionally. Written for a
+# throwaway skeleton, it would now delete the lake's real data. It refuses
+# unless BOTH hold:
+#
+# 1. The path is the skeleton's own. ROOT is resolved first (a symlink cannot
+#    point the delete elsewhere), must be at least two levels deep (never `/`
+#    or a mount root such as /scratch or /lake), must not be on /data, and
+#    may hold nothing but what this script creates. A directory holding
+#    anything else is not the skeleton's, whatever the confirmation says.
+# 2. The data is disposable: the skeleton is empty (nothing in garage/data or
+#    catalog), or it carries the fixtures-only marker, or the operator names
+#    the resolved path in LAKE_SKELETON_DESTROY_REAL_DATA. The variable must
+#    equal the path exactly; "1" or "yes" is refused, so a habit cannot stand
+#    in for reading what is about to be deleted.
+#
+# The marker is written by `up` only when ROOT did not exist before it, and
+# removed before any verb that can bring real data runs (see
+# drop_fixtures_marker_for_verb). Its absence fails closed: a skeleton that
+# predates it, such as the one holding real data today, needs the
+# confirmation.
+FIXTURES_MARKER=".fixtures-only"
+DESTROY_CONFIRM_VAR="LAKE_SKELETON_DESTROY_REAL_DATA"
+
+# Prints the resolved ROOT on stdout and returns 0 when destroy may delete it;
+# prints why on stderr and returns 1 when it may not.
+destroy_check() {
+  local root entry name depth
+  root="$(realpath -m -- "$ROOT")" || { echo "refusing: cannot resolve $ROOT" >&2; return 1; }
+  case "$root" in
+    /data|/data/*)
+      echo "refusing: $root is on the real lake's volume (§11.0)" >&2
+      return 1
+      ;;
+  esac
+  depth="$(printf '%s' "$root" | tr -cd '/' | wc -c)"
+  if [ "$root" = "/" ] || [ "$depth" -lt 2 ]; then
+    echo "refusing: $root is not a skeleton directory (too near the filesystem root)" >&2
+    return 1
+  fi
+  if [ ! -e "$root" ]; then
+    printf '%s\n' "$root"
+    return 0
+  fi
+  if [ ! -d "$root" ]; then
+    echo "refusing: $root is not a directory" >&2
+    return 1
+  fi
+  for entry in "$root"/* "$root"/.[!.]* "$root"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    name="${entry##*/}"
+    case "$name" in
+      catalog|config|garage|promote-spool|lake-skeleton.env|deploy-env.bak-*|"$FIXTURES_MARKER") ;;
+      *)
+        echo "refusing: $root holds '$name', which lake-skeleton.sh did not create;" \
+             "this is not the skeleton's own directory, so nothing is deleted" >&2
+        return 1
+        ;;
+    esac
+  done
+  if ! skeleton_holds_data "$root"; then
+    printf '%s\n' "$root"
+    return 0
+  fi
+  if [ -f "$root/$FIXTURES_MARKER" ]; then
+    printf '%s\n' "$root"
+    return 0
+  fi
+  if [ "${!DESTROY_CONFIRM_VAR:-}" = "$root" ]; then
+    printf '%s\n' "$root"
+    return 0
+  fi
+  echo "refusing: $root may hold real data (it holds data and no fixtures-only marker)." >&2
+  echo "Nothing was stopped or deleted. To delete it anyway, rerun with" >&2
+  echo "  $DESTROY_CONFIRM_VAR=$root" >&2
+  echo "after making sure a copy exists (system_3 #11565)." >&2
+  return 1
+}
+
+# Whether garage/data or catalog holds anything. A directory that cannot be
+# listed counts as holding data: the check fails closed.
+skeleton_holds_data() {
+  local root="$1" dir found
+  for dir in "$root/garage/data" "$root/catalog"; do
+    [ -e "$dir" ] || continue
+    found="$(find "$dir" -mindepth 1 -print -quit 2>/dev/null)" || return 0
+    [ -n "$found" ] && return 0
+  done
+  return 1
+}
+
+# `up` on a ROOT that does not exist yet: the skeleton it creates holds only
+# what this script puts there, until a real-data verb runs.
+mark_fixtures_only_if_fresh() {
+  local was_fresh="$1"
+  if [ "$was_fresh" = "1" ]; then
+    printf 'Written by lake-skeleton.sh up on a fresh root; removed by any verb that can bring real data (system_3 #12471).\n' \
+      > "$ROOT/$FIXTURES_MARKER"
+  fi
+}
+
+# Every verb not known to write only fixtures or nothing drops the marker
+# BEFORE it runs, so a verb that fails half-way still leaves it dropped, and
+# a verb added later drops it without an edit here.
+drop_fixtures_marker_for_verb() {
+  case "${1:-}" in
+    ""|up|seed|verify|verify-at-rest|status|down|destroy) ;;
+    *) rm -f -- "$ROOT/$FIXTURES_MARKER" ;;
+  esac
+}
+
 # Test-mode escape hatch: source this file with ASPIRANT_LAKE_SKELETON_LIB=1 to
 # get the pure helpers without dispatching a verb. Mirrors the same hatch in
 # auto-pull.sh so the two test suites read alike.
@@ -789,9 +906,14 @@ if [ "${1:-}" != "seed" ]; then
   stage_real_kek
 fi
 
+drop_fixtures_marker_for_verb "${1:-}"
+
 case "${1:-}" in
   up)
+    root_was_fresh=0
+    [ -e "$ROOT" ] || root_was_fresh=1
     seed_config
+    mark_fixtures_only_if_fresh "$root_was_fresh"
     compose up -d garage catalog
     wait_healthy catalog
     # Garage reports unhealthy until its layout is applied, so bootstrap runs
@@ -1064,15 +1186,18 @@ case "${1:-}" in
     ;;
 
   destroy)
+    # The guard runs before anything is stopped: a refusal changes nothing.
+    destroy_root="$(destroy_check)" || exit 1
     compose down -v --remove-orphans || true
     # Postgres and Garage write as root/postgres inside the containers, so the
-    # scratch tree is not owned by the invoking user.
-    sudo rm -rf "$ROOT"
-    echo "destroyed: containers, volumes, and $ROOT"
+    # scratch tree is not owned by the invoking user. The resolved path, so
+    # the checked directory is the deleted one.
+    sudo rm -rf -- "$destroy_root"
+    echo "destroyed: containers, volumes, and $destroy_root"
     ;;
 
   *)
-    sed -n '3,23p' "${BASH_SOURCE[0]}"
+    sed -n '3,24p' "${BASH_SOURCE[0]}"
     exit 1
     ;;
 esac
