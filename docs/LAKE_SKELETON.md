@@ -380,8 +380,21 @@ start either: its mount names the deleted file, and the mount uses
 `create_host_path: false`, so the restart fails with "no such file or
 directory" and creates nothing. The service then stays stopped (`Exited`) until
 a recreate: `docker compose --profile explorer up -d --force-recreate
-explorer-api` brings it back with decrypt off (system_3 #12202, where a recovery
-that does this on its own is the next step).
+explorer-api` brings it back with decrypt off (system_3 #12202).
+
+So the verb creates the decrypt-on container with restart policy `no`
+(`EXPLORER_API_RESTART=no` on its one compose call) and the label
+`aspirant.explorer.decrypt=on`, which compose derives from the key mount's
+own variable (system_3 #12203, security c75726). After a crash or a reboot it
+stays exited rather than failing to restart, and a host-side unit can tell
+it apart from the plain container by the policy and the label together.
+Every other recreate, the verb's own recovery included, gets
+`unless-stopped` and an empty label. The verb holds
+`$XDG_RUNTIME_DIR/explorer-api-decrypt.lock` for its whole run, and refuses
+if something else holds it. The host-side unit that will bring the container
+back with decrypt off (system_3 #12207, the next PR) takes the same lock, so
+the two never recreate it at once. Until that unit is installed, the
+recovery after a crash or a reboot is still the recreate above.
 
 Two side effects while decrypt is on, measured on the #10777 rig:
 - The mounted file stays readable inside the container until it stops, because
