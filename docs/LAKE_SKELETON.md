@@ -391,10 +391,44 @@ it apart from the plain container by the policy and the label together.
 Every other recreate, the verb's own recovery included, gets
 `unless-stopped` and an empty label. The verb holds
 `$XDG_RUNTIME_DIR/explorer-api-decrypt.lock` for its whole run, and refuses
-if something else holds it. The host-side unit that will bring the container
-back with decrypt off (system_3 #12207, the next PR) takes the same lock, so
-the two never recreate it at once. Until that unit is installed, the
-recovery after a crash or a reboot is still the recreate above.
+if something else holds it.
+
+**Coming back with decrypt off on its own** (system_3 #12207).
+`scripts/explorer-decrypt-off-recover.sh` runs every minute from the
+operator's own crontab, on the host. It takes the verb's lock, and does
+nothing while the verb holds it. It reads four fields of `explorer-api` with
+`docker inspect --format`: status, exit code, restart policy and the label,
+never its environment. It acts only when the container has exited, its policy
+is `no` and its label is `on`. Then:
+1. It appends one line, `<UTC time> exit=<the container's exit code>`, to
+   `~/.local/state/aspirant/explorer-decrypt-off.log`, which the weekly
+   cell-health review reads. If the line cannot be written, it stops there,
+   so decrypt never goes off unrecorded.
+2. It runs the plain recreate, with none of the key's variables and no
+   `EXPLORER_API_RESTART`, so the service comes back with decrypt off and
+   `unless-stopped`.
+
+It never reads, stages or names a key, never calls `docker logs`, and runs no
+container of its own. Decrypt comes back only when the operator runs
+`explorer-decrypt-up` again. After a reboot the first tick finds the exited
+container. A tick that comes before dockerd or `/run/user/<uid>` is up exits
+non-zero, and the next one retries.
+
+A decrypt-on container stopped by hand (`docker stop`) looks the same to
+docker, so it too comes back with decrypt off at the next tick. To keep it
+down, remove it (`docker compose --profile explorer rm -s -f explorer-api`)
+or take the line out of the crontab.
+
+Install, as the `aspirant` user (an operator step, once):
+
+```bash
+mkdir -p ~/.local/state/aspirant
+( crontab -l 2>/dev/null; echo '* * * * * /home/aspirant/aspirant-deploy/scripts/explorer-decrypt-off-recover.sh >> /home/aspirant/.local/state/aspirant/explorer-decrypt-off-recover.cron.log 2>&1' ) | crontab -
+```
+
+Check: `crontab -l | grep explorer-decrypt-off-recover` shows the line. An
+idle tick prints nothing, so the cron log stays empty until a recovery or an
+error.
 
 Two side effects while decrypt is on, measured on the #10777 rig:
 - The mounted file stays readable inside the container until it stops, because
