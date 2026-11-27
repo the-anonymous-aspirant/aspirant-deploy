@@ -65,6 +65,13 @@ SOURCE_UNRECOGNISED = "defaulted:unrecognised"
 RETENTION_KEEP_FOREVER = "keep-forever"
 JURISDICTION_EU = "EU"
 
+# The synthetic fixtures' dataset id (#12521). It lives in the contract, not in
+# the seed, because two readers must agree on it: the seed, which writes it and
+# refuses to reseed over any other, and `verify`, which scopes its fixture-shape
+# checks to the rows carrying it. Prefixed like every other fake value so a
+# screenshot of the catalog never raises "wait, is that a real dataset?".
+SYNTHETIC_DATASET_ID = "SYNTHETIC — FAKE-DATASET-000"
+
 
 def resolve_sensitivity(declared):
     """Resolve a declared sensitivity to (sensitivity, sensitivity_source).

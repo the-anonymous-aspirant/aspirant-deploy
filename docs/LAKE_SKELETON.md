@@ -580,9 +580,19 @@ someone loading a real medical PDF on day one — it is realism creeping in one
 column at a time until a screenshot becomes ambiguous. A check that fails on
 unrecognised prose catches that; a code review of the fixture file does not.
 
-`verify` also asserts that every blob's bytes actually hash to its own key. A
+`verify` also asserts that every blob is stored at its own content address. A
 blob whose content does not match its content address would make provenance
-(§8.5) a lie, and the check is cheap.
+(§8.5) a lie, and the check is cheap. A plaintext blob must hash to its key. An
+encrypted blob is keyed by its *plaintext* digest but stored as ciphertext, so
+it must be keyed by its digest and carry the encrypted-object (`AOBJ`) header;
+`verify` reads only that header, and never decrypts.
+
+Once a lake holds real data beside the fixtures, the fixture-shape checks (one
+`sensitivity=high` row, dates in 2999) look only at the rows carrying the
+fixtures' dataset id, `catalog.SYNTHETIC_DATASET_ID`. The free-text guardrail
+cannot be scoped that way, because most of the tables it scans carry no
+`dataset_id`. So on such a lake it is skipped, with the reason, and prints no
+value (system_3 #12521). The checks live in `scripts/lake/skeleton_content.py`.
 
 Running `verify` on an **unseeded** stack skips the coverage block rather than
 failing it — the teardown drill exercises exactly that state.

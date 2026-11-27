@@ -99,9 +99,9 @@ PEOPLE = [
 # Dates are all in 2999: no real record can plausibly carry them.
 FAKE_YEAR = 2999
 
-# The fixtures' own dataset id. Prefixed like every other fake value so a
-# screenshot of the catalog never raises "wait, is that a real dataset?".
-SYNTHETIC_DATASET_ID = "SYNTHETIC — FAKE-DATASET-000"
+# The fixtures' own dataset id: the catalog contract's, which `verify` reads too
+# (#12521), so the two cannot drift.
+SYNTHETIC_DATASET_ID = catalog.SYNTHETIC_DATASET_ID
 
 
 # --------------------------------------------------------------------------
