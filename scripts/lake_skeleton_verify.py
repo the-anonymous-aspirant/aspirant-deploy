@@ -15,7 +15,6 @@ record — in a screenshot, in a database, or in a stack trace.
 Run it through the compose client profile: `scripts/lake-skeleton.sh verify`.
 """
 
-import hashlib
 import os
 import sys
 
@@ -26,6 +25,12 @@ import duckdb
 # below is the same object the loader writes, not a copy that drifts from it.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lake"))
 import catalog  # noqa: E402
+# The content checks, scoped to what each can answer on a lake that has moved
+# past the phase-0 fixtures (#12521). The encrypted-object header comes from the
+# envelope format itself (mounted at /work/kek), not a copy of its bytes.
+import skeleton_content  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "kek"))
+from dek_envelope import AOBJ_MAGIC  # noqa: E402
 
 BUCKET = os.environ["LAKE_S3_BUCKET"]
 ENDPOINT = os.environ["LAKE_S3_ENDPOINT"]
@@ -214,19 +219,28 @@ else:
         f"kinds: {sorted(kinds)}",
     )
 
-    # §2: sensitivity is a column, not a folder convention — so exactly one row
-    # differs only by that column, which is the case #2360 must handle.
-    high = con.execute("SELECT count(*) FROM asset_inventory WHERE sensitivity = 'high'").fetchone()[0]
-    check("A sensitivity=high row exists", high == 1, f"{high} high-sensitivity row(s)")
+    # #12521: the fixture-shape checks look at the fixture rows only; content
+    # addressing holds for every row, checked the way each row is stored; the
+    # free-text guardrail runs only on a fixtures-only lake, and never prints a
+    # value from a lake that holds real ones. See scripts/lake/skeleton_content.py.
+    FIXTURE_ID = catalog.SYNTHETIC_DATASET_ID
 
-    # Content-addressing must be true, not decorative: a blob whose bytes do not
-    # hash to its own key would make provenance (§8.5) a lie.
-    bad_hash = []
-    for digest, key in con.execute("SELECT sha256, object_key FROM asset_inventory").fetchall():
-        body = s3.get_object(Bucket=BUCKET, Key=key)["Body"].read()
-        if hashlib.sha256(body).hexdigest() != digest or not key.endswith(digest):
-            bad_hash.append(key)
-    check("Every blob's bytes hash to its own key", not bad_hash, f"{len(bad_hash)} mismatch(es)" if bad_hash else "all verified")
+    def report(result):
+        label, status, detail = result
+        if status == skeleton_content.SKIP:
+            print(f"[SKIP] {label} — {detail}")
+        else:
+            check(label, status == skeleton_content.PASS, detail)
+
+    report(skeleton_content.high_fixture_row(con, FIXTURE_ID))
+
+    # Content addressing must be true, not decorative: a blob not stored at its
+    # own content address would make provenance (§8.5) a lie.
+    def read_blob(key, nbytes):
+        extra = {"Range": f"bytes=0-{nbytes - 1}"} if nbytes else {}
+        return s3.get_object(Bucket=BUCKET, Key=key, **extra)["Body"].read()
+
+    report(skeleton_content.content_addressing(con, read_blob, AOBJ_MAGIC))
 
     # The guardrail check, and the one that must fail closed: every free-text
     # value in every fixture table has to be self-labelling. A field that does
@@ -246,31 +260,9 @@ else:
         # start failing this guardrail.
         catalog.SOURCE_DECLARED, catalog.SOURCE_DEFAULTED,
     }
-    leaks = []
-    for table in EXPECTED:
-        cols = con.execute(f"DESCRIBE lake.main.{table}").fetchall()
-        for col_name, col_type, *_ in cols:
-            if "VARCHAR" not in col_type:
-                continue
-            for (value,) in con.execute(
-                f"SELECT DISTINCT {col_name} FROM lake.main.{table} WHERE {col_name} IS NOT NULL"
-            ).fetchall():
-                v = str(value)
-                # Hashes, object keys and month strings are structural, not prose.
-                if v in ALLOWED_ENUMS or all(c in "0123456789abcdef" for c in v) or v.startswith("bronze/blobs/"):
-                    continue
-                if not any(m in v for m in MARKERS):
-                    leaks.append(f"{table}.{col_name}={v!r}")
-    check(
-        "No fixture value could be mistaken for operator data",
-        not leaks,
-        f"{len(leaks)} unlabelled value(s): {leaks[:3]}" if leaks else "every free-text value is self-labelling",
-    )
+    report(skeleton_content.self_labelling(con, FIXTURE_ID, EXPECTED, MARKERS, ALLOWED_ENUMS))
 
-    dates = con.execute(
-        "SELECT count(*) FROM asset_inventory WHERE date_part('year', ingested_at) <> 2999"
-    ).fetchone()[0]
-    check("Fixture dates are all in 2999", dates == 0, f"{dates} row(s) outside 2999")
+    report(skeleton_content.fixture_dates(con, FIXTURE_ID))
 
     # --- the phase-1 catalog contract (#4270 / #4238-A2) --------------------
     #
